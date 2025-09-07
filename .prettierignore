@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+dist/
+build/
+*.log
+coverage/
+worker-configuration.d.ts
+wrangler.jsonc

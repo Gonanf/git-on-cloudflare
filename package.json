@@ -1,0 +1,43 @@
+{
+  "name": "git-on-cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "test": "ava",
+    "test:workers": "vitest run --config vitest.config.ts",
+    "test:auth": "vitest run --config vitest.auth.config.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "cf-typegen": "wrangler types --strict-vars false"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "ava": "^6.1.2",
+    "@cloudflare/vitest-pool-workers": "^0.8.70",
+    "vitest": "^3.2.4",
+    "tsx": "^4.7.0",
+    "typescript": "^5.9.2",
+    "wrangler": "^4.34.0",
+    "prettier": "^3.3.3"
+  },
+  "dependencies": {
+    "isomorphic-git": "^1.33.1",
+    "itty-router": "^5.0.22"
+  },
+  "ava": {
+    "files": [
+      "test/**/*.test.ts",
+      "!test/**/*.worker.test.ts"
+    ],
+    "extensions": {
+      "ts": "module"
+    },
+    "nodeArguments": [
+      "--import=tsx"
+    ],
+    "timeout": "30s"
+  }
+}

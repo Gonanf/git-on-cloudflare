@@ -1,0 +1,51 @@
+import { AutoRouter } from "itty-router";
+import { renderTemplate, renderPage } from "./util/render";
+import { registerGitRoutes } from "./routes/git";
+import { registerAdminRoutes } from "./routes/admin";
+import { registerUiRoutes } from "./routes/ui";
+import { registerAuthRoutes } from "./routes/auth";
+
+// Router setup with itty-router AutoRouter
+const router = AutoRouter();
+// Register Git protocol routes (info/refs, upload-pack, receive-pack)
+registerGitRoutes(router);
+// Register Admin routes
+registerAdminRoutes(router);
+// Register Auth routes BEFORE UI to avoid /:owner shadowing /auth
+registerAuthRoutes(router);
+
+router.get("/", (request, env: Env) => {
+  const body = `<h1>git-on-cloudflare</h1><p>Smart HTTP v2 skeleton running. Try <code>/:owner/:repo/info/refs?service=git-upload-pack</code>.</p>`;
+  return renderPage(env, request, "git-on-cloudflare", body);
+});
+
+// Serve shared static assets (e.g., /base.css)
+router.get(`/base.css`, (request, env: Env) => {
+  if (env.ASSETS) {
+    return env.ASSETS.fetch(request);
+  }
+  return new Response("Not found\n", { status: 404 });
+});
+
+// Register UI routes AFTER static/auth so that /:owner doesn't shadow them
+registerUiRoutes(router);
+
+// Catch-all 404
+router.all("*", async (request, env: Env) => {
+  const page = await renderTemplate(env, request, "templates/404.html", {});
+  const body =
+    page ||
+    `<h1>Not Found</h1><p class="muted">The page you are looking for doesn't exist.</p><p><a class="btn" href="/">Go home</a></p>`;
+  const base = await renderPage(env, request, "404 · git-on-cloudflare", body);
+  // Wrap to set proper 404 status while preserving headers and body
+  return new Response(base.body, { status: 404, headers: base.headers });
+});
+
+export default {
+  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    return router.fetch(request, env, ctx);
+  },
+};
+
+export { RepoDurableObject } from "./repoDO";
+export { AuthDurableObject } from "./authDO";

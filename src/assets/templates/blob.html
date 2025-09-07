@@ -1,0 +1,11 @@
+<nav>
+  <a href="/{{ owner }}/{{ repo }}"><strong>{{ owner }}/{{ repo }}</strong></a>
+  <a href="/{{ owner }}/{{ repo }}/tree?ref={{ refEnc }}">Browse</a>
+  <a href="/{{ owner }}/{{ repo }}/commits?ref={{ refEnc }}">Commits</a>
+</nav>
+<h2>Blob: {{ title }}</h2>
+<p>
+  <a class="btn secondary" href="{{ viewRawHref }}">View raw</a>
+  <a class="btn" href="{{ rawHref }}">Download</a>
+</p>
+{{ contentHtml }}

@@ -1,0 +1,19 @@
+<nav>
+  <a href="/{{ owner }}/{{ repo }}"><strong>{{ owner }}/{{ repo }}</strong></a>
+  <a href="/{{ owner }}/{{ repo }}/tree?ref={{ refEnc }}">Browse</a>
+  <a href="/{{ owner }}/{{ repo }}/commits?ref={{ refEnc }}">Commits</a>
+</nav>
+<h2>Overview</h2>
+{{ progress }}
+<p class="muted">Default branch: <code>{{ refShort }}</code></p>
+<div class="grid">
+  <div>
+    <h3>Branches</h3>
+    {{ branches }}
+  </div>
+  <div>
+    <h3>Tags</h3>
+    {{ tags }}
+  </div>
+  {{ readme }}
+</div>

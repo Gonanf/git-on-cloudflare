@@ -1,0 +1,85 @@
+{
+  // Converted from wrangler.toml to wrangler.jsonc
+  "name": "git-on-cloudflare",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-06",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "git-on-cloudflare.com",
+      "custom_domain": true
+    }
+  ],
+  "limits": {
+    "cpu_ms": 300000
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REPO_DO",
+        "class_name": "RepoDurableObject"
+      },
+      {
+        "name": "AUTH_DO",
+        "class_name": "AuthDurableObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "RepoDurableObject"
+      ]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": [
+        "AuthDurableObject"
+      ]
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "OWNER_REGISTRY",
+      "id": "2e6769b1e1cf488d8055a7fb4ecbd0f3"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "REPO_BUCKET",
+      "bucket_name": "git-repos"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  },
+  // Static assets served from src/assets and accessible via env.ASSETS
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "src/assets",
+    // Prevent assets layer from mapping /auth -> auth.html (Worker should handle /auth)
+    "html_handling": "none"
+  },
+  // Environment variables (text/JSON)
+  "vars": {
+    // Repo DO maintenance windows (minutes)
+    "REPO_DO_IDLE_MINUTES": "30",
+    "REPO_DO_MAINT_MINUTES": "1440",
+    // Pack retention
+    "REPO_KEEP_PACKS": "3",
+    // Max number of recent pack entries to retain immediately after pushes
+    // (long-term retention will further trim to REPO_KEEP_PACKS during maintenance)
+    "REPO_PACKLIST_MAX": "20",
+    // Background unpack chunking
+    "REPO_UNPACK_CHUNK_SIZE": "25",
+    "REPO_UNPACK_MAX_MS": "1000",
+    "REPO_UNPACK_DELAY_MS": "500",
+    "REPO_UNPACK_BACKOFF_MS": "1000",
+    // Logging level: debug|info|warn|error
+    "LOG_LEVEL": "info"
+  }
+}
