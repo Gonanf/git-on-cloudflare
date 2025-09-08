@@ -1,4 +1,5 @@
 import type { HeadInfo, Ref } from "./repoEngine";
+import { parseCommitText } from "./git/commitParse";
 import { getRepoStub } from "./doUtil.ts";
 
 /**
@@ -71,12 +72,8 @@ export async function readCommit(
   const obj = await readLooseObjectRaw(env, repoId, oid);
   if (!obj || obj.type !== "commit") throw new Error("Not a commit");
   const text = new TextDecoder().decode(obj.payload);
-  const m = text.match(/^tree ([0-9a-f]{40})/m);
-  const tree = m ? m[1] : "";
-  const parents = [...text.matchAll(/^parent ([0-9a-f]{40})/gm)].map((x) => x[1]);
-  const msgIdx = text.indexOf("\n\n");
-  const message = msgIdx >= 0 ? text.slice(msgIdx + 2) : "";
-  return { tree, parents, message };
+  const parsed = parseCommitText(text);
+  return { tree: parsed.tree, parents: parsed.parents, message: parsed.message };
 }
 
 export interface CommitInfo {
@@ -92,30 +89,12 @@ export async function readCommitInfo(env: Env, repoId: string, oid: string): Pro
   const obj = await readLooseObjectRaw(env, repoId, oid);
   if (!obj || obj.type !== "commit") throw new Error("Not a commit");
   const text = new TextDecoder().decode(obj.payload);
-  const mTree = text.match(/^tree ([0-9a-f]{40})/m);
-  const tree = mTree ? mTree[1] : "";
-  const parents = [...text.matchAll(/^parent ([0-9a-f]{40})/gm)].map((x) => x[1]);
-  const authorLine = (text.match(/^author (.+)$/m) || [])[1];
-  const committerLine = (text.match(/^committer (.+)$/m) || [])[1];
-  const author = authorLine ? parseSignature(authorLine) : undefined;
-  const committer = committerLine ? parseSignature(committerLine) : undefined;
-  const msgIdx = text.indexOf("\n\n");
-  const message = msgIdx >= 0 ? text.slice(msgIdx + 2) : "";
+  const parsed = parseCommitText(text);
+  const { tree, parents, author, committer, message } = parsed;
   return { oid, tree, parents, author, committer, message };
 }
 
-function parseSignature(
-  sig: string
-): { name: string; email: string; when: number; tz: string } | undefined {
-  // Format: Name <email> 1694025600 +0000
-  const m = sig.match(/^(.*) <([^>]+)>\s+(\d+)\s+([+-]\d{4})$/);
-  if (!m) return undefined;
-  const name = m[1];
-  const email = m[2];
-  const when = parseInt(m[3], 10);
-  const tz = m[4];
-  return { name, email, when, tz };
-}
+// Signature parsing moved to ./git/commitParse and used via parseCommitText
 
 export async function listCommits(
   env: Env,

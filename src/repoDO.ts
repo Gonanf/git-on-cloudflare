@@ -15,6 +15,7 @@ import {
 import { receivePack } from "./do/receivePack";
 import { json, text, badRequest } from "./util/response";
 import { createLogger } from "./util/logger";
+import { parseCommitText } from "./git/commitParse";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -156,6 +157,13 @@ export class RepoDurableObject implements DurableObject {
         total: work.oids.length,
         percent: Math.round((work.processedCount / work.oids.length) * 100),
       });
+    }
+
+    // Batched commits listing (walk first-parent chain)
+    // GET /commits?start=<oid>&ref=<ref>&max=<n>
+    // Either provide a 40-hex `start` OID or a ref/branch/tag via `ref`.
+    if (url.pathname === "/commits" && request.method === "GET") {
+      return this.handleCommitsGet(url);
     }
 
     // Admin: reindex the latest pack from R2 into loose objects
@@ -433,6 +441,121 @@ export class RepoDurableObject implements DurableObject {
     const store = asTypedStorage<RepoStateSchema>(this.state.storage);
     await store.put("refs", payload);
     return text("OK\n");
+  }
+
+  /**
+   * GET /commits?start=<oid>&ref=<ref>&max=<n>&cursor=<oid>
+   * Returns up to `max` commits (default 25) starting from the provided commit OID/ref.
+   * If `cursor` is provided, it supersedes start/ref and is used as the starting commit.
+   * Walks the first-parent chain. Reads commit objects directly from DO storage when possible.
+   * Response shape: { items: CommitInfo[], next?: string }
+   */
+  private async handleCommitsGet(url: URL): Promise<Response> {
+    const maxRaw = Number(url.searchParams.get("max") || "25");
+    const clamp = (n: number, min: number, max: number) =>
+      Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : min;
+    const max = clamp(maxRaw, 1, 100);
+
+    // Resolve starting commit OID from either explicit `start` or a `ref` name
+    const cursor = url.searchParams.get("cursor");
+    let start = url.searchParams.get("start");
+    const ref = url.searchParams.get("ref");
+    if (cursor && /^[0-9a-f]{40}$/i.test(cursor)) {
+      start = cursor;
+    } else {
+      if ((!start || start === "") && ref) {
+        const resolved = await this.resolveRefLocal(ref);
+        start = resolved ?? null;
+      }
+      if (!start || !/^[0-9a-f]{40}$/i.test(start)) {
+        return badRequest("Missing or invalid start/ref\n");
+      }
+    }
+
+    const commits: Array<{
+      oid: string;
+      tree: string;
+      parents: string[];
+      author?: { name: string; email: string; when: number; tz: string };
+      committer?: { name: string; email: string; when: number; tz: string };
+      message: string;
+    }> = [];
+
+    const seen = new Set<string>();
+    let oid: string | undefined = (start as string).toLowerCase();
+    while (commits.length < max && oid && !seen.has(oid)) {
+      seen.add(oid);
+      const info = await this.readCommitFromStore(oid);
+      if (!info) break; // stop if object missing/unavailable yet
+      commits.push(info);
+      oid = info.parents[0]; // first-parent chain
+    }
+
+    return json({ items: commits, next: oid });
+  }
+
+  // Resolve a ref-ish locally using DO-stored refs without crossing the worker boundary
+  private async resolveRefLocal(refOrOid: string): Promise<string | undefined> {
+    if (/^[0-9a-f]{40}$/i.test(refOrOid)) return refOrOid.toLowerCase();
+    const refs = await this.getRefs();
+    // Fully qualified ref
+    if (refOrOid.startsWith("refs/")) {
+      const r = refs.find((x) => x.name === refOrOid);
+      return r?.oid?.toLowerCase();
+    }
+    // Try branches then tags
+    const c1 = refs.find((x) => x.name === `refs/heads/${refOrOid}`);
+    if (c1) return c1.oid.toLowerCase();
+    const c2 = refs.find((x) => x.name === `refs/tags/${refOrOid}`);
+    if (c2) return c2.oid.toLowerCase();
+    // Fall back to HEAD target
+    const head = (await asTypedStorage<RepoStateSchema>(this.state.storage).get("head")) as
+      | Head
+      | undefined;
+    if (head?.oid) return head.oid.toLowerCase();
+    return undefined;
+  }
+
+  // Read and parse a commit object directly from DO storage (fallback to R2 if needed)
+  private async readCommitFromStore(oid: string): Promise<{
+    oid: string;
+    tree: string;
+    parents: string[];
+    author?: { name: string; email: string; when: number; tz: string };
+    committer?: { name: string; email: string; when: number; tz: string };
+    message: string;
+  } | null> {
+    // Prefer DO-stored loose object to avoid R2/HTTP hops
+    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    let data = (await store.get(objKey(oid))) as ArrayBuffer | Uint8Array | undefined;
+
+    if (!data) {
+      // Fallback: try R2-stored loose copy
+      try {
+        const obj = await this.env.REPO_BUCKET.get(r2LooseKey(this.prefix(), oid));
+        if (obj) data = await obj.arrayBuffer();
+      } catch {}
+    }
+    if (!data) return null;
+
+    const z = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+    // Decompress (zlib/deflate) and parse git header
+    const ds = new DecompressionStream("deflate");
+    const stream = new Blob([z]).stream().pipeThrough(ds);
+    const raw = new Uint8Array(await new Response(stream).arrayBuffer());
+    // header: <type> <len>\0
+    let p = 0;
+    let sp = p;
+    while (sp < raw.length && raw[sp] !== 0x20) sp++;
+    const type = new TextDecoder().decode(raw.subarray(p, sp));
+    if (type !== "commit") return null;
+    let nul = sp + 1;
+    while (nul < raw.length && raw[nul] !== 0x00) nul++;
+    const payload = raw.subarray(nul + 1);
+    const text = new TextDecoder().decode(payload);
+
+    const parsed = parseCommitText(text);
+    return { oid, ...parsed };
   }
 
   /**

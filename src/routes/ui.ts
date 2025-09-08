@@ -1,9 +1,11 @@
 import { AutoRouter } from "itty-router";
 import { getHeadAndRefs, readPath, listCommits, readCommitInfo, readBlobStream } from "../gitRead";
+import type { CommitInfo } from "../gitRead";
 import { repoKey, getRepoStub } from "../doUtil";
 import { escapeHtml, detectBinary, formatSize, bytesToText, formatWhen } from "../util/format";
 import { renderTemplate, renderPage } from "../util/render";
 import { listReposForOwner } from "../util/ownerRegistry";
+import { buildCacheKeyFrom, cacheGetJSON, cachePutJSON } from "../util/cache";
 
 export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Owner repos list
@@ -316,7 +318,86 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     const repoId = repoKey(owner, repo);
     const u = new URL(request.url);
     const ref = u.searchParams.get("ref") || "main";
-    const commits = await listCommits(env, repoId, ref, 50);
+    const cursor = u.searchParams.get("cursor") || "";
+    const trailParam = u.searchParams.get("trail") || "";
+    const trail = trailParam
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter((s) => /^[0-9a-f]{40}$/i.test(s));
+    const perRaw = Number(u.searchParams.get("per_page") || "25");
+    const clamp = (n: number, min: number, max: number) =>
+      Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : min;
+    const perPage = clamp(perRaw, 10, 200);
+    // Fast path: ask the repo DO for a batched commit list to avoid many round-trips
+    let commits: CommitInfo[] = [];
+    let nextCursor: string | undefined;
+    const isFirstPage = !cursor;
+    // Attempt to serve from cache first
+    let headOid: string | undefined;
+    let isTagRef = false;
+    try {
+      if (isFirstPage) {
+        const { head, refs } = await getHeadAndRefs(env, repoId);
+        if (/^[0-9a-f]{40}$/i.test(ref)) {
+          headOid = ref.toLowerCase();
+        } else if (ref === "HEAD" && head?.target) {
+          const r = refs.find((x) => x.name === head.target);
+          headOid = r?.oid;
+          // treat HEAD as branch-like for TTL
+        } else if (ref.startsWith("refs/")) {
+          const r = refs.find((x) => x.name === ref);
+          headOid = r?.oid;
+          isTagRef = ref.startsWith("refs/tags/");
+        } else {
+          const rb = refs.find((x) => x.name === `refs/heads/${ref}`);
+          if (rb) {
+            headOid = rb.oid;
+          } else {
+            const rt = refs.find((x) => x.name === `refs/tags/${ref}`);
+            if (rt) {
+              headOid = rt.oid;
+              isTagRef = true;
+            }
+          }
+        }
+      }
+    } catch {}
+
+    const keyReq = buildCacheKeyFrom(request, "/_cache/commits", {
+      repo: repoId,
+      ref,
+      cursor: cursor || undefined,
+      per: String(perPage),
+      head: isFirstPage ? headOid : undefined,
+    });
+    try {
+      const cached = await cacheGetJSON<{ items: CommitInfo[]; next?: string }>(keyReq);
+      if (cached) {
+        commits = cached.items || [];
+        nextCursor = cached.next;
+      }
+    } catch {}
+    try {
+      if (commits.length === 0) {
+        const stub = getRepoStub(env, repoId);
+        const qp = new URLSearchParams({ ref, max: String(perPage) });
+        if (cursor) qp.set("cursor", cursor);
+        const doRes = await stub.fetch(`https://do/commits?${qp.toString()}`, { method: "GET" });
+        if (doRes.ok) {
+          const parsed = (await doRes.json()) as { items: CommitInfo[]; next?: string };
+          commits = parsed.items || [];
+          nextCursor = parsed.next;
+        } else {
+          commits = await listCommits(env, repoId, ref, perPage);
+        }
+        // Fill cache after fetch
+        const ttl = cursor ? 3600 : isTagRef || /^[0-9a-f]{40}$/i.test(ref) ? 3600 : 60;
+        await cachePutJSON(keyReq, { items: commits, next: nextCursor }, ttl);
+      }
+    } catch {
+      // Fallback to existing path on any error
+      if (commits.length === 0) commits = await listCommits(env, repoId, ref, perPage);
+    }
     const rows = commits
       .map((c) => {
         const subject = (c.message || "").split(/\r?\n/)[0] || "(no message)";
@@ -330,12 +411,51 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     </tr>`;
       })
       .join("");
+    let pager = "";
+    const baseQs = new URLSearchParams({ ref, per_page: String(perPage) });
+    // Determine current page start (first commit oid on page if available)
+    const currentStart = commits.length > 0 ? commits[0].oid : "";
+    // Newer (←) link based on trail stack
+    let newerHtml = "";
+    if (trail.length > 0) {
+      const prevCursor = trail[trail.length - 1];
+      const remainingTrail = trail.slice(0, -1);
+      if (remainingTrail.length === 0) {
+        // Back to first page (no cursor/trail)
+        const qs = new URLSearchParams(baseQs);
+        const newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
+        newerHtml = `<a class="btn sm secondary" href="${newerHref}">← Newer</a>`;
+      } else {
+        const qs = new URLSearchParams(baseQs);
+        qs.set("cursor", prevCursor);
+        qs.set("trail", remainingTrail.join(","));
+        const newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
+        newerHtml = `<a class="btn sm secondary" href="${newerHref}">← Newer</a>`;
+      }
+    }
+    // Older (→) link based on DO next cursor
+    let olderHtml = "";
+    if (nextCursor && currentStart) {
+      const nextQs = new URLSearchParams(baseQs);
+      nextQs.set("cursor", nextCursor);
+      const nextTrail = trail.concat([currentStart]).join(",");
+      if (nextTrail) nextQs.set("trail", nextTrail);
+      const nextHref = `/${owner}/${repo}/commits?${nextQs.toString()}`;
+      olderHtml = `<a class="btn sm" href="${nextHref}">Older →</a>`;
+    }
+    const perLinks = `<div class="perpage">Per page:
+        <a href="/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "25" }).toString()}">25</a>
+        <a href="/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "50" }).toString()}">50</a>
+        <a href="/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "100" }).toString()}">100</a>
+      </div>`;
+    pager = `<div class="pager">${perLinks}<div class="nav">${newerHtml}${olderHtml}</div></div>`;
     const page = await renderTemplate(env, request, "templates/commits.html", {
       owner: escapeHtml(owner),
       repo: escapeHtml(repo),
       ref: escapeHtml(ref),
       refEnc: encodeURIComponent(ref),
       rows: rows || '<tr><td colspan="4" class="muted">(none)</td></tr>',
+      pager,
     });
     const body =
       page ||
@@ -345,7 +465,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         ref
       )}">Commits</a></nav><h2>Commits on ${escapeHtml(
         ref
-      )}</h2><table><thead><tr><th>OID</th><th>Message</th><th>Author</th><th>Date</th></tr></thead><tbody>${
+      )}</h2>${pager}<table><thead><tr><th>OID</th><th>Message</th><th>Author</th><th>Date</th></tr></thead><tbody>${
         rows || '<tr><td colspan="4" class="muted">(none)</td></tr>'
       }</tbody></table>`;
     return renderPage(env, request, `${owner}/${repo} · Commits`, body);
