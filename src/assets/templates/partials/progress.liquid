@@ -1,0 +1,5 @@
+{% if progress and progress.unpacking and progress.total %}
+  <div class="alert warn">
+    📦 Unpacking objects: {{ progress.processed }}/{{ progress.total }} ({{ progress.percent }}%)
+  </div>
+{% endif %}

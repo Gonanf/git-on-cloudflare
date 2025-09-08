@@ -1,4 +1,6 @@
 import { escapeHtml } from "./format";
+import { renderView } from "./templates";
+export { renderView };
 
 /**
  * Load a static asset via Wrangler [assets]
@@ -57,9 +59,10 @@ export async function renderPage(
   title: string,
   bodyHtml: string
 ): Promise<Response> {
-  const doc = await renderTemplate(env, req, "templates/layout.html", {
+  // Render Liquid layout, injecting content as raw HTML
+  const doc = await renderView(env, "layout", {
     title: escapeHtml(title),
-    body: bodyHtml,
+    content: bodyHtml,
   });
   if (doc)
     return new Response(doc, {

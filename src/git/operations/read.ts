@@ -404,51 +404,6 @@ export async function readLooseObjectRaw(
 ): Promise<{ type: string; payload: Uint8Array } | undefined> {
   const oidLc = oid.toLowerCase();
 
-  // Helper function to load from Durable Object state
-  const loadFromState = async (): Promise<{ type: string; payload: Uint8Array } | undefined> => {
-    try {
-      const stub = getRepoStub(env, repoId);
-      const res = await stub.fetch(`https://do/obj/${oidLc}`, { method: "GET" });
-      if (res.ok) {
-        const z = new Uint8Array(await res.arrayBuffer());
-        const ds = createInflateStream();
-        const stream = new Blob([z]).stream().pipeThrough(ds);
-        const raw = new Uint8Array(await new Response(stream).arrayBuffer());
-        // header: <type> <len>\0
-        let p = 0;
-        let sp = p;
-        while (sp < raw.length && raw[sp] !== 0x20) sp++;
-        const type = new TextDecoder().decode(raw.subarray(p, sp));
-        let nul = sp + 1;
-        while (nul < raw.length && raw[nul] !== 0x00) nul++;
-        const payload = raw.subarray(nul + 1);
-        return { type, payload };
-      }
-    } catch {}
-    return undefined;
-  };
-
-  // Use cache helper if cache context is available
-  if (cacheCtx) {
-    const cacheKey = buildObjectCacheKey(cacheCtx.req, repoId, oidLc);
-    return cacheOrLoad(
-      cacheKey,
-      async () => {
-        // Try loose object via DO first (preferred)
-        const stateResult = await loadFromState();
-        if (stateResult) return stateResult;
-
-        // If DO fetch fails, try R2 packs (fallback logic below)
-        return await loadFromPacks();
-      },
-      cacheCtx.ctx
-    );
-  }
-
-  // No request available, load without caching
-  const stateResult = await loadFromState();
-  if (stateResult) return stateResult;
-
   // Helper function to load from packs
   const loadFromPacks = async () => {
     try {
@@ -522,6 +477,51 @@ export async function readLooseObjectRaw(
       return undefined;
     }
   };
+
+  // Helper function to load from Durable Object state
+  const loadFromState = async (): Promise<{ type: string; payload: Uint8Array } | undefined> => {
+    try {
+      const stub = getRepoStub(env, repoId);
+      const res = await stub.fetch(`https://do/obj/${oidLc}`, { method: "GET" });
+      if (res.ok) {
+        const z = new Uint8Array(await res.arrayBuffer());
+        const ds = createInflateStream();
+        const stream = new Blob([z]).stream().pipeThrough(ds);
+        const raw = new Uint8Array(await new Response(stream).arrayBuffer());
+        // header: <type> <len>\0
+        let p = 0;
+        let sp = p;
+        while (sp < raw.length && raw[sp] !== 0x20) sp++;
+        const type = new TextDecoder().decode(raw.subarray(p, sp));
+        let nul = sp + 1;
+        while (nul < raw.length && raw[nul] !== 0x00) nul++;
+        const payload = raw.subarray(nul + 1);
+        return { type, payload };
+      }
+    } catch {}
+    return undefined;
+  };
+
+  // Use cache helper if cache context is available
+  if (cacheCtx) {
+    const cacheKey = buildObjectCacheKey(cacheCtx.req, repoId, oidLc);
+    return cacheOrLoad(
+      cacheKey,
+      async () => {
+        // Try loose object via DO first (preferred)
+        const stateResult = await loadFromState();
+        if (stateResult) return stateResult;
+
+        // If DO fetch fails, try R2 packs (fallback logic below)
+        return await loadFromPacks();
+      },
+      cacheCtx.ctx
+    );
+  }
+
+  // No request available, load without caching
+  const stateResult = await loadFromState();
+  if (stateResult) return stateResult;
 
   // Fallback: read directly from R2 packs
   return await loadFromPacks();

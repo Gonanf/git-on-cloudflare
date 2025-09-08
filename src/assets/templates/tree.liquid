@@ -1,0 +1,51 @@
+{% layout 'layout' %}
+{% block %}
+{% render 'repo_nav', owner: owner, repo: repo, refEnc: refEnc %}
+{% render 'progress', progress: progress %}
+<h2>Tree</h2>
+{% if breadcrumbs %}
+  <nav class="breadcrumb">
+    {% if parentHref %}
+      <a
+        href="{{ parentHref }}"
+        class="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+        >..</a
+      >
+      <span class="text-gray-400">/</span>
+    {% endif %}
+    {% for crumb in breadcrumbs %}
+      {% if crumb.href %}
+        <a href="{{ crumb.href }}">{{ crumb.name }}</a>
+        {% unless forloop.last %} / {% endunless %}
+      {% else %}
+        <strong>{{ crumb.name }}</strong>
+      {% endif %}
+    {% endfor %}
+  </nav>
+{% endif %}
+<table class="mt-4 rounded-lg overflow-hidden shadow-xs border border-gray-200 dark:border-gray-700">
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>OID</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% if entries and entries.size > 0 %}
+      {% for entry in entries %}
+        <tr>
+          <td>
+            {% if entry.isDir %}📁{% else %}📄{% endif %}
+            <a href="{{ entry.href }}">{{ entry.name }}</a>
+          </td>
+          <td class="muted">{{ entry.shortOid }}</td>
+        </tr>
+      {% endfor %}
+    {% else %}
+      <tr>
+        <td class="muted" colspan="2">(empty)</td>
+      </tr>
+    {% endif %}
+  </tbody>
+</table>
+{% endblock %}

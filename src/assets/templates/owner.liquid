@@ -1,0 +1,18 @@
+{% layout 'layout' %}
+{% block %}
+<h2>{{ owner }}</h2>
+<h3>Repositories</h3>
+<div class="list">
+  {% if repos and repos.size > 0 %}
+    {% for r in repos %}
+      <div>
+        <a href="/{{ owner }}/{{ r }}"
+          ><strong>{{ owner }}</strong>/{{ r -}}
+        </a>
+      </div>
+    {% endfor %}
+  {% else %}
+    <div class="muted">No repositories</div>
+  {% endif %}
+</div>
+{% endblock %}

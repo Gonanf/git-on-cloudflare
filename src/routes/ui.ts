@@ -16,9 +16,9 @@ import {
   formatSize,
   bytesToText,
   formatWhen,
-  renderTemplate,
   renderPage,
-  getUnpackProgressHtml,
+  getUnpackProgress,
+  renderView,
 } from "@/web";
 import { listReposForOwner } from "@/registry";
 import {
@@ -34,17 +34,20 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   router.get(`/:owner`, async (request, env: Env) => {
     const { owner } = request.params as { owner: string };
     const repos = await listReposForOwner(env, owner);
-    const rows =
-      repos
-        .map((r) => `<div><a href="/${owner}/${r}"><strong>${owner}</strong>/${r}</a></div>`)
-        .join("") || '<div class="muted">No repositories</div>';
-    const page = await renderTemplate(env, request, "templates/owner.html", {
+    // Prefer Liquid template rendering (auto-escaped, loops/conditionals)
+    const page = await renderView(env, "owner", {
+      title: `${owner} · Repositories`,
       owner,
-      rows,
+      repos,
     });
-    const body =
-      page || `<nav><a href="/">Home</a></nav><h2>${owner}</h2><h3>Repositories</h3>${rows}`;
-    return renderPage(env, request, `${owner} · Repositories`, body);
+    if (!page) throw new Error("Failed to render owner template");
+    return new Response(page, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "X-Page-Renderer": "liquid-layout",
+      },
+    });
   });
   // Repo overview page
   router.get(`/:owner/:repo`, async (request, env: Env, ctx: ExecutionContext) => {
@@ -80,28 +83,25 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     const defaultRef = head?.target || (refs[0]?.name ?? "refs/heads/main");
     const refShort = defaultRef.replace(/^refs\/(heads|tags)\//, "");
     const refEnc = encodeURIComponent(refShort);
-    const branches = refs
+    // Format branches and tags as structured data
+    const branchesData = refs
       .filter((r) => r.name.startsWith("refs/heads/"))
-      .map((r) => r.name.replace("refs/heads/", ""));
-    const tags = refs
+      .map((b) => {
+        const short = b.name.replace("refs/heads/", "");
+        return {
+          name: encodeURIComponent(short),
+          displayName: short.length > 30 ? short.slice(0, 27) + "..." : short,
+        };
+      });
+    const tagsData = refs
       .filter((r) => r.name.startsWith("refs/tags/"))
-      .map((r) => r.name.replace("refs/tags/", ""));
-    const branchesHtml = branches.length
-      ? branches
-          .map(
-            (b) =>
-              `<div><a href="/${owner}/${repo}/tree?ref=${encodeURIComponent(b)}">${escapeHtml(b)}</a></div>`
-          )
-          .join("")
-      : '<div class="muted">No branches</div>';
-    const tagsHtml = tags.length
-      ? tags
-          .map(
-            (t) =>
-              `<div><a href="/${owner}/${repo}/tree?ref=${encodeURIComponent(t)}">${escapeHtml(t)}</a></div>`
-          )
-          .join("")
-      : '<div class="muted">No tags</div>';
+      .map((t) => {
+        const short = t.name.replace("refs/tags/", "");
+        return {
+          name: encodeURIComponent(short),
+          displayName: short.length > 30 ? short.slice(0, 27) + "..." : short,
+        };
+      });
 
     // Try to load README at repo root on default branch with caching
     let readmeHtml = "";
@@ -150,28 +150,27 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     }
 
     // Check unpacking progress (shared helper)
-    const progressHtml = await getUnpackProgressHtml(env, repoId);
+    const progress = await getUnpackProgress(env, repoId);
 
-    const page = await renderTemplate(env, request, "templates/overview.html", {
-      owner: escapeHtml(owner),
-      repo: escapeHtml(repo),
-      refShort: escapeHtml(refShort),
+    const page = await renderView(env, "overview", {
+      title: `${owner}/${repo}`,
+      owner,
+      repo,
+      refShort,
       refEnc: refEnc,
-      branches: branchesHtml,
-      tags: tagsHtml,
+      branches: branchesData,
+      tags: tagsData,
       readme: readmeHtml,
-      progress: progressHtml,
+      progress,
     });
-    const body =
-      page ||
-      `<nav>
-    <a href="/${owner}/${repo}"><strong>${owner}/${repo}</strong></a>
-    <a href="/${owner}/${repo}/tree?ref=${refEnc}">Browse</a>
-    <a href="/${owner}/${repo}/commits?ref=${refEnc}">Commits</a>
-  </nav><h2>Overview</h2><p class="muted">Default branch: <code>${escapeHtml(
-    refShort
-  )}</code></p><div class="grid"><div><h3>Branches</h3>${branchesHtml}</div><div><h3>Tags</h3>${tagsHtml}</div></div>${readmeHtml}`;
-    return renderPage(env, request, `${owner}/${repo} · Overview`, body);
+    if (!page) throw new Error("Failed to render overview template");
+    return new Response(page, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "X-Page-Renderer": "liquid-layout",
+      },
+    });
   });
 
   // Tree/Blob browser using query params: ?ref=<branch|tag|oid>&path=<path>
@@ -208,91 +207,117 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         await cachePutJSON(cacheKeyTree, result, ttl);
       }
       if (result.type === "tree") {
-        const rows = result.entries
-          .map((e: TreeEntry) => {
-            const isDir = e.mode.startsWith("40000");
-            const nextPath = (path ? path + "/" : "") + e.name;
-            const href = isDir
-              ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(nextPath)}`
-              : `/${owner}/${repo}/blob?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(nextPath)}`;
-            return `<tr><td>${isDir ? "📁" : "📄"}</td><td><a href="${href}">${e.name}</a></td><td class="muted"><code>${e.oid.slice(0, 7)}</code></td></tr>`;
-          })
-          .join("");
-        // Breadcrumbs + Up link (use slashes, avoid double between root and first segment)
-        let up = "";
-        const parts = path.split("/").filter(Boolean);
-        const rootLink = `<a href="/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}">/</a>`;
-        let acc = "";
-        const segs: string[] = [];
-        for (let i = 0; i < parts.length; i++) {
-          const p = parts[i];
-          acc = acc ? acc + "/" + p : p;
-          const delim = i === 0 ? " " : " / ";
-          segs.push(
-            `${delim}<a href="/${owner}/${repo}/tree?ref=${encodeURIComponent(
-              ref
-            )}&path=${encodeURIComponent(acc)}">${escapeHtml(p)}</a>`
-          );
+        // Format tree entries as structured data
+        let entries: Array<{
+          name: string;
+          href: string;
+          isDir: boolean;
+          shortOid: string;
+          size: string;
+        }> = [];
+        if (result.type === "tree" && result.entries) {
+          // Helper to determine if entry is a directory based on git mode
+          const isDirectory = (mode: string) => mode.startsWith("40000");
+
+          const sorted = result.entries.sort((a: TreeEntry, b: TreeEntry) => {
+            const aIsDir = isDirectory(a.mode);
+            const bIsDir = isDirectory(b.mode);
+            if (aIsDir !== bIsDir) return aIsDir ? -1 : 1;
+            return a.name.localeCompare(b.name);
+          });
+          entries = sorted.map((e: TreeEntry) => {
+            const isDir = isDirectory(e.mode);
+            return {
+              name: e.name,
+              href: isDir
+                ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(
+                    (path ? path + "/" : "") + e.name
+                  )}`
+                : `/${owner}/${repo}/blob?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(
+                    (path ? path + "/" : "") + e.name
+                  )}`,
+              isDir,
+              shortOid: e.oid ? e.oid.slice(0, 7) : "",
+              size: "", // Size not available in tree entries, would need separate lookup
+            };
+          });
         }
-        const crumbHtml = `<div class="muted path">${rootLink}${segs.join("")}</div>`;
-        if (parts.length > 0) {
-          const parent = parts.slice(0, -1).join("/");
-          const parentHref = `/${owner}/${repo}/tree?ref=${encodeURIComponent(
-            ref
-          )}&path=${encodeURIComponent(parent)}`;
-          up = `${crumbHtml}<div><a class="btn secondary" href="${parentHref}">⬆️ Up</a></div>`;
-        } else {
-          up = crumbHtml;
-        }
-        const progress = await getUnpackProgressHtml(env, repoId);
-        const page = await renderTemplate(env, request, "templates/tree.html", {
-          owner: escapeHtml(owner),
-          repo: escapeHtml(repo),
+        // Generate breadcrumbs and parent link
+        const parts = (path || "").split("/").filter(Boolean);
+        // Truncate ref if too long (e.g., commit hashes)
+        const refDisplay = ref.length > 20 ? ref.slice(0, 7) + "..." : ref;
+        const breadcrumbs = [
+          {
+            name: refDisplay,
+            href: parts.length > 0 ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}` : null,
+          },
+          ...parts.map((part, i) => {
+            const subPath = parts.slice(0, i + 1).join("/");
+            const isLast = i === parts.length - 1;
+            return {
+              name: part,
+              href: isLast
+                ? null
+                : `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(subPath)}`,
+            };
+          }),
+        ];
+        const parentHref =
+          parts.length > 0
+            ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(parts.slice(0, -1).join("/"))}`
+            : null;
+        const progress = await getUnpackProgress(env, repoId);
+        const page = await renderView(env, "tree", {
+          title: `${path || "root"} · ${owner}/${repo}`,
+          owner,
+          repo,
           refEnc: encodeURIComponent(ref),
           progress,
-          up,
-          rows: rows || '<tr><td class="muted" colspan="3">(empty)</td></tr>',
+          breadcrumbs,
+          parentHref,
+          entries,
         });
-        const body =
-          page ||
-          `<nav><a href="/${owner}/${repo}"><strong>${owner}/${repo}</strong></a> <a href="/${owner}/${repo}/tree?ref=${encodeURIComponent(
-            ref
-          )}">Browse</a> <a href="/${owner}/${repo}/commits?ref=${encodeURIComponent(
-            ref
-          )}">Commits</a></nav><h2>Tree</h2>${progress}${up}<table><tbody>${
-            rows || '<tr><td class="muted" colspan="3">(empty)</td></tr>'
-          }</tbody></table>`;
-        return renderPage(env, request, `${owner}/${repo} · Tree`, body);
+        if (!page) throw new Error("Failed to render tree template");
+        return new Response(page, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "X-Page-Renderer": "liquid-layout",
+          },
+        });
       } else {
         const raw = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}`;
         const text = bytesToText(result.content);
         const title = path || result.oid;
-        const page = await renderTemplate(env, request, "templates/blob.html", {
-          owner: escapeHtml(owner),
-          repo: escapeHtml(repo),
+        const page = await renderView(env, "blob", {
+          title: `${title} · ${owner}/${repo}`,
+          owner,
+          repo,
           refEnc: encodeURIComponent(ref),
-          title: escapeHtml(title),
+          fileName: title,
+          viewRawHref: `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(title)}`,
           rawHref: raw,
-          content: escapeHtml(text),
+          contentHtml: `<pre>${escapeHtml(text)}</pre>`,
         });
-        const body =
-          page ||
-          `<nav><a href="/${owner}/${repo}"><strong>${owner}/${repo}</strong></a> <a href="/${owner}/${repo}/tree?ref=${encodeURIComponent(
-            ref
-          )}">Browse</a> <a href="/${owner}/${repo}/commits?ref=${encodeURIComponent(
-            ref
-          )}">Commits</a></nav><h2>Blob: ${escapeHtml(
-            title
-          )}</h2><p><a class="btn" href="${raw}">Download raw</a></p><pre>${escapeHtml(text)}</pre>`;
-        return renderPage(env, request, `${owner}/${repo} · Blob`, body);
+        if (!page) throw new Error("Failed to render blob template");
+        return new Response(page, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "X-Page-Renderer": "liquid-layout",
+          },
+        });
       }
     } catch (e: any) {
       // Error path: include unpack progress banner so users understand transient states
       const refEnc = encodeURIComponent(ref);
-      const progress = await getUnpackProgressHtml(env, repoId);
+      const progress = await getUnpackProgress(env, repoId);
+      const progressHtml = progress
+        ? `<div class="alert warn">📦 Unpacking objects: ${progress.processed}/${progress.total} (${progress.percent}%)</div>`
+        : "";
       const body = `<nav><a href="/${owner}/${repo}"><strong>${owner}/${repo}</strong></a> <a href="/${owner}/${repo}/tree?ref=${refEnc}">Browse</a> <a href="/${owner}/${repo}/commits?ref=${refEnc}">Commits</a></nav>
       <h2>Tree</h2>
-      ${progress}
+      ${progressHtml}
       <div class="alert warn">Unable to browse${path ? `: ${escapeHtml(path)}` : ""}</div>
       <pre>${escapeHtml(String(e?.message || e))}</pre>`;
       return renderPage(env, request, `${owner}/${repo} · Tree`, body);
@@ -331,17 +356,24 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           result.size || 0
         )}). <a href="${viewRawHref}">View raw</a></div>`;
         const title = fileName;
-        const page = await renderTemplate(env, request, "templates/blob.html", {
-          owner: escapeHtml(owner),
-          repo: escapeHtml(repo),
+        const page = await renderView(env, "blob", {
+          title: `${fileName} · ${owner}/${repo}`,
+          owner,
+          repo,
           refEnc: encodeURIComponent(ref),
-          title: escapeHtml(title),
+          fileName: fileName,
           viewRawHref,
           rawHref,
           contentHtml,
         });
-        const body = page || `<div>File too large</div>`;
-        return renderPage(env, request, `${owner}/${repo} · Blob`, body);
+        if (!page) throw new Error("Failed to render blob template");
+        return new Response(page, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "X-Page-Renderer": "liquid-layout",
+          },
+        });
       }
 
       // Size and binary checks for loaded content
@@ -377,25 +409,24 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           : `<pre><code>${escapeHtml(text)}</code></pre>`;
       }
       const title = fileName;
-      const page = await renderTemplate(env, request, "templates/blob.html", {
-        owner: escapeHtml(owner),
-        repo: escapeHtml(repo),
+      const page = await renderView(env, "blob", {
+        title: `${fileName} · ${owner}/${repo}`,
+        owner,
+        repo,
         refEnc: encodeURIComponent(ref),
-        title: escapeHtml(title),
+        fileName: fileName,
         viewRawHref,
         rawHref,
         contentHtml,
       });
-      const body =
-        page ||
-        `<nav><a href="/${owner}/${repo}"><strong>${owner}/${repo}</strong></a> <a href="/${owner}/${repo}/tree?ref=${encodeURIComponent(
-          ref
-        )}">Browse</a> <a href="/${owner}/${repo}/commits?ref=${encodeURIComponent(
-          ref
-        )}">Commits</a></nav><h2>Blob: ${escapeHtml(
-          title
-        )}</h2><p><a class="btn secondary" href="${viewRawHref}">View raw</a> <a class="btn" href="${rawHref}">Download</a></p>${contentHtml}`;
-      return renderPage(env, request, `${owner}/${repo} · Blob`, body);
+      if (!page) throw new Error("Failed to render blob template");
+      return new Response(page, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          "X-Page-Renderer": "liquid-layout",
+        },
+      });
     } catch (e: any) {
       return new Response(`<h2>Error</h2><pre>${escapeHtml(String(e?.message || e))}</pre>`, {
         headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -496,77 +527,79 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
 
     commits = result?.items || [];
     nextCursor = result?.next;
-    const rows = commits
-      .map((c) => {
-        const subject = (c.message || "").split(/\r?\n/)[0] || "(no message)";
-        const short = c.oid.slice(0, 7);
-        const when = c.author ? formatWhen(c.author.when, c.author.tz) : "";
-        return `<tr>
-      <td><code>${short}</code></td>
-      <td><a href="/${owner}/${repo}/commit/${c.oid}">${escapeHtml(subject)}</a></td>
-      <td class="muted">${escapeHtml(c.author?.name || "")}</td>
-      <td class="muted">${escapeHtml(when)}</td>
-    </tr>`;
-      })
-      .join("");
-    let pager = "";
+    // Transform commits to structured data for template
+    const commitsData = commits.map((c) => ({
+      oid: c.oid,
+      shortOid: c.oid.slice(0, 7),
+      firstLine: c.message.split("\n")[0],
+      authorName: c.author?.name || "",
+      when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
+    }));
+    // Build pager data structure
     const baseQs = new URLSearchParams({ ref, per_page: String(perPage) });
-    // Determine current page start (first commit oid on page if available)
     const currentStart = commits.length > 0 ? commits[0].oid : "";
-    // Newer (←) link based on trail stack
-    let newerHtml = "";
+
+    let newerHref: string | null = null;
     if (trail.length > 0) {
       const prevCursor = trail[trail.length - 1];
       const remainingTrail = trail.slice(0, -1);
       if (remainingTrail.length === 0) {
-        // Back to first page (no cursor/trail)
         const qs = new URLSearchParams(baseQs);
-        const newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
-        newerHtml = `<a class="btn sm secondary" href="${newerHref}">← Newer</a>`;
+        newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
       } else {
         const qs = new URLSearchParams(baseQs);
         qs.set("cursor", prevCursor);
         qs.set("trail", remainingTrail.join(","));
-        const newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
-        newerHtml = `<a class="btn sm secondary" href="${newerHref}">← Newer</a>`;
+        newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
       }
     }
-    // Older (→) link based on DO next cursor
-    let olderHtml = "";
+
+    let olderHref: string | null = null;
     if (nextCursor && currentStart) {
       const nextQs = new URLSearchParams(baseQs);
       nextQs.set("cursor", nextCursor);
       const nextTrail = trail.concat([currentStart]).join(",");
       if (nextTrail) nextQs.set("trail", nextTrail);
-      const nextHref = `/${owner}/${repo}/commits?${nextQs.toString()}`;
-      olderHtml = `<a class="btn sm" href="${nextHref}">Older →</a>`;
+      olderHref = `/${owner}/${repo}/commits?${nextQs.toString()}`;
     }
-    const perLinks = `<div class="perpage">Per page:
-        <a href="/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "25" }).toString()}">25</a>
-        <a href="/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "50" }).toString()}">50</a>
-        <a href="/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "100" }).toString()}">100</a>
-      </div>`;
-    pager = `<div class="pager">${perLinks}<div class="nav">${newerHtml}${olderHtml}</div></div>`;
-    const page = await renderTemplate(env, request, "templates/commits.html", {
-      owner: escapeHtml(owner),
-      repo: escapeHtml(repo),
-      ref: escapeHtml(ref),
+
+    const pager = {
+      perPageLinks: [
+        {
+          href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "25" }).toString()}`,
+          text: "25",
+        },
+        {
+          href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "50" }).toString()}`,
+          text: "50",
+        },
+        {
+          href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "100" }).toString()}`,
+          text: "100",
+        },
+      ],
+      newerHref,
+      olderHref,
+    };
+    const progress = await getUnpackProgress(env, repoId);
+    const page = await renderView(env, "commits", {
+      title: `Commits · ${owner}/${repo}`,
+      owner,
+      repo,
+      ref,
       refEnc: encodeURIComponent(ref),
-      rows: rows || '<tr><td colspan="4" class="muted">(none)</td></tr>',
+      commits: commitsData,
       pager,
+      progress,
     });
-    const body =
-      page ||
-      `<nav><a href="/${owner}/${repo}"><strong>${owner}/${repo}</strong></a> <a href="/${owner}/${repo}/tree?ref=${encodeURIComponent(
-        ref
-      )}">Browse</a> <a href="/${owner}/${repo}/commits?ref=${encodeURIComponent(
-        ref
-      )}">Commits</a></nav><h2>Commits on ${escapeHtml(
-        ref
-      )}</h2>${pager}<table><thead><tr><th>OID</th><th>Message</th><th>Author</th><th>Date</th></tr></thead><tbody>${
-        rows || '<tr><td colspan="4" class="muted">(none)</td></tr>'
-      }</tbody></table>`;
-    return renderPage(env, request, `${owner}/${repo} · Commits`, body);
+    if (!page) throw new Error("Failed to render commits template");
+    return new Response(page, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "X-Page-Renderer": "liquid-layout",
+      },
+    });
   });
 
   // Commit details
@@ -580,39 +613,27 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       const parents = c.parents
         .map((p) => `<a href="/${owner}/${repo}/commit/${p}">${p.slice(0, 7)}</a>`)
         .join(", ");
-      const page = await renderTemplate(env, request, "templates/commit.html", {
-        owner: escapeHtml(owner),
-        repo: escapeHtml(repo),
+      const page = await renderView(env, "commit", {
+        title: `${c.oid.slice(0, 7)} · ${owner}/${repo}`,
+        owner,
+        repo,
         refEnc: encodeURIComponent(c.oid),
-        commitShort: escapeHtml(c.oid.slice(0, 7)),
-        authorName: escapeHtml(c.author?.name || ""),
-        authorEmail: escapeHtml(c.author?.email || ""),
-        when: escapeHtml(when),
+        commitShort: c.oid.slice(0, 7),
+        authorName: c.author?.name || "",
+        authorEmail: c.author?.email || "",
+        when: when,
         parents: parents || '<span class="muted">(none)</span>',
-        treeShort: escapeHtml(c.tree.slice(0, 7)),
-        message: escapeHtml(c.message),
+        treeShort: c.tree.slice(0, 7),
+        message: c.message,
       });
-      const body =
-        page ||
-        `<nav><a href="/${owner}/${repo}"><strong>${owner}/${repo}</strong></a> <a href="/${owner}/${repo}/tree?ref=${encodeURIComponent(
-          c.oid
-        )}">Browse</a> <a href="/${owner}/${repo}/commits?ref=${encodeURIComponent(
-          c.oid
-        )}">Commits</a></nav><h2>Commit ${escapeHtml(
-          c.oid.slice(0, 7)
-        )}</h2><p><strong>Author:</strong> ${escapeHtml(c.author?.name || "")} &lt;${escapeHtml(
-          c.author?.email || ""
-        )}&gt; <span class="muted">${escapeHtml(
-          when
-        )}</span></p><p><strong>Parents:</strong> ${parents || '<span class="muted">(none)</span>'}</p><p><strong>Tree:</strong> <a href="/${owner}/${repo}/tree?ref=${encodeURIComponent(
-          c.oid
-        )}">${escapeHtml(c.tree.slice(0, 7))}</a></p><pre>${escapeHtml(c.message)}</pre>`;
-      return renderPage(
-        env,
-        request,
-        `${owner}/${repo} · Commit ${escapeHtml(c.oid.slice(0, 7))}`,
-        body
-      );
+      if (!page) throw new Error("Failed to render commit template");
+      return new Response(page, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          "X-Page-Renderer": "liquid-layout",
+        },
+      });
     } catch (e: any) {
       return new Response(`<h2>Error</h2><pre>${escapeHtml(String(e?.message || e))}</pre>`, {
         headers: { "Content-Type": "text/html; charset=utf-8" },

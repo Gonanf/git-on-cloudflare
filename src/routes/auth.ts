@@ -1,21 +1,37 @@
 import { AutoRouter } from "itty-router";
-import { loadAsset, renderPage } from "@/web";
+import { renderView, renderPage } from "@/web";
 import { getAuthStub } from "@/common";
 
 export function registerAuthRoutes(router: ReturnType<typeof AutoRouter>) {
   // Auth UI page
   router.get(`/auth`, async (request: any, env: Env) => {
-    const body =
-      (await loadAsset(env, "templates/auth.html", request as Request)) ||
-      `<h1>Auth</h1><p>Auth page asset missing.</p>`;
+    const html = await renderView(env, "auth", {});
+    if (html) {
+      return new Response(html, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          "X-Page-Renderer": "liquid-layout",
+        },
+      });
+    }
+    const body = `<h1>Auth</h1><p>Auth page asset missing.</p>`;
     return renderPage(env, request as Request, "Auth · git-on-cloudflare", body);
   });
 
   // Trailing slash alias
   router.get(`/auth/`, async (request: any, env: Env) => {
-    const body =
-      (await loadAsset(env, "templates/auth.html", request as Request)) ||
-      `<h1>Auth</h1><p>Auth page asset missing.</p>`;
+    const html = await renderView(env, "auth", {});
+    if (html) {
+      return new Response(html, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          "X-Page-Renderer": "liquid-layout",
+        },
+      });
+    }
+    const body = `<h1>Auth</h1><p>Auth page asset missing.</p>`;
     return renderPage(env, request as Request, "Auth · git-on-cloudflare", body);
   });
 

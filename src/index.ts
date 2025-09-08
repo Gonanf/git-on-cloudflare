@@ -1,5 +1,5 @@
 import { AutoRouter } from "itty-router";
-import { renderTemplate, renderPage } from "./web";
+import { renderTemplate, renderPage, renderView } from "./web";
 import { registerGitRoutes } from "./routes/git";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerUiRoutes } from "./routes/ui";
@@ -32,10 +32,18 @@ registerUiRoutes(router);
 
 // Catch-all 404
 router.all("*", async (request, env: Env) => {
-  const page = await renderTemplate(env, request, "templates/404.html", {});
-  const body =
-    page ||
-    `<h1>Not Found</h1><p class="muted">The page you are looking for doesn't exist.</p><p><a class="btn" href="/">Go home</a></p>`;
+  const html = await renderView(env, "404", {});
+  if (html) {
+    return new Response(html, {
+      status: 404,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "X-Page-Renderer": "liquid-layout",
+      },
+    });
+  }
+  const body = `<h1>Not Found</h1><p class="muted">The page you are looking for doesn't exist.</p><p><a class="btn" href="/">Go home</a></p>`;
   const base = await renderPage(env, request, "404 · git-on-cloudflare", body);
   // Wrap to set proper 404 status while preserving headers and body
   return new Response(base.body, { status: 404, headers: base.headers });

@@ -1,0 +1,52 @@
+{% layout 'layout' %}
+{% block %}
+{% render 'repo_nav', owner: owner, repo: repo, refEnc: refEnc %}
+{% render 'progress', progress: progress %}
+<h2>Commits on {{ ref }}</h2>
+{% if pager %}
+  <div class="pager">
+    <div class="perpage">
+      Per page:
+      {% for link in pager.perPageLinks %}
+        <a href="{{ link.href }}">{{ link.text }}</a>
+      {% endfor %}
+    </div>
+    <div class="nav">
+      {% if pager.newerHref %}
+        <a class="btn sm secondary" href="{{ pager.newerHref }}">← Newer</a>
+      {% endif %}
+      {% if pager.olderHref %}
+        <a class="btn sm" href="{{ pager.olderHref }}">Older →</a>
+      {% endif %}
+    </div>
+  </div>
+{% endif %}
+<table class="mt-4 rounded-lg overflow-hidden shadow-xs border border-gray-200 dark:border-gray-700">
+  <thead>
+    <tr>
+      <th>OID</th>
+      <th>Message</th>
+      <th>Author</th>
+      <th>Date</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% if commits and commits.size > 0 %}
+      {% for commit in commits %}
+        <tr>
+          <td>
+            <a href="/{{ owner }}/{{ repo }}/commit/{{ commit.oid }}">{{ commit.shortOid }}</a>
+          </td>
+          <td>{{ commit.firstLine }}</td>
+          <td class="muted">{{ commit.authorName }}</td>
+          <td class="muted">{{ commit.when }}</td>
+        </tr>
+      {% endfor %}
+    {% else %}
+      <tr>
+        <td colspan="4" class="muted">(none)</td>
+      </tr>
+    {% endif %}
+  </tbody>
+</table>
+{% endblock %}
