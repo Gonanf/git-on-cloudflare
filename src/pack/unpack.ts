@@ -1,6 +1,6 @@
 import * as git from "isomorphic-git";
 
-import { asTypedStorage, RepoStateSchema, objKey, packOidsKey } from "../doState";
+import { asTypedStorage, type RepoStateSchema, objKey, packOidsKey } from "../doState.ts";
 import {
   r2LooseKey,
   packIndexKey,
@@ -9,7 +9,7 @@ import {
   packKeyFromIndexKey,
   isPackKey,
 } from "../keys.ts";
-import { createLogger } from "../util/logger";
+import { createLogger } from "../util/logger.ts";
 
 /**
  * Index a pack file quickly without unpacking objects.
@@ -275,21 +275,52 @@ export async function encodeGitObjectAndDeflate(
 
 /**
  * Creates a minimal in-memory filesystem for isomorphic-git operations.
- * Only implements the necessary methods for indexing and reading objects from pack files.
- * Supports both promise-based and callback-based APIs for compatibility.
  *
- * @param files Backing map for file contents keyed by normalized path
+ * Responsibilities
+ * - Provide just enough of an FS for isomorphic-git to parse PACK/IDX files we load into memory.
+ * - Optionally lazy-load loose objects via `opts.looseLoader(oid)` when isomorphic-git dereferences
+ *   paths like `/git/objects/aa/bb...` that are not present in `files` (useful for thin deltas and
+ *   connectivity checks that need bases not contained in the current pack).
+ * - Normalize all paths so that any `.../objects/pack/*` or `.../objects/*` map under `/git/...`.
+ * - Support both Promise-based and Node-style callback APIs via lightweight wrappers.
+ *
+ * Path conventions
+ * - PACK/IDX bytes should be placed at `/git/objects/pack/<name>.pack|.idx`.
+ * - Some isomorphic-git flows address temporary paths under `/work/` — we map those back to
+ *   `/git/objects/pack/*` to keep a single source of truth in-memory.
+ *
+ * @param files Backing map for file contents keyed by normalized path (see above)
+ * @param opts Optional behavior toggles; `looseLoader` returns zlib-compressed loose bytes for an OID
  * @returns A Node-like fs object with `promises` and callback-style methods sufficient for isomorphic-git
  */
-export function createMemPackFs(files: Map<string, Uint8Array>) {
+export function createMemPackFs(
+  files: Map<string, Uint8Array>,
+  opts?: { looseLoader?: (oid: string) => Promise<Uint8Array | undefined> }
+) {
+  // Internal helper to resolve a normalized path from the in-memory map or via the optional loose loader
+  async function resolveFromMapOrLoose(p: string): Promise<Uint8Array | undefined> {
+    let buf = files.get(p);
+    if (!buf && p.startsWith("/work/")) {
+      const base = p.substring("/work/".length);
+      buf = files.get(`/git/objects/pack/${base}`);
+    }
+    if (!buf && opts?.looseLoader) {
+      const m = p.match(/^\/git\/objects\/([0-9a-f]{2})\/([0-9a-f]{38})$/i);
+      if (m) {
+        const oid = (m[1] + m[2]).toLowerCase();
+        const z = await opts.looseLoader(oid);
+        if (z) {
+          files.set(p, z);
+          buf = z;
+        }
+      }
+    }
+    return buf;
+  }
   const promises = {
     async readFile(path: string) {
       const p = normalize(path);
-      let buf = files.get(p);
-      if (!buf && p.startsWith("/work/")) {
-        const base = p.substring("/work/".length);
-        buf = files.get(`/git/objects/pack/${base}`);
-      }
+      const buf = await resolveFromMapOrLoose(p);
       if (!buf)
         throw Object.assign(new Error(`ENOENT: no such file, open '${p}'`), { code: "ENOENT" });
       return buf;
@@ -302,11 +333,7 @@ export function createMemPackFs(files: Map<string, Uint8Array>) {
     async stat(path: string) {
       const p = normalize(path);
       if (isDir(p)) return mkDirStat();
-      let buf = files.get(p);
-      if (!buf && p.startsWith("/work/")) {
-        const base = p.substring("/work/".length);
-        buf = files.get(`/git/objects/pack/${base}`);
-      }
+      const buf = await resolveFromMapOrLoose(p);
       if (!buf) {
         throw Object.assign(new Error(`ENOENT: no such file, stat '${p}'`), { code: "ENOENT" });
       }

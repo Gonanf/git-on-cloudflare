@@ -1,6 +1,9 @@
 import type { HeadInfo, Ref } from "./repoEngine";
-import { parseCommitText } from "./git/commitParse";
+import { parseCommitText } from "./git/commitParse.ts";
 import { getRepoStub } from "./doUtil.ts";
+import * as git from "isomorphic-git";
+import { createMemPackFs } from "./pack/unpack.ts";
+import { packIndexKey } from "./keys.ts";
 
 /**
  * Fetch HEAD and refs for a repository from its Durable Object.
@@ -377,20 +380,94 @@ export async function readLooseObjectRaw(
   repoId: string,
   oid: string
 ): Promise<{ type: string; payload: Uint8Array } | undefined> {
-  const stub = getRepoStub(env, repoId);
-  const res = await stub.fetch(`https://do/obj/${oid}`, { method: "GET" });
-  if (!res.ok) return undefined;
-  const z = new Uint8Array(await res.arrayBuffer());
-  const ds = new DecompressionStream("deflate");
-  const stream = new Blob([z]).stream().pipeThrough(ds);
-  const raw = new Uint8Array(await new Response(stream).arrayBuffer());
-  // header: <type> <len>\0
-  let p = 0;
-  let sp = p;
-  while (sp < raw.length && raw[sp] !== 0x20) sp++;
-  const type = new TextDecoder().decode(raw.subarray(p, sp));
-  let nul = sp + 1;
-  while (nul < raw.length && raw[nul] !== 0x00) nul++;
-  const payload = raw.subarray(nul + 1);
-  return { type, payload };
+  const oidLc = oid.toLowerCase();
+  // Try loose object via DO first (preferred)
+  try {
+    const stub = getRepoStub(env, repoId);
+    const res = await stub.fetch(`https://do/obj/${oidLc}`, { method: "GET" });
+    if (res.ok) {
+      const z = new Uint8Array(await res.arrayBuffer());
+      const ds = new DecompressionStream("deflate");
+      const stream = new Blob([z]).stream().pipeThrough(ds);
+      const raw = new Uint8Array(await new Response(stream).arrayBuffer());
+      // header: <type> <len>\0
+      let p = 0;
+      let sp = p;
+      while (sp < raw.length && raw[sp] !== 0x20) sp++;
+      const type = new TextDecoder().decode(raw.subarray(p, sp));
+      let nul = sp + 1;
+      while (nul < raw.length && raw[nul] !== 0x00) nul++;
+      const payload = raw.subarray(nul + 1);
+      return { type, payload };
+    }
+  } catch {}
+
+  // Fallback: read directly from R2 packs using isomorphic-git. Prefer the latest pack,
+  // but search recent packs via DO metadata if needed to locate the OID efficiently.
+  try {
+    const stub = getRepoStub(env, repoId);
+    // Get recent packs recorded by the DO
+    const packsRes = await stub.fetch("https://do/packs", { method: "GET" });
+    const packList: string[] = packsRes.ok
+      ? ((await packsRes.json()) as { keys: string[] }).keys || []
+      : [];
+    // Fallback to just latest if packs list is unavailable
+    if (packList.length === 0) {
+      const metaRes = await stub.fetch("https://do/pack-latest", { method: "GET" });
+      if (!metaRes.ok) return undefined;
+      const meta = (await metaRes.json()) as { key: string } | null;
+      if (!meta?.key) return undefined;
+      packList.push(meta.key);
+    }
+
+    // Prefer the pack that contains the OID, but load multiple packs to satisfy deltas
+    let chosenPackKey: string | undefined;
+    const contains: Record<string, boolean> = {};
+    for (const key of packList) {
+      try {
+        const oidsRes = await stub.fetch(`https://do/pack-oids?key=${encodeURIComponent(key)}`);
+        if (!oidsRes.ok) continue;
+        const data = (await oidsRes.json()) as { key: string; oids: string[] };
+        const set = new Set((data.oids || []).map((x) => x.toLowerCase()));
+        const has = set.has(oidLc);
+        contains[key] = has;
+        if (!chosenPackKey && has) chosenPackKey = key;
+      } catch {}
+    }
+    if (!chosenPackKey) chosenPackKey = packList[0];
+
+    // Load up to the first 5 packs (newest-first) into the in-memory fs
+    const toLoad = packList.slice(0, Math.min(5, packList.length));
+    if (!toLoad.includes(chosenPackKey)) toLoad.unshift(chosenPackKey);
+    const seenKeys = new Set<string>();
+    const uniqueLoad = toLoad.filter((k) => (seenKeys.has(k) ? false : (seenKeys.add(k), true)));
+    const files = new Map<string, Uint8Array>();
+    await Promise.all(
+      uniqueLoad.map(async (key) => {
+        try {
+          const [p, i] = await Promise.all([
+            env.REPO_BUCKET.get(key),
+            env.REPO_BUCKET.get(packIndexKey(key)),
+          ]);
+          if (!p || !i) return;
+          const packBuf = new Uint8Array(await p.arrayBuffer());
+          const idxBuf = new Uint8Array(await i.arrayBuffer());
+          const base = key.split("/").pop()!;
+          const idxBase = base.replace(/\.pack$/i, ".idx");
+          files.set(`/git/objects/pack/${base}`, packBuf);
+          files.set(`/git/objects/pack/${idxBase}`, idxBuf);
+        } catch {}
+      })
+    );
+    if (files.size === 0) return undefined;
+    const fs = createMemPackFs(files);
+    const dir = "/git";
+    const result = (await git.readObject({ fs, dir, oid: oidLc, format: "content" })) as {
+      object: Uint8Array;
+      type: "blob" | "tree" | "commit" | "tag";
+    };
+    return { type: result.type, payload: result.object };
+  } catch {
+    return undefined;
+  }
 }

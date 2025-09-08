@@ -33,6 +33,8 @@ import { parseCommitText } from "./git/commitParse";
  *   - `PUT /obj/<oid>` — put loose object (write DO + mirror to R2)
  *   - `GET /pack-latest`, `GET /packs`, `GET /pack-oids?key=...` — metadata for pack assembly
  *   - `POST /receive` — receive-pack implementation (delegates to do/receivePack.ts)
+ *   - `GET /debug-state` — diagnostic state dump (refs, head, packs, sample loose)
+ *   - `GET /debug-check?commit=<oid>` — check commit/tree presence across storage and packs
  *
  * Read Path
  * - Loose object reads hit `GET /obj/<oid>`.
@@ -157,6 +159,16 @@ export class RepoDurableObject implements DurableObject {
         total: work.oids.length,
         percent: Math.round((work.processedCount / work.oids.length) * 100),
       });
+    }
+
+    // Debug: dump durable object state
+    if (url.pathname === "/debug-state" && request.method === "GET") {
+      return this.handleDebugState();
+    }
+
+    // Debug: check a specific commit/tree presence
+    if (url.pathname === "/debug-check" && request.method === "GET") {
+      return this.handleDebugCheck(url);
     }
 
     // Batched commits listing (walk first-parent chain)
@@ -673,6 +685,92 @@ export class RepoDurableObject implements DurableObject {
     await unpackPackToLoose(bytes, this.state, this.env, this.prefix(), key);
     this.logger.info("reindex:done", { key });
     return text("OK\n");
+  }
+
+  // ---- Debug helpers ----
+  private async handleDebugState(): Promise<Response> {
+    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const refs = ((await store.get("refs")) as { name: string; oid: string }[] | undefined) ?? [];
+    const head = (await store.get("head")) as Head | undefined;
+    const lastPackKey = (await store.get("lastPackKey")) as string | undefined;
+    const lastPackOids = ((await store.get("lastPackOids")) as string[] | undefined) ?? [];
+    const packList = ((await store.get("packList")) as string[] | undefined) ?? [];
+    const unpackWork = (await store.get("unpackWork")) as UnpackWork | undefined;
+
+    // Sample a few loose object keys to avoid large payloads
+    const looseSample: string[] = [];
+    try {
+      const it = await this.state.storage.list({ prefix: "obj:", limit: 10 });
+      for (const k of it.keys()) looseSample.push(String(k).slice(4));
+    } catch {}
+
+    return json({
+      meta: { doId: this.state.id.toString(), prefix: this.prefix() },
+      head,
+      refsCount: refs.length,
+      refs: refs.slice(0, 20),
+      lastPackKey: lastPackKey || null,
+      lastPackOidsCount: lastPackOids.length,
+      packListCount: packList.length,
+      packList,
+      unpackWork: unpackWork || null,
+      looseSample,
+    });
+  }
+
+  private async handleDebugCheck(url: URL): Promise<Response> {
+    const q = url.searchParams;
+    const commit = (q.get("commit") || "").toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(commit)) return badRequest("Missing or invalid commit\n");
+
+    // Check pack membership via stored indices first
+    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const packList = ((await store.get("packList")) as string[] | undefined) ?? [];
+    const membership: Record<string, { hasCommit: boolean; hasTree: boolean }> = {};
+    for (const key of packList) {
+      try {
+        const oids = ((await store.get(packOidsKey(key))) as string[] | undefined) ?? [];
+        const set = new Set(oids.map((x) => x.toLowerCase()));
+        membership[key] = { hasCommit: set.has(commit), hasTree: false };
+      } catch {}
+    }
+
+    // Try to read commit to discover its tree; ok if it fails
+    let tree: string | undefined = undefined;
+    let parents: string[] = [];
+    try {
+      const info = await this.readCommitFromStore(commit);
+      if (info) {
+        tree = info.tree.toLowerCase();
+        parents = info.parents;
+      }
+    } catch {}
+
+    // Presence checks for loose objects
+    const hasLooseCommit = !!(await this.state.storage.get(objKey(commit)));
+    let hasLooseTree = false;
+    let hasR2LooseTree = false;
+    if (tree) {
+      hasLooseTree = !!(await this.state.storage.get(objKey(tree)));
+      try {
+        const head = await this.env.REPO_BUCKET.head(r2LooseKey(this.prefix(), tree));
+        hasR2LooseTree = !!head;
+      } catch {}
+      // Update membership.hasTree using discovered tree
+      for (const key of Object.keys(membership)) {
+        try {
+          const oids = ((await store.get(packOidsKey(key))) as string[] | undefined) ?? [];
+          const set = new Set(oids.map((x) => x.toLowerCase()));
+          membership[key].hasTree = !!tree && set.has(tree);
+        } catch {}
+      }
+    }
+
+    return json({
+      commit: { oid: commit, parents, tree },
+      presence: { hasLooseCommit, hasLooseTree, hasR2LooseTree },
+      membership,
+    });
   }
 
   private async handleObjGet(oid: string, method: string): Promise<Response> {

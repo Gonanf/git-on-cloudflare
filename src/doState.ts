@@ -7,8 +7,6 @@ export type PackOidsKey = `packOids:${string}`;
 export type Ref = { name: string; oid: string };
 export type Head = { target: string; oid?: string; unborn?: boolean };
 
-export type PushLock = { token: string; timestamp: number };
-
 export type UnpackWork = {
   packKey: string;
   oids: string[];
@@ -22,7 +20,6 @@ export type RepoStateSchema = {
   lastPackKey: string;
   lastPackOids: string[];
   packList: string[];
-  pushLock: string | PushLock; // Support both legacy string and new format
   lastAccessMs: number;
   lastMaintenanceMs: number;
   unpackWork: UnpackWork | undefined; // Pending unpack work

@@ -6,6 +6,7 @@ import { escapeHtml, detectBinary, formatSize, bytesToText, formatWhen } from ".
 import { renderTemplate, renderPage } from "../util/render";
 import { listReposForOwner } from "../util/ownerRegistry";
 import { buildCacheKeyFrom, cacheGetJSON, cachePutJSON } from "../util/cache";
+import { getUnpackProgressHtml } from "../util/progress";
 
 export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Owner repos list
@@ -75,22 +76,8 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       }
     } catch {}
 
-    // Check unpacking progress
-    const stub = getRepoStub(env, repoId);
-    const progressRes = await stub.fetch("https://do/unpack-progress", { method: "GET" });
-    const progress = progressRes.ok
-      ? ((await progressRes.json()) as {
-          unpacking: boolean;
-          processed?: number;
-          total?: number;
-          percent?: number;
-        })
-      : { unpacking: false };
-
-    let progressHtml = "";
-    if (progress.unpacking && progress.total) {
-      progressHtml = `<div class="alert warn">📦 Unpacking objects: ${progress.processed}/${progress.total} (${progress.percent}%)</div>`;
-    }
+    // Check unpacking progress (shared helper)
+    const progressHtml = await getUnpackProgressHtml(env, repoId);
 
     const page = await renderTemplate(env, request, "templates/overview.html", {
       owner: escapeHtml(owner),
@@ -160,10 +147,12 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         } else {
           up = crumbHtml;
         }
+        const progress = await getUnpackProgressHtml(env, repoId);
         const page = await renderTemplate(env, request, "templates/tree.html", {
           owner: escapeHtml(owner),
           repo: escapeHtml(repo),
           refEnc: encodeURIComponent(ref),
+          progress,
           up,
           rows: rows || '<tr><td class="muted" colspan="3">(empty)</td></tr>',
         });
@@ -173,7 +162,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
             ref
           )}">Browse</a> <a href="/${owner}/${repo}/commits?ref=${encodeURIComponent(
             ref
-          )}">Commits</a></nav><h2>Tree</h2>${up}<table><tbody>${
+          )}">Commits</a></nav><h2>Tree</h2>${progress}${up}<table><tbody>${
             rows || '<tr><td class="muted" colspan="3">(empty)</td></tr>'
           }</tbody></table>`;
         return renderPage(env, request, `${owner}/${repo} · Tree`, body);
@@ -201,10 +190,15 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         return renderPage(env, request, `${owner}/${repo} · Blob`, body);
       }
     } catch (e: any) {
-      return new Response(`<h2>Error</h2><pre>${escapeHtml(String(e?.message || e))}</pre>`, {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-        status: 500,
-      });
+      // Error path: include unpack progress banner so users understand transient states
+      const refEnc = encodeURIComponent(ref);
+      const progress = await getUnpackProgressHtml(env, repoId);
+      const body = `<nav><a href="/${owner}/${repo}"><strong>${owner}/${repo}</strong></a> <a href="/${owner}/${repo}/tree?ref=${refEnc}">Browse</a> <a href="/${owner}/${repo}/commits?ref=${refEnc}">Commits</a></nav>
+      <h2>Tree</h2>
+      ${progress}
+      <div class="alert warn">Unable to browse${path ? `: ${escapeHtml(path)}` : ""}</div>
+      <pre>${escapeHtml(String(e?.message || e))}</pre>`;
+      return renderPage(env, request, `${owner}/${repo} · Tree`, body);
     }
   });
 

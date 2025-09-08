@@ -120,4 +120,35 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     const ct = (request as Request).headers.get("Content-Type") || "application/json";
     return stub.fetch("https://do/head", { method: "PUT", body, headers: { "Content-Type": ct } });
   });
+
+  // Debug: dump DO state (JSON)
+  router.get(`/:owner/:repo/admin/debug-state`, async (request, env: Env) => {
+    const { owner, repo } = request.params as { owner: string; repo: string };
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return new Response("Unauthorized\n", {
+        status: 401,
+        headers: { "WWW-Authenticate": 'Basic realm="Git", charset="UTF-8"' },
+      });
+    }
+    const stub = getRepoStub(env, repoKey(owner, repo));
+    return stub.fetch("https://do/debug-state", { method: "GET" });
+  });
+
+  // Debug: check a specific commit's tree presence
+  // GET param: ?commit=<40-hex>
+  router.get(`/:owner/:repo/admin/debug-check`, async (request, env: Env) => {
+    const { owner, repo } = request.params as { owner: string; repo: string };
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return new Response("Unauthorized\n", {
+        status: 401,
+        headers: { "WWW-Authenticate": 'Basic realm="Git", charset="UTF-8"' },
+      });
+    }
+    const url = new URL((request as Request).url);
+    const commit = url.searchParams.get("commit") || "";
+    const stub = getRepoStub(env, repoKey(owner, repo));
+    return stub.fetch(`https://do/debug-check?commit=${encodeURIComponent(commit)}`, {
+      method: "GET",
+    });
+  });
 }

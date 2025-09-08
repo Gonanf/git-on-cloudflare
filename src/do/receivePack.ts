@@ -1,8 +1,250 @@
 import { parsePktSection, pktLine, flushPkt, concatChunks } from "../pktline";
-import { asTypedStorage, packOidsKey, RepoStateSchema, Head } from "../doState";
-import { indexPackOnly } from "../pack/unpack.ts";
-import { r2PackKey } from "../keys.ts";
+import { asTypedStorage, packOidsKey, RepoStateSchema, Head, type TypedStorage } from "../doState";
+import { indexPackOnly, createMemPackFs } from "../pack/unpack.ts";
+import { r2PackKey, r2LooseKey } from "../keys.ts";
+import * as git from "isomorphic-git";
+import { objKey } from "../doState";
 import { createLogger } from "../util/logger";
+
+// Connectivity check for receive-pack commands.
+// Ensures that each updated ref points to an object we can resolve immediately:
+// - commits must have their root tree present
+// - annotated tags are unwrapped (up to a few levels) and their targets are validated
+// - direct tree/blob refs are accepted if present in the incoming pack or storage
+async function runConnectivityCheck(args: {
+  pack: Uint8Array;
+  packKey?: string;
+  cmds: { oldOid: string; newOid: string; ref: string }[];
+  statuses: { ref: string; ok: boolean; msg?: string }[];
+  store: TypedStorage<RepoStateSchema>;
+  env: Env;
+  prefix: string;
+  log: ReturnType<typeof createLogger>;
+}) {
+  const { pack, packKey, cmds, statuses, store, env, prefix, log } = args;
+  try {
+    const lastPackOids = ((await store.get("lastPackOids")) as string[] | undefined) ?? [];
+    const newOidsSet = new Set(lastPackOids.map((x) => x.toLowerCase()));
+    // Build a small FS over the incoming pack + its idx to read objects
+    const files = new Map<string, Uint8Array>();
+    files.set(`/git/objects/pack/pack-input.pack`, new Uint8Array(pack));
+    const looseLoader = async (oid: string): Promise<Uint8Array | undefined> => {
+      const z = (await store.get(objKey(oid))) as Uint8Array | ArrayBuffer | undefined;
+      if (z) return z instanceof Uint8Array ? z : new Uint8Array(z);
+      try {
+        const o = await env.REPO_BUCKET.get(r2LooseKey(prefix, oid));
+        if (o) return new Uint8Array(await o.arrayBuffer());
+      } catch {}
+      return undefined;
+    };
+    const fs = createMemPackFs(files, { looseLoader });
+    const dir = "/git";
+    // Build an in-memory idx for the incoming pack to enable oid lookups reliably
+    const currentPackOids = new Set<string>();
+    try {
+      const idxRes: any = await git.indexPack({ fs, dir, filepath: `objects/pack/pack-input.pack` });
+      if (idxRes && Array.isArray(idxRes.oids)) {
+        for (const oid of idxRes.oids) currentPackOids.add(String(oid).toLowerCase());
+      }
+    } catch {}
+    const packList = (((await store.get("packList")) as string[] | undefined) ?? []).filter(
+      (k) => (packKey ? k !== packKey : true)
+    );
+
+    // Per-run memo caches to avoid repeated reads
+    const hasCache = new Map<string, boolean>();
+    const treeCache = new Map<string, boolean>();
+    const blobCache = new Map<string, boolean>();
+    const kindCache = new Map<string, FinalKind>();
+
+    const hasObject = async (oid: string): Promise<boolean> => {
+      const lc = oid.toLowerCase();
+      if (hasCache.has(lc)) return hasCache.get(lc)!;
+      let ok = false;
+      if (currentPackOids.has(lc)) ok = true; // present in incoming pack index
+      else if (newOidsSet && newOidsSet.has(lc)) ok = true;
+      else if (await store.get(objKey(lc))) ok = true;
+      else {
+        try {
+          if (await env.REPO_BUCKET.head(r2LooseKey(prefix, lc))) ok = true;
+        } catch {}
+        if (!ok) {
+          for (const k of packList) {
+            const o = (await store.get(packOidsKey(k))) as string[] | undefined;
+            if (o && o.includes(lc)) {
+              ok = true;
+              break;
+            }
+          }
+        }
+      }
+      hasCache.set(lc, ok);
+      return ok;
+    };
+
+    const ensureTreePresent = async (treeOid: string): Promise<boolean> => {
+      const tLc = treeOid.toLowerCase();
+      const cached = treeCache.get(tLc);
+      if (cached !== undefined) return cached;
+      let ok = false;
+      try {
+        await git.readObject({ fs, dir, oid: tLc, format: "content" });
+        ok = true;
+      } catch {}
+      if (!ok) {
+        try {
+          const obj = (await git.readObject({ fs, dir, oid: tLc, format: "parsed" })) as any;
+          if (obj && obj.type === "tree") ok = true;
+        } catch {}
+      }
+      if (!ok) ok = await hasObject(tLc);
+      treeCache.set(tLc, ok);
+      return ok;
+    };
+
+    const ensureBlobPresent = async (oid: string): Promise<boolean> => {
+      const lc = oid.toLowerCase();
+      const cached = blobCache.get(lc);
+      if (cached !== undefined) return cached;
+      let ok = false;
+      try {
+        await git.readObject({ fs, dir, oid: lc, format: "content" });
+        ok = true; // present in incoming pack
+      } catch {}
+      if (!ok) ok = await hasObject(lc);
+      blobCache.set(lc, ok);
+      return ok;
+    };
+
+    const readKind = async (oid: string): Promise<FinalKind> => {
+      const lc = oid.toLowerCase();
+      const cached = kindCache.get(lc);
+      if (cached) return cached;
+      // Commit fast path (we need commit.tree)
+      try {
+        const info = await git.readCommit({ fs, dir, oid: lc });
+        const tree = String(info.commit.tree);
+        const k: FinalKind = { type: "commit", oid: lc, tree };
+        kindCache.set(lc, k);
+        return k;
+      } catch {}
+      // Parsed object
+      try {
+        const obj = (await git.readObject({ fs, dir, oid: lc, format: "parsed" })) as any;
+        if (obj?.type === "tree") {
+          const k: FinalKind = { type: "tree", oid: lc };
+          kindCache.set(lc, k);
+          return k;
+        }
+        if (obj?.type === "blob") {
+          const k: FinalKind = { type: "blob", oid: lc };
+          kindCache.set(lc, k);
+          return k;
+        }
+        if (obj?.type === "tag") {
+          const tagObj = obj.object as { object?: string; type?: string } | undefined;
+          const targetOid = (tagObj?.object || "").toLowerCase();
+          const targetType = (tagObj?.type || "") as "commit" | "tree" | "blob" | "tag" | "";
+          if (targetOid && (targetType === "commit" || targetType === "tree" || targetType === "blob" || targetType === "tag")) {
+            const k: FinalKind = { type: "tag", oid: lc, targetOid, targetType };
+            kindCache.set(lc, k);
+            return k;
+          }
+        }
+      } catch {}
+      // Raw content fallback for tag
+      try {
+        const raw = (await git.readObject({ fs, dir, oid: lc, format: "content" })) as any;
+        if (raw?.type === "tag" && raw.object instanceof Uint8Array) {
+          const text = new TextDecoder().decode(raw.object as Uint8Array);
+          const mObj = text.match(/^object\s+([0-9a-f]{40})/m);
+          const mType = text.match(/^type\s+(\w+)/m);
+          const targetOid = (mObj ? mObj[1] : "").toLowerCase();
+          const targetType = (mType ? mType[1] : "") as "commit" | "tree" | "blob" | "tag" | "";
+          if (targetOid && (targetType === "commit" || targetType === "tree" || targetType === "blob" || targetType === "tag")) {
+            const k: FinalKind = { type: "tag", oid: lc, targetOid, targetType };
+            kindCache.set(lc, k);
+            return k;
+          }
+        }
+      } catch {}
+      const k: FinalKind = { type: "unknown", oid: lc };
+      kindCache.set(lc, k);
+      return k;
+    };
+
+    const unwrapTagToFinal = async (oid: string, maxDepth = 3): Promise<FinalKind> => {
+      let currentOid = oid.toLowerCase();
+      let depth = 0;
+      while (depth < maxDepth) {
+        const k = await readKind(currentOid);
+        if (k.type !== "tag") return k; // already final
+        currentOid = k.targetOid; // follow tag target
+        depth++;
+      }
+      // Depth exceeded or unresolved
+      return { type: "unknown", oid: currentOid };
+    };
+
+    for (let i = 0; i < cmds.length; i++) {
+      const c = cmds[i];
+      const st = statuses[i];
+      const isZeroNew = /^0{40}$/i.test(c.newOid);
+      if (!st?.ok || isZeroNew) continue; // skip deletes and already-invalid
+      try {
+        const newOidLc = c.newOid.toLowerCase();
+        // Resolve to a final kind (unwrap tags as needed)
+        let kind = await readKind(newOidLc);
+        if (kind.type === "tag") kind = await unwrapTagToFinal(newOidLc);
+
+        switch (kind.type) {
+          case "commit": {
+            const ok = await ensureTreePresent(kind.tree);
+            if (!ok) {
+              log.warn("connectivity:missing-tree", { ref: c.ref, tree: kind.tree });
+              statuses[i] = { ref: c.ref, ok: false, msg: "missing-objects" };
+            }
+            break;
+          }
+          case "tree": {
+            const ok = await ensureTreePresent(kind.oid);
+            if (!ok) {
+              log.warn("connectivity:missing-tree", { ref: c.ref, tree: kind.oid });
+              statuses[i] = { ref: c.ref, ok: false, msg: "missing-objects" };
+            }
+            break;
+          }
+          case "blob": {
+            const ok = await ensureBlobPresent(kind.oid);
+            if (!ok) {
+              log.warn("connectivity:missing-blob", { ref: c.ref, blob: kind.oid });
+              statuses[i] = { ref: c.ref, ok: false, msg: "missing-objects" };
+            }
+            break;
+          }
+          case "unknown": {
+            log.warn("connectivity:unknown-type-or-missing", { ref: c.ref, oid: newOidLc });
+            statuses[i] = { ref: c.ref, ok: false, msg: "missing-objects" };
+            break;
+          }
+        }
+      } catch {
+        // Cannot read new object from pack+idx+loose bases -> reject
+        log.warn("connectivity:cannot-read-new", { ref: c.ref, oid: c.newOid.toLowerCase() });
+        statuses[i] = { ref: c.ref, ok: false, msg: "missing-objects" };
+      }
+    }
+  } catch (e) {
+    log.warn("connectivity:check-failed", { error: String(e) });
+  }
+}
+
+type FinalKind =
+  | { type: "commit"; oid: string; tree: string }
+  | { type: "tree"; oid: string }
+  | { type: "blob"; oid: string }
+  | { type: "tag"; oid: string; targetOid: string; targetType: "commit" | "tree" | "blob" | "tag" }
+  | { type: "unknown"; oid: string };
 
 /**
  * Handle git-receive-pack POST inside the Durable Object.
@@ -55,12 +297,12 @@ export async function receivePack(
     let unpackOk = true;
     let unpackErr = "";
     let packKey: string | undefined = undefined;
+    let indexedOids: string[] | undefined = undefined;
     if (hasNonDelete) {
       // Store pack in R2 under per-DO prefix
       packKey = r2PackKey(prefix, `pack-${Date.now()}.pack`);
       try {
         await env.REPO_BUCKET.put(packKey, pack);
-        await store.put("lastPackKey", packKey);
         log.info("pack:stored", { packKey, bytes: pack.byteLength });
       } catch (e) {
         unpackOk = false;
@@ -71,33 +313,16 @@ export async function receivePack(
       // Quick index-only (no unpacking yet)
       try {
         const oids = await indexPackOnly(new Uint8Array(pack), env, packKey);
-
-        // Store pack metadata
-        await store.put("lastPackOids", oids);
-        await store.put(packOidsKey(packKey), oids);
+        indexedOids = oids;
         log.info("index:ok", { packKey, oids: oids.length });
-
-        // Update pack list
-        const list = ((await store.get("packList")) || []).filter((k: string) => k !== packKey);
-        list.unshift(packKey);
-        if (list.length > 20) list.length = 20;
-        await store.put("packList", list);
-
-        // Queue unpack work for alarm
-        await store.put("unpackWork", {
-          packKey,
-          oids,
-          processedCount: 0,
-          startedAt: Date.now(),
-        });
-
-        // Schedule immediate alarm to start unpacking
-        await state.storage.setAlarm(Date.now() + 100);
-        log.debug("unpack:scheduled", { packKey });
       } catch (e: any) {
         unpackOk = false;
         unpackErr = e?.message || String(e);
         log.error("index:error", { error: unpackErr });
+        // Best-effort cleanup of the stored pack to avoid orphan cost
+        try {
+          if (packKey) await env.REPO_BUCKET.delete(packKey);
+        } catch {}
       }
     } else {
       // Delete-only push: no pack is expected/required
@@ -148,7 +373,21 @@ export async function receivePack(
       }
     }
 
-    // Apply updates atomically if all commands are valid
+    // Connectivity check: ensure each new ref's target exists (commit->tree, tag, tree/blob)
+    if (unpackOk && packKey) {
+      await runConnectivityCheck({
+        pack: new Uint8Array(pack),
+        packKey,
+        cmds,
+        statuses,
+        store,
+        env,
+        prefix,
+        log,
+      });
+    }
+
+    // Apply updates atomically if all commands (including connectivity) are valid
     const allOk = statuses.length === cmds.length && statuses.every((s) => s.ok);
     log.debug("commands:validated", {
       total: cmds.length,
@@ -178,6 +417,35 @@ export async function receivePack(
         log.debug("head:resolved", { target, oid: resolved.oid, unborn: resolved.unborn === true });
       } catch (e) {
         log.warn("head:resolve-failed", { error: String(e) });
+      }
+
+      // Persist pack metadata and schedule unpack only after successful ref updates
+      try {
+        if (packKey && indexedOids && indexedOids.length > 0) {
+          await store.put("lastPackKey", packKey);
+          await store.put("lastPackOids", indexedOids);
+          await store.put(packOidsKey(packKey), indexedOids);
+
+          const list = ((await store.get("packList")) || []).filter((k: string) => k !== packKey);
+          list.unshift(packKey);
+          const packListMaxRaw = Number(env.REPO_PACKLIST_MAX ?? 20);
+          const clamp = (n: number, min: number, max: number) =>
+            Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : min;
+          const packListMax = clamp(packListMaxRaw, 1, 100);
+          if (list.length > packListMax) list.length = packListMax;
+          await store.put("packList", list);
+
+          await store.put("unpackWork", {
+            packKey,
+            oids: indexedOids,
+            processedCount: 0,
+            startedAt: Date.now(),
+          });
+          await state.storage.setAlarm(Date.now() + 100);
+          log.debug("unpack:scheduled", { packKey });
+        }
+      } catch (e) {
+        log.warn("post-apply:metadata-or-unpack-schedule-failed", { error: String(e) });
       }
     }
 
