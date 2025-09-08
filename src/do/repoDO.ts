@@ -1,4 +1,11 @@
-import { asTypedStorage, RepoStateSchema, objKey, packOidsKey, Head, UnpackWork } from "./doState";
+import {
+  asTypedStorage,
+  RepoStateSchema,
+  objKey,
+  packOidsKey,
+  Head,
+  UnpackWork,
+} from "./repoState.ts";
 import {
   doPrefix,
   r2LooseKey,
@@ -6,16 +13,17 @@ import {
   isPackKey,
   isIdxKey,
   packKeyFromIndexKey,
-} from "./keys.ts";
+} from "../keys.ts";
 import {
   encodeGitObjectAndDeflate,
   unpackPackToLoose,
   unpackOidsChunkFromPackBytes,
-} from "./pack/unpack";
-import { receivePack } from "./do/receivePack";
-import { json, text, badRequest } from "./util/response";
-import { createLogger } from "./util/logger";
-import { parseCommitText } from "./git/commitParse";
+} from "../git/unpack.ts";
+import { receivePack } from "../git/receivePack.ts";
+import { json, text, badRequest } from "../util/response.ts";
+import { createLogger } from "../util/logger.ts";
+import { createInflateStream } from "../util/compression.ts";
+import { parseCommitText } from "../git/commitParse.ts";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -552,7 +560,7 @@ export class RepoDurableObject implements DurableObject {
 
     const z = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
     // Decompress (zlib/deflate) and parse git header
-    const ds = new DecompressionStream("deflate");
+    const ds = createInflateStream();
     const stream = new Blob([z]).stream().pipeThrough(ds);
     const raw = new Uint8Array(await new Response(stream).arrayBuffer());
     // header: <type> <len>\0

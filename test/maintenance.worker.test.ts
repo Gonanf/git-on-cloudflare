@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { env, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import { asTypedStorage, RepoStateSchema, packOidsKey } from "../src/doState.ts";
+import { asTypedStorage, RepoStateSchema, packOidsKey } from "../src/do/repoState.ts";
 
 function makeRepoId(suffix: string) {
   return `maint/${suffix}-${Math.random().toString(36).slice(2, 8)}`;

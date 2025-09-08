@@ -1,5 +1,5 @@
-import { createLogger } from "./util/logger";
-import { asTypedStorage } from "./doState";
+import { createLogger } from "../util/logger";
+import { asTypedStorage } from "./repoState";
 import {
   AuthStateSchema,
   AuthUsers,

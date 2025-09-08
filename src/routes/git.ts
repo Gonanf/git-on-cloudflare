@@ -1,8 +1,9 @@
 import { AutoRouter } from "itty-router";
-import { capabilityAdvertisement, parseV2Command } from "../protocol";
-import { handleFetchV2 } from "../uploadPack";
-import { JsRepoEngine } from "../repoEngine";
-import { getRepoStub, repoKey } from "../doUtil";
+import { capabilityAdvertisement, parseV2Command } from "../git/protocol";
+import { handleFetchV2 } from "../git/uploadPack";
+import { JsRepoEngine } from "../git/repoEngine";
+import { getRepoStub } from "../util/stub";
+import { repoKey } from "../keys";
 import { verifyAuth } from "../util/auth";
 import { addRepoToOwner, removeRepoFromOwner } from "../util/ownerRegistry";
 
@@ -34,7 +35,7 @@ async function handleUploadPackPOST(env: Env, repoId: string, request: Request) 
     ]);
     const chunks: Uint8Array[] = [];
     // Reuse pkt-line helpers via dynamic import to avoid direct dependency here
-    const { pktLine, flushPkt, concatChunks } = await import("../pktline");
+    const { pktLine, flushPkt, concatChunks } = await import("../git/pktline");
     // Per spec, HEAD should be first when available
     if (head && head.target) {
       const t = (refs as { name: string; oid: string }[]).find((r) => r.name === head.target);
@@ -136,6 +137,6 @@ export function registerGitRoutes(router: ReturnType<typeof AutoRouter>) {
         headers: { "WWW-Authenticate": 'Basic realm="Git", charset="UTF-8"' },
       });
     }
-    return handleReceivePackPOST(env, repoKey(owner, repo), request as Request);
+    return handleReceivePackPOST(env, repoKey(owner, repo), request);
   });
 }

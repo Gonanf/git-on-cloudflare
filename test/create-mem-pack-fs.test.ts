@@ -1,5 +1,5 @@
 import test from "ava";
-import { createMemPackFs } from "../src/pack/unpack.ts";
+import { createMemPackFs } from "../src/git/unpack.ts";
 
 function u8(...xs: number[]) {
   return new Uint8Array(xs);

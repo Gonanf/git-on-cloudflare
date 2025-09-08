@@ -1,10 +1,17 @@
-import { parsePktSection, pktLine, flushPkt, concatChunks } from "../pktline";
-import { asTypedStorage, packOidsKey, RepoStateSchema, Head, type TypedStorage } from "../doState";
-import { indexPackOnly, createMemPackFs } from "../pack/unpack.ts";
+import { parsePktSection, pktLine, flushPkt, concatChunks } from "./pktline.ts";
+import {
+  asTypedStorage,
+  packOidsKey,
+  RepoStateSchema,
+  Head,
+  type TypedStorage,
+} from "../do/repoState.ts";
+import { indexPackOnly, createMemPackFs } from "./unpack.ts";
 import { r2PackKey, r2LooseKey } from "../keys.ts";
 import * as git from "isomorphic-git";
-import { objKey } from "../doState";
-import { createLogger } from "../util/logger";
+import { objKey } from "../do/repoState.ts";
+import { createLogger } from "../util/logger.ts";
+import { createLooseLoader } from "../util/loose-loader.ts";
 
 // Connectivity check for receive-pack commands.
 // Ensures that each updated ref points to an object we can resolve immediately:
@@ -28,15 +35,7 @@ async function runConnectivityCheck(args: {
     // Build a small FS over the incoming pack + its idx to read objects
     const files = new Map<string, Uint8Array>();
     files.set(`/git/objects/pack/pack-input.pack`, new Uint8Array(pack));
-    const looseLoader = async (oid: string): Promise<Uint8Array | undefined> => {
-      const z = (await store.get(objKey(oid))) as Uint8Array | ArrayBuffer | undefined;
-      if (z) return z instanceof Uint8Array ? z : new Uint8Array(z);
-      try {
-        const o = await env.REPO_BUCKET.get(r2LooseKey(prefix, oid));
-        if (o) return new Uint8Array(await o.arrayBuffer());
-      } catch {}
-      return undefined;
-    };
+    const looseLoader = createLooseLoader(store, env, prefix);
     const fs = createMemPackFs(files, { looseLoader });
     const dir = "/git";
     // Build an in-memory idx for the incoming pack to enable oid lookups reliably

@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
-import { decodePktLines } from "../src/pktline.ts";
+import { decodePktLines } from "../src/git/pktline.ts";
 
 it("advertises upload-pack v2 over info/refs", async () => {
   const owner = "o";

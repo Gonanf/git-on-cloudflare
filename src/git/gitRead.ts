@@ -1,9 +1,11 @@
-import type { HeadInfo, Ref } from "./repoEngine";
-import { parseCommitText } from "./git/commitParse.ts";
-import { getRepoStub } from "./doUtil.ts";
+import type { HeadInfo, Ref } from "./repoEngine.ts";
+import { parseCommitText } from "./commitParse.ts";
+import { getRepoStub } from "../util/stub.ts";
+import { packIndexKey } from "../keys.ts";
+import { createMemPackFs } from "./unpack.ts";
+import { createStubLooseLoader } from "../util/loose-loader.ts";
+import { createInflateStream } from "../util/compression.ts";
 import * as git from "isomorphic-git";
-import { createMemPackFs } from "./pack/unpack.ts";
-import { packIndexKey } from "./keys.ts";
 
 /**
  * Fetch HEAD and refs for a repository from its Durable Object.
@@ -355,7 +357,7 @@ export async function readBlobStream(
 
   // Decompress and parse in a streaming fashion
   const decompressed = res
-    .body!.pipeThrough(new DecompressionStream("deflate"))
+    .body!.pipeThrough(createInflateStream())
     .pipeThrough({ readable, writable });
 
   return new Response(decompressed, {
@@ -391,7 +393,7 @@ export async function readLooseObjectRaw(
     const res = await stub.fetch(`https://do/obj/${oidLc}`, { method: "GET" });
     if (res.ok) {
       const z = new Uint8Array(await res.arrayBuffer());
-      const ds = new DecompressionStream("deflate");
+      const ds = createInflateStream();
       const stream = new Blob([z]).stream().pipeThrough(ds);
       const raw = new Uint8Array(await new Response(stream).arrayBuffer());
       // header: <type> <len>\0
@@ -466,15 +468,7 @@ export async function readLooseObjectRaw(
     if (files.size === 0) return undefined;
 
     // Create a loader for existing loose objects (needed for thin packs)
-    const looseLoader = async (oid: string): Promise<Uint8Array | undefined> => {
-      try {
-        const res = await stub.fetch(`https://do/obj/${oid}`, { method: "GET" });
-        if (res.ok) {
-          return new Uint8Array(await res.arrayBuffer());
-        }
-      } catch {}
-      return undefined;
-    };
+    const looseLoader = createStubLooseLoader(stub);
 
     const fs = createMemPackFs(files, { looseLoader });
     const dir = "/git";

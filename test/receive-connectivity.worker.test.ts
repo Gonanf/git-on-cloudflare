@@ -1,54 +1,8 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
-import { decodePktLines, pktLine, flushPkt, concatChunks } from "../src/pktline.ts";
-
-async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
-  const cs: any = new (globalThis as any).CompressionStream("deflate");
-  const stream = new Blob([data]).stream().pipeThrough(cs);
-  const buf = await new Response(stream).arrayBuffer();
-  return new Uint8Array(buf);
-}
-
-function encodeObjHeader(type: number, size: number): Uint8Array {
-  let first = (type << 4) | (size & 0x0f);
-  size >>= 4;
-  const bytes: number[] = [];
-  if (size > 0) first |= 0x80;
-  bytes.push(first);
-  while (size > 0) {
-    let b = size & 0x7f;
-    size >>= 7;
-    if (size > 0) b |= 0x80;
-    bytes.push(b);
-  }
-  return new Uint8Array(bytes);
-}
-
-async function buildPack(
-  objects: { type: "commit" | "tree" | "blob" | "tag"; payload: Uint8Array }[]
-) {
-  const hdr = new Uint8Array(12);
-  hdr.set(new TextEncoder().encode("PACK"), 0);
-  const dv = new DataView(hdr.buffer);
-  dv.setUint32(4, 2);
-  dv.setUint32(8, objects.length);
-  const parts: Uint8Array[] = [hdr];
-  for (const o of objects) {
-    const typeCode = o.type === "commit" ? 1 : o.type === "tree" ? 2 : o.type === "blob" ? 3 : 4;
-    parts.push(encodeObjHeader(typeCode, o.payload.byteLength));
-    parts.push(await deflateRaw(o.payload));
-  }
-  const body = concatChunks(parts);
-  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", body));
-  const out = new Uint8Array(body.byteLength + 20);
-  out.set(body, 0);
-  out.set(sha, body.byteLength);
-  return out;
-}
-
-function zero40() {
-  return "0".repeat(40);
-}
+import { decodePktLines, pktLine, flushPkt, concatChunks } from "../src/git/pktline.ts";
+import { buildPack, zero40 } from "./util/test-helpers.ts";
+import { bytesToHex } from "../src/util/hex.ts";
 
 it("receive-pack connectivity: rejects commit whose root tree is missing", async () => {
   const owner = "o";
@@ -71,9 +25,7 @@ it("receive-pack connectivity: rejects commit whose root tree is missing", async
     raw.set(head, 0);
     raw.set(commitPayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
 
   // Create a PACK containing ONLY the commit (missing its root tree)
@@ -118,9 +70,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to commit with pre
     raw.set(head, 0);
     raw.set(treePayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
   const author = `You <you@example.com> 0 +0000`;
   const committer = author;
@@ -134,9 +84,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to commit with pre
     raw.set(head, 0);
     raw.set(commitPayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
   // Annotated tag pointing to the commit
   const tagPayload = new TextEncoder().encode(
@@ -151,9 +99,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to commit with pre
     raw.set(head, 0);
     raw.set(tagPayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
 
   const pack = await buildPack([
@@ -188,9 +134,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to tree present", 
     raw.set(head, 0);
     raw.set(treePayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
   const tagPayload = new TextEncoder().encode(
     `object ${treeOid}\n` +
@@ -204,9 +148,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to tree present", 
     raw.set(head, 0);
     raw.set(tagPayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
   const pack = await buildPack([
     { type: "tree", payload: treePayload },
@@ -243,9 +185,7 @@ it("receive-pack connectivity: rejects annotated tag pointing to commit with mis
     raw.set(head, 0);
     raw.set(commitPayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
   const tagPayload = new TextEncoder().encode(
     `object ${commitOid}\n` +
@@ -259,9 +199,7 @@ it("receive-pack connectivity: rejects annotated tag pointing to commit with mis
     raw.set(head, 0);
     raw.set(tagPayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
   const pack = await buildPack([
     { type: "commit", payload: commitPayload },
@@ -295,9 +233,7 @@ it("receive-pack connectivity: accepts direct ref to tree present", async () => 
     raw.set(head, 0);
     raw.set(treePayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
 
   const pack = await buildPack([{ type: "tree", payload: treePayload }]);
@@ -328,9 +264,7 @@ it("receive-pack connectivity: accepts direct ref to blob present", async () => 
     raw.set(head, 0);
     raw.set(blobPayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
 
   const pack = await buildPack([{ type: "blob", payload: blobPayload }]);
@@ -361,9 +295,7 @@ it("receive-pack connectivity: accepts nested tag->tag->tree present", async () 
     raw.set(head, 0);
     raw.set(treePayload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
   const tag1Payload = new TextEncoder().encode(
     `object ${treeOid}\n` +
@@ -377,9 +309,7 @@ it("receive-pack connectivity: accepts nested tag->tag->tree present", async () 
     raw.set(head, 0);
     raw.set(tag1Payload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
   const tag2Payload = new TextEncoder().encode(
     `object ${tag1Oid}\n` +
@@ -393,9 +323,7 @@ it("receive-pack connectivity: accepts nested tag->tag->tree present", async () 
     raw.set(head, 0);
     raw.set(tag2Payload, head.length);
     const hash = await crypto.subtle.digest("SHA-1", raw);
-    return Array.from(new Uint8Array(hash))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
+    return bytesToHex(new Uint8Array(hash));
   })();
 
   const pack = await buildPack([

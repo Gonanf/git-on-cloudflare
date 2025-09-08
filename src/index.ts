@@ -47,5 +47,5 @@ export default {
   },
 };
 
-export { RepoDurableObject } from "./repoDO";
-export { AuthDurableObject } from "./authDO";
+export { RepoDurableObject } from "./do/repoDO";
+export { AuthDurableObject } from "./do/authDO";

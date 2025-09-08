@@ -1,4 +1,4 @@
-import { getRepoStub } from "./doUtil";
+import { getRepoStub } from "../util/stub";
 
 export interface Ref {
   name: string;

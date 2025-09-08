@@ -1,6 +1,6 @@
 import * as git from "isomorphic-git";
 
-import { asTypedStorage, type RepoStateSchema, objKey, packOidsKey } from "../doState.ts";
+import { asTypedStorage, type RepoStateSchema, objKey, packOidsKey } from "../do/repoState.ts";
 import {
   r2LooseKey,
   packIndexKey,
@@ -10,6 +10,9 @@ import {
   isPackKey,
 } from "../keys.ts";
 import { createLogger } from "../util/logger.ts";
+import { createLooseLoader } from "../util/loose-loader.ts";
+import { bytesToHex } from "../util/hex.ts";
+import { deflate } from "../util/compression.ts";
 
 /**
  * Index a pack file quickly without unpacking objects.
@@ -35,16 +38,7 @@ export async function indexPackOnly(
   // If we have DO state, create a loader for existing loose objects (needed for thin packs)
   const looseLoader =
     doState && prefix
-      ? async (oid: string): Promise<Uint8Array | undefined> => {
-          const store = asTypedStorage<RepoStateSchema>(doState.storage);
-          const z = (await store.get(objKey(oid))) as Uint8Array | ArrayBuffer | undefined;
-          if (z) return z instanceof Uint8Array ? z : new Uint8Array(z);
-          try {
-            const o = await env.REPO_BUCKET.get(r2LooseKey(prefix, oid));
-            if (o) return new Uint8Array(await o.arrayBuffer());
-          } catch {}
-          return undefined;
-        }
+      ? createLooseLoader(asTypedStorage<RepoStateSchema>(doState.storage), env, prefix)
       : undefined;
 
   const fs = createMemPackFs(files, { looseLoader });
@@ -99,15 +93,7 @@ export async function unpackPackToLoose(
   const files = new Map<string, Uint8Array>();
 
   // Create a loader for existing loose objects (needed for thin packs)
-  const looseLoader = async (oid: string): Promise<Uint8Array | undefined> => {
-    const z = (await store.get(objKey(oid))) as Uint8Array | ArrayBuffer | undefined;
-    if (z) return z instanceof Uint8Array ? z : new Uint8Array(z);
-    try {
-      const o = await env.REPO_BUCKET.get(r2LooseKey(prefix, oid));
-      if (o) return new Uint8Array(await o.arrayBuffer());
-    } catch {}
-    return undefined;
-  };
+  const looseLoader = createLooseLoader(store, env, prefix);
 
   const fs = createMemPackFs(files, { looseLoader });
   const gitdir = "/git";
@@ -230,15 +216,7 @@ export async function unpackOidsChunkFromPackBytes(
   const files = new Map<string, Uint8Array>();
 
   // Create a loader for existing loose objects (needed for thin packs)
-  const looseLoader = async (oid: string): Promise<Uint8Array | undefined> => {
-    const z = (await store.get(objKey(oid))) as Uint8Array | ArrayBuffer | undefined;
-    if (z) return z instanceof Uint8Array ? z : new Uint8Array(z);
-    try {
-      const o = await env.REPO_BUCKET.get(r2LooseKey(prefix, oid));
-      if (o) return new Uint8Array(await o.arrayBuffer());
-    } catch {}
-    return undefined;
-  };
+  const looseLoader = createLooseLoader(store, env, prefix);
 
   const fs = createMemPackFs(files, { looseLoader });
   const gitdir = "/git";
@@ -310,12 +288,10 @@ export async function encodeGitObjectAndDeflate(
   raw.set(header, 0);
   raw.set(payload, header.byteLength);
   const hash = await crypto.subtle.digest("SHA-1", raw);
-  const oid = [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  // Use Web CompressionStream to zlib-compress
-  const cs = new CompressionStream("deflate");
-  const stream = new Blob([raw]).stream().pipeThrough(cs);
-  const buf = await new Response(stream).arrayBuffer();
-  return { oid, zdata: new Uint8Array(buf) };
+  const oid = bytesToHex(new Uint8Array(hash));
+  // Use deflate utility to compress
+  const zdata = await deflate(raw);
+  return { oid, zdata };
 }
 
 /**

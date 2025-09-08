@@ -1,5 +1,6 @@
 import { AutoRouter } from "itty-router";
-import { getRepoStub, repoKey } from "../doUtil";
+import { getRepoStub } from "../util/stub";
+import { repoKey } from "../keys";
 import { verifyAuth } from "../util/auth";
 import { listReposForOwner, addRepoToOwner, removeRepoFromOwner } from "../util/ownerRegistry";
 

@@ -1,9 +1,11 @@
 import { pktLine, flushPkt, delimPkt, concatChunks } from "./pktline.ts";
 import { decodePktLines } from "./pktline.ts";
-import { getRepoStub } from "./doUtil.ts";
+import { getRepoStub } from "../util/stub.ts";
 import { readLooseObjectRaw } from "./gitRead.ts";
-import { assemblePackFromR2, assemblePackFromMultiplePacks } from "./pack/packAssembler.ts";
-export { encodeOfsDeltaDistance } from "./pack/packAssembler.ts";
+import { assemblePackFromR2, assemblePackFromMultiplePacks } from "./packAssembler.ts";
+export { encodeOfsDeltaDistance } from "./packAssembler.ts";
+import { objTypeCode, encodeObjHeader, type GitObjectType } from "../util/git-objects.ts";
+import { deflate } from "../util/compression.ts";
 
 export function parseFetchArgs(body: Uint8Array) {
   const items = decodePktLines(body);
@@ -124,11 +126,12 @@ export async function handleFetchV2(
 
   // Fallback: build a minimal pack from loose objects
   const oids = needed;
-  const objs: { type: string; payload: Uint8Array }[] = [];
+  const objs: { type: GitObjectType; payload: Uint8Array }[] = [];
   for (const oid of oids) {
     const o = await readLooseObjectRaw(env, repoId, oid);
     if (!o) continue;
-    objs.push(o);
+    // readLooseObjectRaw returns type as string, but we know it's a valid GitObjectType
+    objs.push({ type: o.type as GitObjectType, payload: o.payload });
   }
   if (objs.length === 0) {
     return new Response("server error: no objects found to pack\n", { status: 500 });
@@ -279,7 +282,9 @@ async function findCommonHaves(env: Env, repoId: string, haves: string[]): Promi
   return uniq;
 }
 
-async function buildPackV2(objs: { type: string; payload: Uint8Array }[]): Promise<Uint8Array> {
+async function buildPackV2(
+  objs: { type: GitObjectType; payload: Uint8Array }[]
+): Promise<Uint8Array> {
   // Header: 'PACK' + version (2) + number of objects (big-endian)
   const hdr = new Uint8Array(12);
   hdr.set(new TextEncoder().encode("PACK"), 0);
@@ -301,41 +306,4 @@ async function buildPackV2(objs: { type: string; payload: Uint8Array }[]): Promi
   out.set(body, 0);
   out.set(sha, body.length);
   return out;
-}
-
-function objTypeCode(t: string): number {
-  switch (t) {
-    case "commit":
-      return 1;
-    case "tree":
-      return 2;
-    case "blob":
-      return 3;
-    case "tag":
-      return 4;
-    default:
-      return 3;
-  }
-}
-
-function encodeObjHeader(type: number, size: number): Uint8Array {
-  let first = (type << 4) | (size & 0x0f);
-  size >>= 4;
-  const bytes: number[] = [];
-  if (size > 0) first |= 0x80;
-  bytes.push(first);
-  while (size > 0) {
-    let b = size & 0x7f;
-    size >>= 7;
-    if (size > 0) b |= 0x80;
-    bytes.push(b);
-  }
-  return new Uint8Array(bytes);
-}
-
-async function deflate(data: Uint8Array): Promise<Uint8Array> {
-  const cs = new CompressionStream("deflate");
-  const stream = new Blob([data]).stream().pipeThrough(cs);
-  const buf = await new Response(stream).arrayBuffer();
-  return new Uint8Array(buf);
 }

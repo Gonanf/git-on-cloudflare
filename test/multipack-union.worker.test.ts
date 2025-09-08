@@ -2,8 +2,8 @@ import { it, expect } from "vitest";
 import { env, SELF, runInDurableObject } from "cloudflare:test";
 import type { RepoDurableObject } from "../src";
 import * as git from "isomorphic-git";
-import { asTypedStorage, RepoStateSchema } from "../src/doState.ts";
-import { createMemPackFs } from "../src/pack/unpack.ts";
+import { asTypedStorage, RepoStateSchema } from "../src/do/repoState.ts";
+import { createMemPackFs } from "../src/git/unpack.ts";
 
 function pktLine(s: string | Uint8Array): Uint8Array {
   const enc = typeof s === "string" ? new TextEncoder().encode(s) : s;

@@ -1,5 +1,5 @@
 import { pktLine, flushPkt, concatChunks, decodePktLines } from "./pktline";
-import { getRepoStub } from "./doUtil";
+import { getRepoStub } from "../util/stub";
 
 /**
  * Generates a Git capability advertisement response.

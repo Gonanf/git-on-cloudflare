@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import { decodePktLines, pktLine, flushPkt, concatChunks, delimPkt } from "../src/pktline";
+import { decodePktLines, pktLine, flushPkt, concatChunks, delimPkt } from "../src/git/pktline.ts";
 
 async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
   const cs: any = new (globalThis as any).CompressionStream("deflate");

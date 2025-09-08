@@ -1,5 +1,7 @@
 // Authentication helpers shared between routes
 
+import { getAuthStub } from "./stub";
+
 export function getBasicCredentials(req: Request): { username: string; password: string } | null {
   const h = req.headers.get("Authorization") || "";
   const m = /^Basic\s+(.+)$/i.exec(h);
@@ -11,19 +13,6 @@ export function getBasicCredentials(req: Request): { username: string; password:
     const username = decoded.slice(0, idx);
     const password = decoded.slice(idx + 1);
     return { username, password };
-  } catch {
-    return null;
-  }
-}
-
-export function getAuthStub(env: Env): DurableObjectStub | null {
-  // Enforce centralized auth only when both AUTH_DO and AUTH_ADMIN_TOKEN are set
-  const ns = env.AUTH_DO;
-  const admin = env.AUTH_ADMIN_TOKEN || "";
-  if (!ns || !admin) return null;
-  try {
-    const id = ns.idFromName("auth");
-    return ns.get(id);
   } catch {
     return null;
   }

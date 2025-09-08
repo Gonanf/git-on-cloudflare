@@ -2,7 +2,7 @@
 // Keep all key/prefix formats here to avoid divergence between tests and runtime.
 
 // Build a repository ID from owner + repo. Tests and routing expect "owner/repo".
-export function makeRepoId(owner: string, repo: string): string {
+export function repoKey(owner: string, repo: string): string {
   return `${owner}/${repo}`;
 }
 

@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import { computeNeeded } from "../src/uploadPack.ts";
+import { computeNeeded } from "../src/git/uploadPack.ts";
 
 async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
   const cs: any = new (globalThis as any).CompressionStream("deflate");

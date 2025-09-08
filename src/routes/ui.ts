@@ -1,7 +1,14 @@
 import { AutoRouter } from "itty-router";
-import { getHeadAndRefs, readPath, listCommits, readCommitInfo, readBlobStream } from "../gitRead";
-import type { CommitInfo } from "../gitRead";
-import { repoKey, getRepoStub } from "../doUtil";
+import {
+  getHeadAndRefs,
+  readPath,
+  listCommits,
+  readCommitInfo,
+  readBlobStream,
+} from "../git/gitRead";
+import type { CommitInfo } from "../git/gitRead";
+import { getRepoStub } from "../util/stub";
+import { repoKey } from "../keys";
 import { escapeHtml, detectBinary, formatSize, bytesToText, formatWhen } from "../util/format";
 import { renderTemplate, renderPage } from "../util/render";
 import { listReposForOwner } from "../util/ownerRegistry";

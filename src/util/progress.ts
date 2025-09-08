@@ -1,4 +1,4 @@
-import { getRepoStub } from "../doUtil";
+import { getRepoStub } from "./stub";
 
 /**
  * Fetch unpacking progress banner HTML for a repository.
