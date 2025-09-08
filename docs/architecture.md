@@ -1,33 +1,67 @@
 # Architecture Overview
 
-This project implements a minimal Git Smart HTTP v2 server on Cloudflare Workers using a hybrid of Durable Objects (DO) and R2.
+This project implements a Git Smart HTTP v2 server on Cloudflare Workers using a hybrid of Durable Objects (DO) and R2.
 
-- Worker entry: `src/index.ts`
-  - Routes for Git endpoints, admin JSON, and the web UI
-  - Template loading and `renderPage()` for HTML
-- Repository DO: `src/repoDO.ts`
-  - Owns refs/HEAD and loose objects for a single repo
-  - Internal endpoints consumed by the Worker and tests:
-    - `GET/PUT /refs` — list/update refs
-    - `GET/PUT /head` — get/update HEAD
-    - `GET|HEAD /obj/:oid` — read loose object (R2-first, fallback DO)
-    - `PUT /obj/:oid` — write loose object (DO then mirror to R2)
-    - `GET /pack-latest`, `GET /packs`, `GET /pack-oids?key=...` — pack metadata
-    - `POST /receive` — receive-pack (push) handler
-  - Push flow: raw `.pack` is written to R2, a fast index-only step writes `.idx`, and unpack is queued for background processing on the DO alarm in small time-budgeted chunks.
-  - Maintains pack metadata (`lastPackKey`, `lastPackOids`, `packList`, `packOids:<key>`) used by fetch assembly.
-- Auth DO: `src/authDO.ts`
-  - Stores owners → token hashes
-  - `/verify` for Worker auth checks; `/users` for admin UI/API
-- Git protocol helpers: `src/protocol.ts`, `src/uploadPack.ts`, `src/pktline.ts`
-  - Supports request cancellation via AbortSignal
-  - Fast path for initial clones to avoid expensive closure computation
-- Pack helpers: `src/pack/packAssembler.ts`, `src/pack/unpack.ts`
-  - Fast path for initial clones: assembles from latest R2 pack using all OIDs
-  - In-memory pack assembly for small packs (<16MB) or when needing many objects (≥25%)
-  - Multi-pack union support for incremental fetches
-- Web UI readers: `src/gitRead.ts`
-- Key helpers (single-source-of-truth): `src/keys.ts`
+## Module Structure
+
+The codebase is organized into focused modules with `index.ts` export files:
+
+- **`/git`** - Core Git functionality
+  - `repoDO.ts` - Repository Durable Object
+  - `operations/` - Git operations (upload-pack, receive-pack)
+  - `core/` - Protocol handling, pkt-line, readers
+  - `pack/` - Pack assembly, unpacking, indexing
+- **`/auth`** - Authentication module
+  - `authDO.ts` - Auth Durable Object
+  - `verify.ts` - Token verification
+- **`/cache`** - Two-tier caching system
+  - UI layer caching (JSON responses)
+  - Git object caching (immutable objects)
+- **`/web`** - Web UI utilities
+  - `format.ts` - Content formatting helpers
+  - `render.ts` - Page rendering
+  - `templates.ts` - Liquid template engine
+  - `progress.ts` - Unpack progress tracking
+- **`/common`** - Shared utilities
+  - `compression.ts`, `hex.ts`, `logger.ts`, `response.ts`, `stub.ts`
+- **`/registry`** - Owner/repo registry management
+- **`/routes`** - HTTP route handlers
+  - `git.ts` - Git protocol endpoints (upload-pack, receive-pack)
+  - `ui.ts` - Web UI routes for browsing repos
+  - `auth.ts` - Authentication UI and API endpoints
+  - `admin.ts` - Admin routes for registry management
+
+## Core Components
+
+### Worker Entry (`src/index.ts`)
+
+- Routes for Git endpoints, admin JSON, and the web UI
+- Integrates all route handlers via AutoRouter
+
+### Repository DO (`src/git/repoDO.ts`)
+
+- Owns refs/HEAD and loose objects for a single repo
+- Internal endpoints consumed by the Worker and tests:
+  - `GET/PUT /refs` — list/update refs
+  - `GET/PUT /head` — get/update HEAD
+  - `GET|HEAD /obj/:oid` — read loose object (R2-first, fallback DO)
+  - `PUT /obj/:oid` — write loose object (DO then mirror to R2)
+  - `GET /pack-latest`, `GET /packs`, `GET /pack-oids?key=...` — pack metadata
+  - `POST /receive` — receive-pack (push) handler
+- Push flow: raw `.pack` is written to R2, a fast index-only step writes `.idx`, and unpack is queued for background processing on the DO alarm in small time-budgeted chunks.
+- Maintains pack metadata (`lastPackKey`, `lastPackOids`, `packList`, `packOids:<key>`) used by fetch assembly.
+
+### Auth DO (`src/auth/authDO.ts`)
+
+- Stores owners → token hashes
+- `/verify` for Worker auth checks; `/users` for admin UI/API
+- PBKDF2-SHA256 with 100k iterations for password hashing
+
+### Caching Layer (`src/cache/`)
+
+- **UI Cache**: 60s for HEAD/refs, 5min for README, 1hr for tag commits
+- **Object Cache**: Immutable Git objects cached for 1 year
+- Reduces DO/R2 calls significantly, improves response times to <50ms
 
 ## Background processing and alarms
 
