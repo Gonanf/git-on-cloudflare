@@ -36,7 +36,8 @@
       "ts": "module"
     },
     "nodeArguments": [
-      "--import=tsx"
+      "--import=tsx",
+      "--import=./test/register.js"
     ],
     "timeout": "30s"
   }

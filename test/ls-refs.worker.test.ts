@@ -1,7 +1,6 @@
 import { it, expect } from "vitest";
 import { SELF, env, runInDurableObject } from "cloudflare:test";
-import type { RepoDurableObject } from "../src";
-import { decodePktLines } from "../src/git/pktline.ts";
+import { decodePktLines } from "@/git";
 
 function pktLine(s: string | Uint8Array): Uint8Array {
   const enc = typeof s === "string" ? new TextEncoder().encode(s) : s;
@@ -67,7 +66,7 @@ it("ls-refs: resolved HEAD and refs are listed after seeding", async () => {
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
   const stub = env.REPO_DO.get(id);
-  const { commitOid } = await runInDurableObject(stub, async (instance: RepoDurableObject) => {
+  const { commitOid } = await runInDurableObject(stub, async (instance) => {
     const res = await instance.fetch(new Request("https://do/seed", { method: "POST" }));
     return res.json<any>();
   });

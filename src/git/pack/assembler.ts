@@ -1,5 +1,5 @@
-import { packIndexKey } from "../keys.ts";
-import { createLogger } from "../util/logger.ts";
+import { packIndexKey } from "@/keys.ts";
+import { createLogger } from "@/common/logger.ts";
 
 /**
  * Assemble a minimal PACK from a single R2 pack+idx that covers all needed OIDs.

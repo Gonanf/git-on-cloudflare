@@ -1,10 +1,11 @@
-import type { HeadInfo, Ref } from "./repoEngine.ts";
-import { parseCommitText } from "./commitParse.ts";
-import { getRepoStub } from "../util/stub.ts";
-import { packIndexKey } from "../keys.ts";
-import { createMemPackFs } from "./unpack.ts";
-import { createStubLooseLoader } from "../util/loose-loader.ts";
-import { createInflateStream } from "../util/compression.ts";
+import type { HeadInfo, Ref } from "./engine.ts";
+import { parseCommitText } from "@/git/core/commitParse.ts";
+import { getRepoStub } from "@/common/stub.ts";
+import { packIndexKey } from "@/keys.ts";
+import { createMemPackFs } from "@/git/pack/unpack.ts";
+import { createStubLooseLoader } from "@/git/pack/loose-loader.ts";
+import { createInflateStream } from "@/common/compression.ts";
+import { buildObjectCacheKey, cacheOrLoad, type CacheContext } from "@/cache/cache.ts";
 import * as git from "isomorphic-git";
 
 /**
@@ -72,9 +73,10 @@ export async function resolveRef(
 export async function readCommit(
   env: Env,
   repoId: string,
-  oid: string
+  oid: string,
+  cacheCtx?: CacheContext
 ): Promise<{ tree: string; parents: string[]; message: string }> {
-  const obj = await readLooseObjectRaw(env, repoId, oid);
+  const obj = await readLooseObjectRaw(env, repoId, oid, cacheCtx);
   if (!obj || obj.type !== "commit") throw new Error("Not a commit");
   const text = new TextDecoder().decode(obj.payload);
   const parsed = parseCommitText(text);
@@ -90,8 +92,13 @@ export interface CommitInfo {
   message: string;
 }
 
-export async function readCommitInfo(env: Env, repoId: string, oid: string): Promise<CommitInfo> {
-  const obj = await readLooseObjectRaw(env, repoId, oid);
+export async function readCommitInfo(
+  env: Env,
+  repoId: string,
+  oid: string,
+  cacheCtx?: CacheContext
+): Promise<CommitInfo> {
+  const obj = await readLooseObjectRaw(env, repoId, oid, cacheCtx);
   if (!obj || obj.type !== "commit") throw new Error("Not a commit");
   const text = new TextDecoder().decode(obj.payload);
   const parsed = parseCommitText(text);
@@ -105,13 +112,14 @@ export async function listCommits(
   env: Env,
   repoId: string,
   start: string,
-  max = 50
+  max = 50,
+  cacheCtx?: CacheContext
 ): Promise<CommitInfo[]> {
   let oid = await resolveRef(env, repoId, start);
   if (!oid && /^[0-9a-f]{40}$/i.test(start)) oid = start.toLowerCase();
   // Peel annotated tags to their target commit
   if (oid) {
-    const obj = await readLooseObjectRaw(env, repoId, oid);
+    const obj = await readLooseObjectRaw(env, repoId, oid, cacheCtx);
     if (obj && obj.type === "tag") {
       const text = new TextDecoder().decode(obj.payload);
       const m = text.match(/^object ([0-9a-f]{40})/m);
@@ -123,7 +131,7 @@ export async function listCommits(
   const seen = new Set<string>();
   while (commits.length < max && oid && !seen.has(oid)) {
     seen.add(oid);
-    const info = await readCommitInfo(env, repoId, oid);
+    const info = await readCommitInfo(env, repoId, oid, cacheCtx);
     commits.push(info);
     // Follow first parent chain for now
     oid = info.parents[0];
@@ -137,8 +145,13 @@ export interface TreeEntry {
   oid: string;
 }
 
-export async function readTree(env: Env, repoId: string, oid: string): Promise<TreeEntry[]> {
-  const obj = await readLooseObjectRaw(env, repoId, oid);
+export async function readTree(
+  env: Env,
+  repoId: string,
+  oid: string,
+  cacheCtx?: CacheContext
+): Promise<TreeEntry[]> {
+  const obj = await readLooseObjectRaw(env, repoId, oid, cacheCtx);
   if (!obj || obj.type !== "tree") {
     // If we can't find it in loose objects, it might still be in a pack
     // Let's try to get it through the DO endpoint which might trigger pack assembly
@@ -166,7 +179,8 @@ export async function readPath(
   env: Env,
   repoId: string,
   ref: string,
-  path?: string
+  path?: string,
+  cacheCtx?: CacheContext
 ): Promise<
   | { type: "tree"; entries: TreeEntry[]; base: string }
   | {
@@ -183,12 +197,12 @@ export async function readPath(
   if (!startOid && /^[0-9a-f]{40}$/i.test(ref)) startOid = ref.toLowerCase();
   if (!startOid) throw new Error("Ref not found");
 
-  const startObj = await readLooseObjectRaw(env, repoId, startOid);
+  const startObj = await readLooseObjectRaw(env, repoId, startOid, cacheCtx);
   if (!startObj) throw new Error("Object not found");
 
   let currentTreeOid: string | undefined;
   if (startObj.type === "commit") {
-    const { tree } = await readCommit(env, repoId, startOid);
+    const { tree } = await readCommit(env, repoId, startOid, cacheCtx);
     currentTreeOid = tree;
   } else if (startObj.type === "tree") {
     currentTreeOid = startOid;
@@ -197,7 +211,7 @@ export async function readPath(
     const m = text.match(/^object ([0-9a-f]{40})/m);
     if (!m) throw new Error("Unsupported object type");
     const target = m[1];
-    const { tree } = await readCommit(env, repoId, target);
+    const { tree } = await readCommit(env, repoId, target, cacheCtx);
     currentTreeOid = tree;
   } else if (startObj.type === "blob") {
     // If the ref points to a blob directly, only valid when no path is given
@@ -210,14 +224,14 @@ export async function readPath(
   const parts = (path || "").split("/").filter(Boolean);
   let base = "";
   for (let i = 0; i < parts.length; i++) {
-    const entries = await readTree(env, repoId, currentTreeOid);
+    const entries = await readTree(env, repoId, currentTreeOid, cacheCtx);
     const ent = entries.find((e) => e.name === parts[i]);
     if (!ent) throw new Error("Path not found");
     base = parts.slice(0, i + 1).join("/");
     if (ent.mode.startsWith("40000")) {
       currentTreeOid = ent.oid;
       if (i === parts.length - 1) {
-        const finalEntries = await readTree(env, repoId, currentTreeOid);
+        const finalEntries = await readTree(env, repoId, currentTreeOid, cacheCtx);
         return { type: "tree", entries: finalEntries, base };
       }
     } else {
@@ -247,7 +261,7 @@ export async function readPath(
       }
 
       // Load the blob if it's small enough
-      const blob = await readLooseObjectRaw(env, repoId, ent.oid);
+      const blob = await readLooseObjectRaw(env, repoId, ent.oid, cacheCtx);
       if (!blob || blob.type !== "blob") throw new Error("Not a blob");
 
       // Double-check actual size after decompression
@@ -267,7 +281,7 @@ export async function readPath(
     }
   }
   // root tree (or descended directory)
-  const rootEntries = await readTree(env, repoId, currentTreeOid);
+  const rootEntries = await readTree(env, repoId, currentTreeOid, cacheCtx);
   return { type: "tree", entries: rootEntries, base };
 }
 
@@ -295,9 +309,10 @@ function parseTree(buf: Uint8Array): TreeEntry[] {
 export async function readBlob(
   env: Env,
   repoId: string,
-  oid: string
+  oid: string,
+  cacheCtx?: CacheContext
 ): Promise<{ content: Uint8Array | null; type: string | null }> {
-  const obj = await readLooseObjectRaw(env, repoId, oid);
+  const obj = await readLooseObjectRaw(env, repoId, oid, cacheCtx);
   if (!obj) return { content: null, type: null };
   return { content: obj.payload, type: obj.type };
 }
@@ -384,100 +399,130 @@ export async function readBlobStream(
 export async function readLooseObjectRaw(
   env: Env,
   repoId: string,
-  oid: string
+  oid: string,
+  cacheCtx?: CacheContext
 ): Promise<{ type: string; payload: Uint8Array } | undefined> {
   const oidLc = oid.toLowerCase();
-  // Try loose object via DO first (preferred)
-  try {
-    const stub = getRepoStub(env, repoId);
-    const res = await stub.fetch(`https://do/obj/${oidLc}`, { method: "GET" });
-    if (res.ok) {
-      const z = new Uint8Array(await res.arrayBuffer());
-      const ds = createInflateStream();
-      const stream = new Blob([z]).stream().pipeThrough(ds);
-      const raw = new Uint8Array(await new Response(stream).arrayBuffer());
-      // header: <type> <len>\0
-      let p = 0;
-      let sp = p;
-      while (sp < raw.length && raw[sp] !== 0x20) sp++;
-      const type = new TextDecoder().decode(raw.subarray(p, sp));
-      let nul = sp + 1;
-      while (nul < raw.length && raw[nul] !== 0x00) nul++;
-      const payload = raw.subarray(nul + 1);
-      return { type, payload };
-    }
-  } catch {}
 
-  // Fallback: read directly from R2 packs using isomorphic-git. Prefer the latest pack,
-  // but search recent packs via DO metadata if needed to locate the OID efficiently.
-  try {
-    const stub = getRepoStub(env, repoId);
-    // Get recent packs recorded by the DO
-    const packsRes = await stub.fetch("https://do/packs", { method: "GET" });
-    const packList: string[] = packsRes.ok
-      ? ((await packsRes.json()) as { keys: string[] }).keys || []
-      : [];
-    // Fallback to just latest if packs list is unavailable
-    if (packList.length === 0) {
-      const metaRes = await stub.fetch("https://do/pack-latest", { method: "GET" });
-      if (!metaRes.ok) return undefined;
-      const meta = (await metaRes.json()) as { key: string } | null;
-      if (!meta?.key) return undefined;
-      packList.push(meta.key);
-    }
-
-    // Prefer the pack that contains the OID, but load multiple packs to satisfy deltas
-    let chosenPackKey: string | undefined;
-    const contains: Record<string, boolean> = {};
-    for (const key of packList) {
-      try {
-        const oidsRes = await stub.fetch(`https://do/pack-oids?key=${encodeURIComponent(key)}`);
-        if (!oidsRes.ok) continue;
-        const data = (await oidsRes.json()) as { key: string; oids: string[] };
-        const set = new Set((data.oids || []).map((x) => x.toLowerCase()));
-        const has = set.has(oidLc);
-        contains[key] = has;
-        if (!chosenPackKey && has) chosenPackKey = key;
-      } catch {}
-    }
-    if (!chosenPackKey) chosenPackKey = packList[0];
-
-    // Load up to the first 5 packs (newest-first) into the in-memory fs
-    const toLoad = packList.slice(0, Math.min(5, packList.length));
-    if (!toLoad.includes(chosenPackKey)) toLoad.unshift(chosenPackKey);
-    const seenKeys = new Set<string>();
-    const uniqueLoad = toLoad.filter((k) => (seenKeys.has(k) ? false : (seenKeys.add(k), true)));
-    const files = new Map<string, Uint8Array>();
-    await Promise.all(
-      uniqueLoad.map(async (key) => {
-        try {
-          const [p, i] = await Promise.all([
-            env.REPO_BUCKET.get(key),
-            env.REPO_BUCKET.get(packIndexKey(key)),
-          ]);
-          if (!p || !i) return;
-          const packBuf = new Uint8Array(await p.arrayBuffer());
-          const idxBuf = new Uint8Array(await i.arrayBuffer());
-          const base = key.split("/").pop()!;
-          const idxBase = base.replace(/\.pack$/i, ".idx");
-          files.set(`/git/objects/pack/${base}`, packBuf);
-          files.set(`/git/objects/pack/${idxBase}`, idxBuf);
-        } catch {}
-      })
-    );
-    if (files.size === 0) return undefined;
-
-    // Create a loader for existing loose objects (needed for thin packs)
-    const looseLoader = createStubLooseLoader(stub);
-
-    const fs = createMemPackFs(files, { looseLoader });
-    const dir = "/git";
-    const result = (await git.readObject({ fs, dir, oid: oidLc, format: "content" })) as {
-      object: Uint8Array;
-      type: "blob" | "tree" | "commit" | "tag";
-    };
-    return { type: result.type, payload: result.object };
-  } catch {
+  // Helper function to load from Durable Object state
+  const loadFromState = async (): Promise<{ type: string; payload: Uint8Array } | undefined> => {
+    try {
+      const stub = getRepoStub(env, repoId);
+      const res = await stub.fetch(`https://do/obj/${oidLc}`, { method: "GET" });
+      if (res.ok) {
+        const z = new Uint8Array(await res.arrayBuffer());
+        const ds = createInflateStream();
+        const stream = new Blob([z]).stream().pipeThrough(ds);
+        const raw = new Uint8Array(await new Response(stream).arrayBuffer());
+        // header: <type> <len>\0
+        let p = 0;
+        let sp = p;
+        while (sp < raw.length && raw[sp] !== 0x20) sp++;
+        const type = new TextDecoder().decode(raw.subarray(p, sp));
+        let nul = sp + 1;
+        while (nul < raw.length && raw[nul] !== 0x00) nul++;
+        const payload = raw.subarray(nul + 1);
+        return { type, payload };
+      }
+    } catch {}
     return undefined;
+  };
+
+  // Use cache helper if cache context is available
+  if (cacheCtx) {
+    const cacheKey = buildObjectCacheKey(cacheCtx.req, repoId, oidLc);
+    return cacheOrLoad(
+      cacheKey,
+      async () => {
+        // Try loose object via DO first (preferred)
+        const stateResult = await loadFromState();
+        if (stateResult) return stateResult;
+
+        // If DO fetch fails, try R2 packs (fallback logic below)
+        return await loadFromPacks();
+      },
+      cacheCtx.ctx
+    );
   }
+
+  // No request available, load without caching
+  const stateResult = await loadFromState();
+  if (stateResult) return stateResult;
+
+  // Helper function to load from packs
+  const loadFromPacks = async () => {
+    try {
+      const stub = getRepoStub(env, repoId);
+      // Get recent packs recorded by the DO
+      const packsRes = await stub.fetch("https://do/packs", { method: "GET" });
+      const packList: string[] = packsRes.ok
+        ? ((await packsRes.json()) as { keys: string[] }).keys || []
+        : [];
+      // Fallback to just latest if packs list is unavailable
+      if (packList.length === 0) {
+        const metaRes = await stub.fetch("https://do/pack-latest", { method: "GET" });
+        if (!metaRes.ok) return undefined;
+        const meta = (await metaRes.json()) as { key: string } | null;
+        if (!meta?.key) return undefined;
+        packList.push(meta.key);
+      }
+
+      // Prefer the pack that contains the OID, but load multiple packs to satisfy deltas
+      let chosenPackKey: string | undefined;
+      const contains: Record<string, boolean> = {};
+      for (const key of packList) {
+        try {
+          const oidsRes = await stub.fetch(`https://do/pack-oids?key=${encodeURIComponent(key)}`);
+          if (!oidsRes.ok) continue;
+          const data = (await oidsRes.json()) as { key: string; oids: string[] };
+          const set = new Set((data.oids || []).map((x) => x.toLowerCase()));
+          const has = set.has(oidLc);
+          contains[key] = has;
+          if (!chosenPackKey && has) chosenPackKey = key;
+        } catch {}
+      }
+      if (!chosenPackKey) chosenPackKey = packList[0];
+
+      // Load up to the first 5 packs (newest-first) into the in-memory fs
+      const toLoad = packList.slice(0, Math.min(5, packList.length));
+      if (!toLoad.includes(chosenPackKey)) toLoad.unshift(chosenPackKey);
+      const seenKeys = new Set<string>();
+      const uniqueLoad = toLoad.filter((k) => (seenKeys.has(k) ? false : (seenKeys.add(k), true)));
+      const files = new Map<string, Uint8Array>();
+      await Promise.all(
+        uniqueLoad.map(async (key) => {
+          try {
+            const [p, i] = await Promise.all([
+              env.REPO_BUCKET.get(key),
+              env.REPO_BUCKET.get(packIndexKey(key)),
+            ]);
+            if (!p || !i) return;
+            const packBuf = new Uint8Array(await p.arrayBuffer());
+            const idxBuf = new Uint8Array(await i.arrayBuffer());
+            const base = key.split("/").pop()!;
+            const idxBase = base.replace(/\.pack$/i, ".idx");
+            files.set(`/git/objects/pack/${base}`, packBuf);
+            files.set(`/git/objects/pack/${idxBase}`, idxBuf);
+          } catch {}
+        })
+      );
+      if (files.size === 0) return undefined;
+
+      // Create a loader for existing loose objects (needed for thin packs)
+      const looseLoader = createStubLooseLoader(stub);
+
+      const fs = createMemPackFs(files, { looseLoader });
+      const dir = "/git";
+      const result = (await git.readObject({ fs, dir, oid: oidLc, format: "content" })) as {
+        object: Uint8Array;
+        type: "blob" | "tree" | "commit" | "tag";
+      };
+      return { type: result.type, payload: result.object };
+    } catch {
+      return undefined;
+    }
+  };
+
+  // Fallback: read directly from R2 packs
+  return await loadFromPacks();
 }

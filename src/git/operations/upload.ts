@@ -1,11 +1,14 @@
-import { pktLine, flushPkt, delimPkt, concatChunks } from "./pktline.ts";
-import { decodePktLines } from "./pktline.ts";
-import { getRepoStub } from "../util/stub.ts";
-import { readLooseObjectRaw } from "./gitRead.ts";
-import { assemblePackFromR2, assemblePackFromMultiplePacks } from "./packAssembler.ts";
-export { encodeOfsDeltaDistance } from "./packAssembler.ts";
-import { objTypeCode, encodeObjHeader, type GitObjectType } from "../util/git-objects.ts";
-import { deflate } from "../util/compression.ts";
+import { pktLine, flushPkt, delimPkt, concatChunks, decodePktLines } from "@/git/core/pktline.ts";
+import { getRepoStub } from "@/common/stub.ts";
+import { readLooseObjectRaw } from "./read.ts";
+import {
+  assemblePackFromR2,
+  assemblePackFromMultiplePacks,
+  encodeOfsDeltaDistance,
+} from "@/git/pack/assembler.ts";
+export { encodeOfsDeltaDistance };
+import { objTypeCode, encodeObjHeader, type GitObjectType } from "@/git/core/objects.ts";
+import { deflate } from "@/common/compression.ts";
 
 export function parseFetchArgs(body: Uint8Array) {
   const items = decodePktLines(body);

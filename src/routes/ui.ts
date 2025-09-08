@@ -5,15 +5,29 @@ import {
   listCommits,
   readCommitInfo,
   readBlobStream,
-} from "../git/gitRead";
-import type { CommitInfo } from "../git/gitRead";
-import { getRepoStub } from "../util/stub";
-import { repoKey } from "../keys";
-import { escapeHtml, detectBinary, formatSize, bytesToText, formatWhen } from "../util/format";
-import { renderTemplate, renderPage } from "../util/render";
-import { listReposForOwner } from "../util/ownerRegistry";
-import { buildCacheKeyFrom, cacheGetJSON, cachePutJSON } from "../util/cache";
-import { getUnpackProgressHtml } from "../util/progress";
+  type CommitInfo,
+  type TreeEntry,
+} from "@/git";
+import { getRepoStub } from "@/common";
+import { repoKey } from "@/keys";
+import {
+  escapeHtml,
+  detectBinary,
+  formatSize,
+  bytesToText,
+  formatWhen,
+  renderTemplate,
+  renderPage,
+  getUnpackProgressHtml,
+} from "@/web";
+import { listReposForOwner } from "@/registry";
+import {
+  buildCacheKeyFrom,
+  cacheGetJSON,
+  cachePutJSON,
+  cacheOrLoadJSON,
+  CacheContext,
+} from "@/cache";
 
 export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Owner repos list
@@ -33,10 +47,36 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     return renderPage(env, request, `${owner} · Repositories`, body);
   });
   // Repo overview page
-  router.get(`/:owner/:repo`, async (request, env: Env) => {
+  router.get(`/:owner/:repo`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
     const repoId = repoKey(owner, repo);
-    const { head, refs } = await getHeadAndRefs(env, repoId);
+
+    // Cache HEAD and refs for 60 seconds for branches, longer for tags
+    const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", {
+      repo: repoId,
+    });
+
+    let head: any;
+    let refs: any[] = [];
+
+    // Try cache first
+    try {
+      const cached = await cacheGetJSON<{ head: any; refs: any[] }>(cacheKeyRefs);
+      if (cached) {
+        head = cached.head;
+        refs = cached.refs;
+      }
+    } catch {}
+
+    // Fetch if not cached
+    if (!refs || refs.length === 0) {
+      const result = await getHeadAndRefs(env, repoId);
+      head = result.head;
+      refs = result.refs;
+      // Cache for 60 seconds
+      await cachePutJSON(cacheKeyRefs, { head, refs }, 60);
+    }
+
     const defaultRef = head?.target || (refs[0]?.name ?? "refs/heads/main");
     const refShort = defaultRef.replace(/^refs\/(heads|tags)\//, "");
     const refEnc = encodeURIComponent(refShort);
@@ -63,25 +103,51 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           .join("")
       : '<div class="muted">No tags</div>';
 
-    // Try to load README at repo root on default branch
+    // Try to load README at repo root on default branch with caching
     let readmeHtml = "";
+    const cacheKeyReadme = buildCacheKeyFrom(request, "/_cache/readme", {
+      repo: repoId,
+      ref: refShort,
+    });
+
+    // Try cache first for README
     try {
-      const candidates = ["README.md", "README.MD", "Readme.md", "README", "readme.md"]; // simple variants
-      for (const name of candidates) {
-        try {
-          const res = await readPath(env, repoId, refShort, name);
-          if (res.type === "blob") {
-            const text = bytesToText(res.content);
-            readmeHtml = `<h3>README</h3><div data-markdown="1" data-md-owner="${escapeHtml(
-              owner
-            )}" data-md-repo="${escapeHtml(repo)}" data-md-ref="${escapeHtml(
-              refShort
-            )}" data-md-base=""><pre class="md-src">${escapeHtml(text)}</pre></div>`;
-            break;
-          }
-        } catch {}
+      const cachedReadme = await cacheGetJSON<{ html: string }>(cacheKeyReadme);
+      if (cachedReadme) {
+        readmeHtml = cachedReadme.html;
       }
     } catch {}
+
+    if (!readmeHtml) {
+      try {
+        // Load all candidates in parallel for better performance
+        const candidates = ["README.md", "README.MD", "Readme.md", "README", "readme.md"];
+        const readmePromises = candidates.map(async (name) => {
+          try {
+            const cacheCtx: CacheContext = { req: request, ctx };
+            const res = await readPath(env, repoId, refShort, name, cacheCtx);
+            if (res.type === "blob") {
+              return { name, content: res.content };
+            }
+          } catch {}
+          return null;
+        });
+
+        const results = await Promise.all(readmePromises);
+        const found = results.find((r) => r !== null);
+
+        if (found) {
+          const text = bytesToText(found.content);
+          readmeHtml = `<h3>README</h3><div data-markdown="1" data-md-owner="${escapeHtml(
+            owner
+          )}" data-md-repo="${escapeHtml(repo)}" data-md-ref="${escapeHtml(
+            refShort
+          )}" data-md-base=""><pre class="md-src">${escapeHtml(text)}</pre></div>`;
+          // Cache README for 5 minutes
+          await cachePutJSON(cacheKeyReadme, { html: readmeHtml }, 300);
+        }
+      } catch {}
+    }
 
     // Check unpacking progress (shared helper)
     const progressHtml = await getUnpackProgressHtml(env, repoId);
@@ -109,17 +175,41 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Tree/Blob browser using query params: ?ref=<branch|tag|oid>&path=<path>
-  router.get(`/:owner/:repo/tree`, async (request, env: Env) => {
+  router.get(`/:owner/:repo/tree`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
     const repoId = repoKey(owner, repo);
     const u = new URL(request.url);
     const ref = u.searchParams.get("ref") || "main";
     const path = u.searchParams.get("path") || "";
+
+    // Build cache key for tree content
+    const cacheKeyTree = buildCacheKeyFrom(request, "/_cache/tree", {
+      repo: repoId,
+      ref,
+      path,
+    });
+
+    // Try cache first
+    let result: any = null;
     try {
-      const result = await readPath(env, repoId, ref, path);
+      const cached = await cacheGetJSON<any>(cacheKeyTree);
+      if (cached) {
+        result = cached;
+      }
+    } catch {}
+
+    try {
+      // Fetch if not cached
+      if (!result) {
+        const cacheCtx: CacheContext = { req: request, ctx };
+        result = await readPath(env, repoId, ref, path, cacheCtx);
+        // Cache tree listings for 60 seconds, blob metadata for 5 minutes
+        const ttl = result.type === "tree" ? 60 : 300;
+        await cachePutJSON(cacheKeyTree, result, ttl);
+      }
       if (result.type === "tree") {
         const rows = result.entries
-          .map((e) => {
+          .map((e: TreeEntry) => {
             const isDir = e.mode.startsWith("40000");
             const nextPath = (path ? path + "/" : "") + e.name;
             const href = isDir
@@ -217,14 +307,15 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
    * @note Large files (>1MB) show size info instead of content
    * @note Binary files are detected and show download link
    */
-  router.get(`/:owner/:repo/blob`, async (request, env: Env) => {
+  router.get(`/:owner/:repo/blob`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
     const repoId = repoKey(owner, repo);
     const u = new URL(request.url);
     const ref = u.searchParams.get("ref") || "main";
     const path = u.searchParams.get("path") || "";
     try {
-      const result = await readPath(env, repoId, ref, path);
+      const cacheCtx: CacheContext = { req: request, ctx };
+      const result = await readPath(env, repoId, ref, path, cacheCtx);
       if (result.type !== "blob") return new Response("Not a blob\n", { status: 400 });
       const fileName = path || result.oid;
 
@@ -314,7 +405,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Commit list
-  router.get(`/:owner/:repo/commits`, async (request, env: Env) => {
+  router.get(`/:owner/:repo/commits`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
     const repoId = repoKey(owner, repo);
     const u = new URL(request.url);
@@ -371,34 +462,40 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       per: String(perPage),
       head: isFirstPage ? headOid : undefined,
     });
-    try {
-      const cached = await cacheGetJSON<{ items: CommitInfo[]; next?: string }>(keyReq);
-      if (cached) {
-        commits = cached.items || [];
-        nextCursor = cached.next;
-      }
-    } catch {}
-    try {
-      if (commits.length === 0) {
-        const stub = getRepoStub(env, repoId);
-        const qp = new URLSearchParams({ ref, max: String(perPage) });
-        if (cursor) qp.set("cursor", cursor);
-        const doRes = await stub.fetch(`https://do/commits?${qp.toString()}`, { method: "GET" });
-        if (doRes.ok) {
-          const parsed = (await doRes.json()) as { items: CommitInfo[]; next?: string };
-          commits = parsed.items || [];
-          nextCursor = parsed.next;
-        } else {
-          commits = await listCommits(env, repoId, ref, perPage);
+
+    // Calculate TTL based on ref type
+    const ttl = cursor ? 3600 : isTagRef || /^[0-9a-f]{40}$/i.test(ref) ? 3600 : 60;
+
+    // Use cache helper for cleaner code
+    const result = await cacheOrLoadJSON<{ items: CommitInfo[]; next?: string }>(
+      keyReq,
+      async () => {
+        try {
+          const stub = getRepoStub(env, repoId);
+          const qp = new URLSearchParams({ ref, max: String(perPage) });
+          if (cursor) qp.set("cursor", cursor);
+          const doRes = await stub.fetch(`https://do/commits?${qp.toString()}`, { method: "GET" });
+          if (doRes.ok) {
+            const parsed = (await doRes.json()) as { items: CommitInfo[]; next?: string };
+            return { items: parsed.items || [], next: parsed.next };
+          } else {
+            const cacheCtx: CacheContext = { req: request, ctx };
+            const items = await listCommits(env, repoId, ref, perPage, cacheCtx);
+            return { items, next: undefined };
+          }
+        } catch {
+          // Fallback to existing path on any error
+          const cacheCtx: CacheContext = { req: request, ctx };
+          const items = await listCommits(env, repoId, ref, perPage, cacheCtx);
+          return { items, next: undefined };
         }
-        // Fill cache after fetch
-        const ttl = cursor ? 3600 : isTagRef || /^[0-9a-f]{40}$/i.test(ref) ? 3600 : 60;
-        await cachePutJSON(keyReq, { items: commits, next: nextCursor }, ttl);
-      }
-    } catch {
-      // Fallback to existing path on any error
-      if (commits.length === 0) commits = await listCommits(env, repoId, ref, perPage);
-    }
+      },
+      ttl,
+      ctx
+    );
+
+    commits = result?.items || [];
+    nextCursor = result?.next;
     const rows = commits
       .map((c) => {
         const subject = (c.message || "").split(/\r?\n/)[0] || "(no message)";
@@ -473,11 +570,12 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Commit details
-  router.get(`/:owner/:repo/commit/:oid`, async (request, env: Env) => {
+  router.get(`/:owner/:repo/commit/:oid`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo, oid } = request.params;
     const repoId = repoKey(owner, repo);
     try {
-      const c = await readCommitInfo(env, repoId, oid);
+      const cacheCtx: CacheContext = { req: request, ctx };
+      const c = await readCommitInfo(env, repoId, oid, cacheCtx);
       const when = c.author ? formatWhen(c.author.when, c.author.tz) : "";
       const parents = c.parents
         .map((p) => `<a href="/${owner}/${repo}/commit/${p}">${p.slice(0, 7)}</a>`)
@@ -555,7 +653,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Raw blob by ref+path (used for images in Markdown)
-  router.get(`/:owner/:repo/rawpath`, async (request: any, env: Env) => {
+  router.get(`/:owner/:repo/rawpath`, async (request: any, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
     const url = new URL(request.url);
     const ref = url.searchParams.get("ref") || "main";
@@ -565,7 +663,8 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
 
     try {
       const repoId = repoKey(owner, repo);
-      const result = await readPath(env, repoId, ref, path);
+      const cacheCtx: CacheContext = { req: request, ctx };
+      const result = await readPath(env, repoId, ref, path, cacheCtx);
       if (result.type !== "blob") return new Response("Not a blob\n", { status: 400 });
       const streamResponse = await readBlobStream(env, repoId, result.oid);
       if (!streamResponse) return new Response("Not found\n", { status: 404 });

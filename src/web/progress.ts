@@ -1,4 +1,4 @@
-import { getRepoStub } from "./stub";
+import { getRepoStub } from "@/common/stub";
 
 /**
  * Fetch unpacking progress banner HTML for a repository.

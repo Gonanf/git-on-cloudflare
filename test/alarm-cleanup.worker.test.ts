@@ -1,6 +1,5 @@
 import { it, expect } from "vitest";
 import { env, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
-import type { RepoDurableObject } from "../src";
 
 function makeRepoId(suffix: string) {
   return `alarm/${suffix}-${Math.random().toString(36).slice(2, 8)}`;
@@ -55,7 +54,7 @@ it("alarm: does not delete a non-empty repo", async () => {
   const stub = env.REPO_DO.get(id);
 
   // Seed the repo to create refs/head and objects
-  await runInDurableObject(stub, async (instance: RepoDurableObject) => {
+  await runInDurableObject(stub, async (instance) => {
     await instance.fetch(new Request("https://do/seed", { method: "POST" }));
   });
 

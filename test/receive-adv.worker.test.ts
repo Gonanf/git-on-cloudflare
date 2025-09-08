@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
-import { decodePktLines } from "../src/git/pktline.ts";
+import { decodePktLines } from "@/git";
 
 it("advertises receive-pack refs with capabilities (atomic, report-status, ofs-delta)", async () => {
   const owner = "o";

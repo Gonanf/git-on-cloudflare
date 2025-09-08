@@ -1,5 +1,5 @@
 import { AutoRouter } from "itty-router";
-import { renderTemplate, renderPage } from "./util/render";
+import { renderTemplate, renderPage } from "./web";
 import { registerGitRoutes } from "./routes/git";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerUiRoutes } from "./routes/ui";

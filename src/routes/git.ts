@@ -1,11 +1,17 @@
 import { AutoRouter } from "itty-router";
-import { capabilityAdvertisement, parseV2Command } from "../git/protocol";
-import { handleFetchV2 } from "../git/uploadPack";
-import { JsRepoEngine } from "../git/repoEngine";
-import { getRepoStub } from "../util/stub";
-import { repoKey } from "../keys";
-import { verifyAuth } from "../util/auth";
-import { addRepoToOwner, removeRepoFromOwner } from "../util/ownerRegistry";
+import {
+  capabilityAdvertisement,
+  parseV2Command,
+  handleFetchV2,
+  JsRepoEngine,
+  pktLine,
+  flushPkt,
+  concatChunks,
+} from "@/git";
+import { getRepoStub } from "@/common";
+import { repoKey } from "@/keys";
+import { verifyAuth } from "@/auth";
+import { addRepoToOwner, removeRepoFromOwner } from "@/registry";
 
 /**
  * Handles Git upload-pack (fetch) POST requests.
@@ -34,8 +40,6 @@ async function handleUploadPackPOST(env: Env, repoId: string, request: Request) 
       engine.listRefs().catch(() => []),
     ]);
     const chunks: Uint8Array[] = [];
-    // Reuse pkt-line helpers via dynamic import to avoid direct dependency here
-    const { pktLine, flushPkt, concatChunks } = await import("../git/pktline");
     // Per spec, HEAD should be first when available
     if (head && head.target) {
       const t = (refs as { name: string; oid: string }[]).find((r) => r.name === head.target);

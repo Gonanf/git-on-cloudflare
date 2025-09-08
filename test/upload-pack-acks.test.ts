@@ -1,6 +1,5 @@
 import test from "ava";
-import { respondWithPackfile } from "../src/git/uploadPack.ts";
-import { decodePktLines } from "../src/git/pktline.ts";
+import { decodePktLines, respondWithPackfile } from "@/git/index.ts";
 
 async function getBytes(r: Response): Promise<Uint8Array> {
   const ab = await r.arrayBuffer();

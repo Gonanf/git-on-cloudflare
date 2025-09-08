@@ -1,7 +1,6 @@
 import { it, expect } from "vitest";
 import { env, SELF, runInDurableObject } from "cloudflare:test";
-import type { RepoDurableObject } from "../src";
-import { decodePktLines, pktLine, flushPkt, concatChunks } from "../src/git/pktline.ts";
+import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/git";
 
 async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
   const cs: any = new (globalThis as any).CompressionStream("deflate");
@@ -122,7 +121,7 @@ it("unpack-progress advances via alarm and finishes", async () => {
   let guard = 200;
   let lastProcessed = -1;
   while (guard-- > 0) {
-    await runInDurableObject(stub, async (instance: RepoDurableObject) => {
+    await runInDurableObject(stub, async (instance) => {
       await instance.alarm();
     });
     const cur = await progress();

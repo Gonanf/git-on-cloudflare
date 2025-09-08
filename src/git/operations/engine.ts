@@ -1,4 +1,4 @@
-import { getRepoStub } from "../util/stub";
+import { getRepoStub } from "@/common/stub.ts";
 
 export interface Ref {
   name: string;
@@ -19,10 +19,13 @@ export interface RepoEngine {
 
 // Placeholder JS engine implementation (to be replaced with real logic)
 export class JsRepoEngine implements RepoEngine {
-  constructor(
-    private env: Env,
-    private repoId: string
-  ) {}
+  private env: Env;
+  private repoId: string;
+
+  constructor(env: Env, repoId: string) {
+    this.env = env;
+    this.repoId = repoId;
+  }
 
   async listRefs(): Promise<Ref[]> {
     const stub = getRepoStub(this.env, this.repoId);

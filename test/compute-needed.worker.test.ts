@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import type { RepoDurableObject } from "../src";
-import { computeNeeded } from "../src/git/uploadPack.ts";
+import type { RepoDurableObject } from "@/index";
+import { computeNeeded } from "@/git";
 
 it("computeNeeded includes commit+tree when no haves, and prunes when have commit", async () => {
   const owner = "o";

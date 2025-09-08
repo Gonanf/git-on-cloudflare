@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { env, SELF, runInDurableObject } from "cloudflare:test";
-import type { RepoDurableObject } from "../src";
-import { pktLine, delimPkt, flushPkt, concatChunks } from "../src/git/pktline.ts";
+import type { RepoDurableObject } from "@/index";
+import { pktLine, delimPkt, flushPkt, concatChunks } from "@/git";
 
 function buildFetchBody({
   wants,

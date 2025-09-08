@@ -1,8 +1,8 @@
 import { AutoRouter } from "itty-router";
-import { getRepoStub } from "../util/stub";
-import { repoKey } from "../keys";
-import { verifyAuth } from "../util/auth";
-import { listReposForOwner, addRepoToOwner, removeRepoFromOwner } from "../util/ownerRegistry";
+import { getRepoStub } from "@/common";
+import { repoKey } from "@/keys";
+import { verifyAuth } from "@/auth";
+import { listReposForOwner, addRepoToOwner, removeRepoFromOwner } from "@/registry";
 
 export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
   // Owner registry: list current repos from KV

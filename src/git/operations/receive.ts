@@ -1,17 +1,17 @@
-import { parsePktSection, pktLine, flushPkt, concatChunks } from "./pktline.ts";
+import { parsePktSection, pktLine, flushPkt, concatChunks } from "@/git/core/pktline.ts";
 import {
   asTypedStorage,
   packOidsKey,
-  RepoStateSchema,
-  Head,
+  objKey,
+  type Head,
+  type RepoStateSchema,
   type TypedStorage,
-} from "../do/repoState.ts";
-import { indexPackOnly, createMemPackFs } from "./unpack.ts";
-import { r2PackKey, r2LooseKey } from "../keys.ts";
+} from "@/do/repoState.ts";
+import { indexPackOnly, createMemPackFs } from "@/git/pack/unpack.ts";
+import { r2PackKey, r2LooseKey } from "@/keys.ts";
 import * as git from "isomorphic-git";
-import { objKey } from "../do/repoState.ts";
-import { createLogger } from "../util/logger.ts";
-import { createLooseLoader } from "../util/loose-loader.ts";
+import { createLogger } from "@/common/logger.ts";
+import { createLooseLoader } from "@/git/pack/loose-loader.ts";
 
 // Connectivity check for receive-pack commands.
 // Ensures that each updated ref points to an object we can resolve immediately:

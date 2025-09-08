@@ -2,10 +2,8 @@
  * Shared test utilities for Git operations
  */
 
-import { concatChunks } from "../../src/git/pktline.ts";
-import { deflate } from "../../src/util/compression.ts";
-import { encodeObjHeader, objTypeCode, type GitObjectType } from "../../src/util/git-objects.ts";
-import { zeroOid } from "../../src/util/hex.ts";
+import { deflate, zeroOid } from "@/common/index.ts";
+import { concatChunks, encodeObjHeader, GitObjectType, objTypeCode } from "@/git/index.ts";
 
 /**
  * Build a Git pack file from objects
@@ -44,4 +42,4 @@ export function zero40(): string {
 /**
  * Re-export encodeObjHeader for tests that need it directly
  */
-export { encodeObjHeader } from "../../src/util/git-objects.ts";
+export { encodeObjHeader } from "@/git/index.ts";

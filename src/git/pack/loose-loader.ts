@@ -3,10 +3,10 @@
  * Used with createMemPackFs to enable thin pack resolution
  */
 
-import type { TypedStorage } from "../do/repoState.ts";
-import type { RepoStateSchema } from "../do/repoState.ts";
-import { objKey } from "../do/repoState.ts";
-import { r2LooseKey } from "../keys.ts";
+import type { TypedStorage } from "@/do/repoState.ts";
+import type { RepoStateSchema } from "@/do/repoState.ts";
+import { objKey } from "@/do/repoState.ts";
+import { r2LooseKey } from "@/keys.ts";
 
 /**
  * Create a loose object loader that reads from DO storage and R2
