@@ -42,13 +42,17 @@ async function runConnectivityCheck(args: {
     // Build an in-memory idx for the incoming pack to enable oid lookups reliably
     const currentPackOids = new Set<string>();
     try {
-      const idxRes: any = await git.indexPack({ fs, dir, filepath: `objects/pack/pack-input.pack` });
+      const idxRes: any = await git.indexPack({
+        fs,
+        dir,
+        filepath: `objects/pack/pack-input.pack`,
+      });
       if (idxRes && Array.isArray(idxRes.oids)) {
         for (const oid of idxRes.oids) currentPackOids.add(String(oid).toLowerCase());
       }
     } catch {}
-    const packList = (((await store.get("packList")) as string[] | undefined) ?? []).filter(
-      (k) => (packKey ? k !== packKey : true)
+    const packList = (((await store.get("packList")) as string[] | undefined) ?? []).filter((k) =>
+      packKey ? k !== packKey : true
     );
 
     // Per-run memo caches to avoid repeated reads
@@ -61,7 +65,8 @@ async function runConnectivityCheck(args: {
       const lc = oid.toLowerCase();
       if (hasCache.has(lc)) return hasCache.get(lc)!;
       let ok = false;
-      if (currentPackOids.has(lc)) ok = true; // present in incoming pack index
+      if (currentPackOids.has(lc))
+        ok = true; // present in incoming pack index
       else if (newOidsSet && newOidsSet.has(lc)) ok = true;
       else if (await store.get(objKey(lc))) ok = true;
       else {
@@ -87,17 +92,28 @@ async function runConnectivityCheck(args: {
       const cached = treeCache.get(tLc);
       if (cached !== undefined) return cached;
       let ok = false;
-      try {
-        await git.readObject({ fs, dir, oid: tLc, format: "content" });
+
+      // First check if tree is in the incoming pack (required for thin packs)
+      if (currentPackOids.has(tLc)) {
         ok = true;
-      } catch {}
-      if (!ok) {
+      } else {
+        // Try to read from the incoming pack via isomorphic-git
         try {
-          const obj = (await git.readObject({ fs, dir, oid: tLc, format: "parsed" })) as any;
-          if (obj && obj.type === "tree") ok = true;
+          await git.readObject({ fs, dir, oid: tLc, format: "content" });
+          ok = true;
         } catch {}
+
+        if (!ok) {
+          try {
+            const obj = (await git.readObject({ fs, dir, oid: tLc, format: "parsed" })) as any;
+            if (obj && obj.type === "tree") ok = true;
+          } catch {}
+        }
+
+        // Only fall back to checking existing storage if not in incoming pack
+        if (!ok) ok = await hasObject(tLc);
       }
-      if (!ok) ok = await hasObject(tLc);
+
       treeCache.set(tLc, ok);
       return ok;
     };
@@ -145,7 +161,13 @@ async function runConnectivityCheck(args: {
           const tagObj = obj.object as { object?: string; type?: string } | undefined;
           const targetOid = (tagObj?.object || "").toLowerCase();
           const targetType = (tagObj?.type || "") as "commit" | "tree" | "blob" | "tag" | "";
-          if (targetOid && (targetType === "commit" || targetType === "tree" || targetType === "blob" || targetType === "tag")) {
+          if (
+            targetOid &&
+            (targetType === "commit" ||
+              targetType === "tree" ||
+              targetType === "blob" ||
+              targetType === "tag")
+          ) {
             const k: FinalKind = { type: "tag", oid: lc, targetOid, targetType };
             kindCache.set(lc, k);
             return k;
@@ -161,7 +183,13 @@ async function runConnectivityCheck(args: {
           const mType = text.match(/^type\s+(\w+)/m);
           const targetOid = (mObj ? mObj[1] : "").toLowerCase();
           const targetType = (mType ? mType[1] : "") as "commit" | "tree" | "blob" | "tag" | "";
-          if (targetOid && (targetType === "commit" || targetType === "tree" || targetType === "blob" || targetType === "tag")) {
+          if (
+            targetOid &&
+            (targetType === "commit" ||
+              targetType === "tree" ||
+              targetType === "blob" ||
+              targetType === "tag")
+          ) {
             const k: FinalKind = { type: "tag", oid: lc, targetOid, targetType };
             kindCache.set(lc, k);
             return k;
@@ -201,7 +229,12 @@ async function runConnectivityCheck(args: {
           case "commit": {
             const ok = await ensureTreePresent(kind.tree);
             if (!ok) {
-              log.warn("connectivity:missing-tree", { ref: c.ref, tree: kind.tree });
+              log.warn("connectivity:missing-tree", {
+                ref: c.ref,
+                tree: kind.tree,
+                inPack: currentPackOids.has(kind.tree.toLowerCase()),
+                inStorage: await hasObject(kind.tree.toLowerCase()),
+              });
               statuses[i] = { ref: c.ref, ok: false, msg: "missing-objects" };
             }
             break;
@@ -311,8 +344,9 @@ export async function receivePack(
       }
 
       // Quick index-only (no unpacking yet)
+      // Pass DO state and prefix to handle thin packs properly
       try {
-        const oids = await indexPackOnly(new Uint8Array(pack), env, packKey);
+        const oids = await indexPackOnly(new Uint8Array(pack), env, packKey, state, prefix);
         indexedOids = oids;
         log.info("index:ok", { packKey, oids: oids.length });
       } catch (e: any) {

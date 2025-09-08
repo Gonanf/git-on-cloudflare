@@ -13,21 +13,41 @@ import { createLogger } from "../util/logger.ts";
 
 /**
  * Index a pack file quickly without unpacking objects.
- * Returns the list of OIDs for tracking.
+ * Returns the list of OIDs directly stored in the pack.
  *
  * @param packBytes Raw `.pack` bytes provided by the client
  * @param env Worker environment (for writing `.idx` to R2)
  * @param packKey R2 key under which the `.pack` is stored (used to derive `.idx` key)
+ * @param doState Optional DO state for checking existing objects (needed for thin packs)
+ * @param prefix Optional DO prefix for R2 keys
  * @returns Array of object IDs contained in the pack
  */
 export async function indexPackOnly(
   packBytes: Uint8Array,
   env: Env,
-  packKey: string
+  packKey: string,
+  doState?: DurableObjectState,
+  prefix?: string
 ): Promise<string[]> {
   const log = createLogger(env.LOG_LEVEL, { service: "PackIndex", repoId: packKey });
   const files = new Map<string, Uint8Array>();
-  const fs = createMemPackFs(files);
+
+  // If we have DO state, create a loader for existing loose objects (needed for thin packs)
+  const looseLoader =
+    doState && prefix
+      ? async (oid: string): Promise<Uint8Array | undefined> => {
+          const store = asTypedStorage<RepoStateSchema>(doState.storage);
+          const z = (await store.get(objKey(oid))) as Uint8Array | ArrayBuffer | undefined;
+          if (z) return z instanceof Uint8Array ? z : new Uint8Array(z);
+          try {
+            const o = await env.REPO_BUCKET.get(r2LooseKey(prefix, oid));
+            if (o) return new Uint8Array(await o.arrayBuffer());
+          } catch {}
+          return undefined;
+        }
+      : undefined;
+
+  const fs = createMemPackFs(files, { looseLoader });
   const gitdir = "/git";
   const dir = "/git";
   const packBase = `pack-input.pack`;
@@ -48,6 +68,7 @@ export async function indexPackOnly(
       log.warn("index:store-idx-failed", { error: String(e) });
     }
   }
+
   log.info("index:ok", { count: oids.length });
   return oids;
 }
@@ -76,7 +97,19 @@ export async function unpackPackToLoose(
   const log = createLogger(env.LOG_LEVEL, { service: "Unpack", repoId: prefix });
   const store = asTypedStorage<RepoStateSchema>(state.storage);
   const files = new Map<string, Uint8Array>();
-  const fs = createMemPackFs(files);
+
+  // Create a loader for existing loose objects (needed for thin packs)
+  const looseLoader = async (oid: string): Promise<Uint8Array | undefined> => {
+    const z = (await store.get(objKey(oid))) as Uint8Array | ArrayBuffer | undefined;
+    if (z) return z instanceof Uint8Array ? z : new Uint8Array(z);
+    try {
+      const o = await env.REPO_BUCKET.get(r2LooseKey(prefix, oid));
+      if (o) return new Uint8Array(await o.arrayBuffer());
+    } catch {}
+    return undefined;
+  };
+
+  const fs = createMemPackFs(files, { looseLoader });
   const gitdir = "/git";
   const dir = "/git";
   const packBase = `pack-input.pack`;
@@ -195,7 +228,19 @@ export async function unpackOidsChunkFromPackBytes(
   const log = createLogger(env.LOG_LEVEL, { service: "UnpackChunk", repoId: prefix });
   const store = asTypedStorage<RepoStateSchema>(state.storage);
   const files = new Map<string, Uint8Array>();
-  const fs = createMemPackFs(files);
+
+  // Create a loader for existing loose objects (needed for thin packs)
+  const looseLoader = async (oid: string): Promise<Uint8Array | undefined> => {
+    const z = (await store.get(objKey(oid))) as Uint8Array | ArrayBuffer | undefined;
+    if (z) return z instanceof Uint8Array ? z : new Uint8Array(z);
+    try {
+      const o = await env.REPO_BUCKET.get(r2LooseKey(prefix, oid));
+      if (o) return new Uint8Array(await o.arrayBuffer());
+    } catch {}
+    return undefined;
+  };
+
+  const fs = createMemPackFs(files, { looseLoader });
   const gitdir = "/git";
   const dir = "/git";
   const packBase = `pack-input.pack`;

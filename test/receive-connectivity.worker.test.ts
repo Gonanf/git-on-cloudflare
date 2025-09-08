@@ -366,7 +366,10 @@ it("receive-pack connectivity: accepts nested tag->tag->tree present", async () 
       .join("");
   })();
   const tag1Payload = new TextEncoder().encode(
-    `object ${treeOid}\n` + `type tree\n` + `tag v1\n` + `tagger You <you@example.com> 0 +0000\n\nmsg\n`
+    `object ${treeOid}\n` +
+      `type tree\n` +
+      `tag v1\n` +
+      `tagger You <you@example.com> 0 +0000\n\nmsg\n`
   );
   const tag1Oid = await (async () => {
     const head = new TextEncoder().encode(`tag ${tag1Payload.byteLength}\0`);
@@ -379,7 +382,10 @@ it("receive-pack connectivity: accepts nested tag->tag->tree present", async () 
       .join("");
   })();
   const tag2Payload = new TextEncoder().encode(
-    `object ${tag1Oid}\n` + `type tag\n` + `tag v2\n` + `tagger You <you@example.com> 0 +0000\n\nmsg2\n`
+    `object ${tag1Oid}\n` +
+      `type tag\n` +
+      `tag v2\n` +
+      `tagger You <you@example.com> 0 +0000\n\nmsg2\n`
   );
   const tag2Oid = await (async () => {
     const head = new TextEncoder().encode(`tag ${tag2Payload.byteLength}\0`);

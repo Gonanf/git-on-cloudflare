@@ -137,7 +137,11 @@ export interface TreeEntry {
 
 export async function readTree(env: Env, repoId: string, oid: string): Promise<TreeEntry[]> {
   const obj = await readLooseObjectRaw(env, repoId, oid);
-  if (!obj || obj.type !== "tree") throw new Error("Not a tree");
+  if (!obj || obj.type !== "tree") {
+    // If we can't find it in loose objects, it might still be in a pack
+    // Let's try to get it through the DO endpoint which might trigger pack assembly
+    throw new Error("Not a tree");
+  }
   return parseTree(obj.payload);
 }
 
@@ -460,7 +464,19 @@ export async function readLooseObjectRaw(
       })
     );
     if (files.size === 0) return undefined;
-    const fs = createMemPackFs(files);
+
+    // Create a loader for existing loose objects (needed for thin packs)
+    const looseLoader = async (oid: string): Promise<Uint8Array | undefined> => {
+      try {
+        const res = await stub.fetch(`https://do/obj/${oid}`, { method: "GET" });
+        if (res.ok) {
+          return new Uint8Array(await res.arrayBuffer());
+        }
+      } catch {}
+      return undefined;
+    };
+
+    const fs = createMemPackFs(files, { looseLoader });
     const dir = "/git";
     const result = (await git.readObject({ fs, dir, oid: oidLc, format: "content" })) as {
       object: Uint8Array;
