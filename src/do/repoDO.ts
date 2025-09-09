@@ -22,6 +22,7 @@ import {
   parseCommitText,
 } from "@/git";
 import { json, text, badRequest, createLogger, createInflateStream } from "@/common";
+import { setUnpackStatus } from "@/cache";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -1110,6 +1111,10 @@ export class RepoDurableObject implements DurableObject {
       // Done unpacking
       await store.delete("unpackWork");
       this.logger.info("unpack:done", { packKey: work.packKey, total: work.oids.length });
+
+      // Clear unpacking status in KV
+      // Use DO ID as cache key since we don't have access to owner/repo inside DO
+      await setUnpackStatus(this.env.PACK_METADATA_CACHE, this.state.id.toString(), false);
     } else {
       // Update progress and reschedule
       await store.put("unpackWork", {

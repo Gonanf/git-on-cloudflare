@@ -32,6 +32,7 @@ The DO also records metadata to help fetch:
      - Tries to assemble a minimal pack from R2 using `.idx` range reads
        - Single-pack: `assemblePackFromR2()`
        - Multi-pack union: `assemblePackFromMultiplePacks()`
+     - Uses KV-backed pack metadata hints (OID→pack, recent pack list) to avoid extra DO metadata calls when safe (see Caching Strategy)
      - If packs can’t fully cover, falls back to DO loose objects and builds a minimal pack on the fly
      - Responds with sidebanded `packfile` chunks
 

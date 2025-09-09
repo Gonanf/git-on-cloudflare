@@ -1,4 +1,5 @@
 import { parsePktSection, pktLine, flushPkt, concatChunks } from "@/git/core/pktline.ts";
+import { indexPackOnly, createMemPackFs, createLooseLoader } from "@/git/pack/index.ts";
 import {
   asTypedStorage,
   packOidsKey,
@@ -7,11 +8,10 @@ import {
   type RepoStateSchema,
   type TypedStorage,
 } from "@/do/repoState.ts";
-import { indexPackOnly, createMemPackFs } from "@/git/pack/unpack.ts";
 import { r2PackKey, r2LooseKey } from "@/keys.ts";
 import * as git from "isomorphic-git";
-import { createLogger } from "@/common/logger.ts";
-import { createLooseLoader } from "@/git/pack/loose-loader.ts";
+import { createLogger } from "@/common/index.ts";
+import { markPush, setUnpackStatus } from "@/cache";
 
 // Connectivity check for receive-pack commands.
 // Ensures that each updated ref points to an object we can resolve immediately:
@@ -451,6 +451,12 @@ export async function receivePack(
       } catch (e) {
         log.warn("head:resolve-failed", { error: String(e) });
       }
+
+      // Mark push in KV to prevent stale cache
+      // Use DO ID as cache key since we don't have access to owner/repo inside DO
+      const doId = state.id.toString();
+      await markPush(env.PACK_METADATA_CACHE, doId);
+      await setUnpackStatus(env.PACK_METADATA_CACHE, doId, true);
 
       // Persist pack metadata and schedule unpack only after successful ref updates
       try {

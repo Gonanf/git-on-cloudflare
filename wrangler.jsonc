@@ -49,6 +49,10 @@
     {
       "binding": "OWNER_REGISTRY",
       "id": "2e6769b1e1cf488d8055a7fb4ecbd0f3"
+    },
+    {
+      "binding": "PACK_METADATA_CACHE",
+      "id": "6c004d9b2bc040bca001795527516b30"
     }
   ],
   "r2_buckets": [

@@ -77,6 +77,32 @@ interface CacheContext {
 
 The CacheContext interface combines Request and ExecutionContext for operations that need both. While the cache functions themselves take Request directly, the CacheContext is used in higher-level code (like UI routes) to pass both values together when calling git functions that may cache results.
 
+### Pack Metadata Hints (KV)
+
+In addition to the two cache namespaces above, we use KV to persist small pieces of pack metadata that help avoid extra Durable Object (DO) metadata calls during reads:
+
+- OID → pack mapping (immutable hint)
+- Recent pack list for a repository (newest-first)
+
+These values are stored under keys derived from the repository's DO ID (not owner/repo) to ensure consistency across DO and Worker contexts. See `src/keys.ts` for:
+
+- `kvOidToPackKey(repoId, oid)`
+- `kvPackListKey(repoId)`
+
+TTLs and gating (defined in `src/cache/kv-pack-cache.ts`):
+
+- OID → pack mapping TTL: 30 days
+- Pack list TTL: 5 minutes
+- Recent push window: 5 minutes (skip KV during churn)
+- Unpack status TTL: up to 1 hour (skip KV while unpacking)
+
+Writes are conservative to avoid staleness during pushes/unpacking:
+
+1. Skip writes whenever `shouldSkipKVCache()` indicates a recent push or active unpack (based on KV markers)
+2. Additionally, the Worker consults DO `/unpack-progress` before writing, to avoid relying solely on KV's eventual consistency
+
+Reads treat KV as a performance hint only. If a hint is stale (e.g., a pack has been pruned), the R2 fetch will fail and the system falls back to the DO path without affecting correctness.
+
 ## Performance Impact
 
 - **Latency reduction**: From 200-500ms to <50ms for cached objects

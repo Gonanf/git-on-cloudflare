@@ -21,9 +21,8 @@ The codebase is organized into focused modules with `index.ts` export files:
   - `format.ts` - Content formatting helpers
   - `render.ts` - Page rendering
   - `templates.ts` - Liquid template engine
-  - `progress.ts` - Unpack progress tracking
 - **`/common`** - Shared utilities
-  - `compression.ts`, `hex.ts`, `logger.ts`, `response.ts`, `stub.ts`
+  - `compression.ts`, `hex.ts`, `logger.ts`, `response.ts`, `stub.ts`, `progress.ts`
 - **`/registry`** - Owner/repo registry management
 - **`/routes`** - HTTP route handlers
   - `git.ts` - Git protocol endpoints (upload-pack, receive-pack)
@@ -38,7 +37,7 @@ The codebase is organized into focused modules with `index.ts` export files:
 - Routes for Git endpoints, admin JSON, and the web UI
 - Integrates all route handlers via AutoRouter
 
-### Repository DO (`src/git/repoDO.ts`)
+### Repository DO (`src/do/repoDO.ts`)
 
 - Owns refs/HEAD and loose objects for a single repo
 - Internal endpoints consumed by the Worker and tests:
@@ -47,6 +46,7 @@ The codebase is organized into focused modules with `index.ts` export files:
   - `GET|HEAD /obj/:oid` — read loose object (R2-first, fallback DO)
   - `PUT /obj/:oid` — write loose object (DO then mirror to R2)
   - `GET /pack-latest`, `GET /packs`, `GET /pack-oids?key=...` — pack metadata
+  - `GET /unpack-progress` — unpacking status/progress for gating KV writes and UI
   - `POST /receive` — receive-pack (push) handler
 - Push flow: raw `.pack` is written to R2, a fast index-only step writes `.idx`, and unpack is queued for background processing on the DO alarm in small time-budgeted chunks.
 - Maintains pack metadata (`lastPackKey`, `lastPackOids`, `packList`, `packOids:<key>`) used by fetch assembly.
@@ -61,6 +61,7 @@ The codebase is organized into focused modules with `index.ts` export files:
 
 - **UI Cache**: 60s for HEAD/refs, 5min for README, 1hr for tag commits
 - **Object Cache**: Immutable Git objects cached for 1 year
+- **KV-backed pack metadata hints**: recent pack list and OID→pack mapping to reduce DO calls during reads; writes are gated by `shouldSkipKVCache()` and DO `/unpack-progress` to avoid staleness during churn
 - Reduces DO/R2 calls significantly, improves response times to <50ms
 
 ## Background processing and alarms

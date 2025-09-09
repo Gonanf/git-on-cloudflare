@@ -26,7 +26,7 @@ This project uses a hybrid storage approach to balance strong consistency for re
 
 ## Key conventions (src/keys.ts)
 
-- `makeRepoId(owner, repo)` → `owner/repo`
+- `repoKey(owner, repo)` → `owner/repo`
 - `doPrefix(doId)` → `do/<do-id>`
 - `r2LooseKey(prefix, oid)` → `do/<id>/objects/loose/<oid>`
 - `r2PackKey(prefix, name)` → `do/<id>/objects/pack/<name>.pack`

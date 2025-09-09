@@ -46,3 +46,25 @@ export function isIdxKey(key: string): boolean {
 export function packKeyFromIndexKey(idxKey: string): string {
   return idxKey.replace(/\.idx$/, ".pack");
 }
+
+// KV keys for pack metadata caching
+
+// Pack list for a repository (short TTL)
+export function kvPackListKey(repoId: string): string {
+  return `packs:${repoId}`;
+}
+
+// OID to pack mapping (immutable, long TTL)
+export function kvOidToPackKey(repoId: string, oid: string): string {
+  return `oid:${repoId}:${oid.toLowerCase()}`;
+}
+
+// Track recent pushes/unpacking (short TTL)
+export function kvLastPushKey(repoId: string): string {
+  return `push:${repoId}`;
+}
+
+// Track active unpacking status
+export function kvUnpackStatusKey(repoId: string): string {
+  return `unpack:${repoId}`;
+}

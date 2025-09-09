@@ -1,4 +1,4 @@
-import { getRepoStub } from "@/common/stub";
+import { getRepoStub } from "./stub.ts";
 
 export interface UnpackProgress {
   unpacking: boolean;

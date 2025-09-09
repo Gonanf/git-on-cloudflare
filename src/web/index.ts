@@ -5,7 +5,6 @@
 export * from "./format.ts";
 export * from "./render.ts";
 export * from "./templates.ts";
-export * from "./progress.ts";
 export * from "./syntax.ts";
 export * from "./validation.ts";
 export * from "./http.ts";

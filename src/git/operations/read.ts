@@ -1,12 +1,18 @@
 import type { HeadInfo, Ref } from "./engine.ts";
 import { parseCommitText } from "@/git/core/commitParse.ts";
-import { getRepoStub } from "@/common/stub.ts";
 import { packIndexKey } from "@/keys.ts";
-import { createMemPackFs } from "@/git/pack/unpack.ts";
-import { createStubLooseLoader } from "@/git/pack/loose-loader.ts";
-import { createInflateStream } from "@/common/compression.ts";
-import { buildObjectCacheKey, cacheOrLoadObject, type CacheContext } from "@/cache/cache.ts";
-import { createLogger } from "@/common/logger.ts";
+import { createMemPackFs, createStubLooseLoader } from "@/git/pack/index.ts";
+import {
+  buildObjectCacheKey,
+  cacheOrLoadObject,
+  type CacheContext,
+  getPackForOid,
+  saveOidToPackMapping,
+  shouldSkipKVCache,
+  savePackList,
+  getPackList,
+} from "@/cache";
+import { getUnpackProgress, createLogger, createInflateStream, getRepoStub } from "@/common";
 import * as git from "isomorphic-git";
 
 /**
@@ -633,13 +639,20 @@ export async function readBlobStream(
  * 2. Durable Object state - Recent/active objects, ~30-50ms
  * 3. R2 packfiles - Cold storage, ~100-300ms
  *
- * Objects are immutable, so aggressive caching (1 year TTL) is used.
- * For large blobs, prefer `readBlobStream()` to avoid memory buffering.
+ * Optimizations and hints:
+ * - KV-backed pack metadata hints are used to avoid extra DO metadata calls on cold paths:
+ *   - OID → packKey mapping (TTL: see TTL constants in `src/cache/kv-pack-cache.ts`)
+ *   - Recent pack list (ensures DO `/pack-latest` is always included)
+ * - KV writes are gated by both `shouldSkipKVCache()` and DO `/unpack-progress` to avoid
+ *   persisting stale metadata during active pushes/unpacking.
+ *
+ * Objects are immutable, so aggressive object caching (1 year TTL) is used by the Cache API
+ * layer. For large blobs, prefer `readBlobStream()` to avoid memory buffering.
  *
  * @param env - Cloudflare environment bindings
  * @param repoId - Repository identifier (format: "owner/repo")
  * @param oid - Object ID (SHA-1 hash)
- * @param cacheCtx - Optional cache context for Cache API
+ * @param cacheCtx - Optional cache context for Cache API (enables object caching)
  * @returns Decompressed object with type and payload, or undefined if not found
  */
 export async function readLooseObjectRaw(
@@ -649,23 +662,150 @@ export async function readLooseObjectRaw(
   cacheCtx?: CacheContext
 ): Promise<{ type: string; payload: Uint8Array } | undefined> {
   const oidLc = oid.toLowerCase();
+  const stub = getRepoStub(env, repoId);
+  // used as the cache key for KV since DO doesn't have access to owner/repo.
+  const doId = stub.id.toString();
+  const logger = createLogger(env.LOG_LEVEL, {
+    service: "readLooseObjectRaw",
+    repoId,
+    doId,
+    requestId: cacheCtx?.req?.headers?.get("cf-ray") || undefined,
+  });
 
-  // Helper function to load from R2 packfiles (fallback when not in DO state)
+  // Try KV cache first for pack metadata
+  const skipKV = await shouldSkipKVCache(env.PACK_METADATA_CACHE, doId);
+  logger.debug("kv-skip-eval", { skipKV });
+
+  /**
+   * Load a pack and its index from R2 into an in-memory virtual FS map.
+   * Returns true on success, false if either file is missing.
+   */
+  async function addPackToFiles(
+    env: Env,
+    packKey: string,
+    files: Map<string, Uint8Array>
+  ): Promise<boolean> {
+    const [p, i] = await Promise.all([
+      env.REPO_BUCKET.get(packKey),
+      env.REPO_BUCKET.get(packIndexKey(packKey)),
+    ]);
+    if (!p || !i) return false;
+
+    const [packArrayBuf, idxArrayBuf] = await Promise.all([p.arrayBuffer(), i.arrayBuffer()]);
+    const packBuf = new Uint8Array(packArrayBuf);
+    const idxBuf = new Uint8Array(idxArrayBuf);
+    const base = packKey.split("/").pop()!;
+    const idxBase = base.replace(/\.pack$/i, ".idx");
+    files.set(`/git/objects/pack/${base}`, packBuf);
+    files.set(`/git/objects/pack/${idxBase}`, idxBuf);
+    return true;
+  }
+
+  /**
+   * Fast-path: given a known `packKey`, load just that pack from R2 and extract `oid`.
+   * Used when KV OID→pack hints are available.
+   */
+  async function loadSinglePackFromR2(
+    env: Env,
+    packKey: string,
+    oid: string
+  ): Promise<{ type: string; payload: Uint8Array } | undefined> {
+    const files = new Map<string, Uint8Array>();
+    const ok = await addPackToFiles(env, packKey, files);
+    if (!ok) return undefined;
+
+    const looseLoader = createStubLooseLoader(stub);
+    const fs = createMemPackFs(files, { looseLoader });
+    const dir = "/git";
+    try {
+      const result = (await git.readObject({ fs, dir, oid, format: "content" })) as {
+        object: Uint8Array;
+        type: "blob" | "tree" | "commit" | "tag";
+      };
+      logger.info("object-read", { source: "r2-pack-single", packKey, type: result.type });
+      return { type: result.type, payload: result.object };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Build a candidate `packList` used for multi-pack reads:
+   * - Prefer KV `getPackList()` when not skipping KV
+   * - Always ensure DO `/pack-latest` is present to cover very recent pushes
+   * - Fallback to DO `/packs` (and finally `/pack-latest`) if KV is empty
+   */
+  async function getPackListWithLatest(
+    env: Env,
+    stub: DurableObjectStub,
+    doId: string,
+    skipKV: boolean
+  ): Promise<string[]> {
+    let packList: string[] = [];
+    if (!skipKV) {
+      try {
+        const cached = await getPackList(env.PACK_METADATA_CACHE, doId);
+        if (cached && cached.length > 0) packList = [...cached];
+      } catch {}
+    }
+    // Ensure latest pack is present (covers recent pushes)
+    try {
+      const metaRes = await stub.fetch("https://do/pack-latest", { method: "GET" });
+      if (metaRes.ok) {
+        const meta = (await metaRes.json()) as { key: string } | null;
+        const latest = meta?.key;
+        if (latest && !packList.includes(latest)) packList.unshift(latest);
+      }
+    } catch {}
+
+    // Fallback to DO /packs if still empty
+    if (packList.length === 0) {
+      const packsRes = await stub.fetch("https://do/packs", { method: "GET" });
+      packList = packsRes.ok ? ((await packsRes.json()) as { keys: string[] }).keys || [] : [];
+      if (packList.length === 0) {
+        try {
+          const metaRes = await stub.fetch("https://do/pack-latest", { method: "GET" });
+          if (metaRes.ok) {
+            const meta = (await metaRes.json()) as { key: string } | null;
+            const latest = meta?.key;
+            if (latest) packList.push(latest);
+          }
+        } catch {}
+      }
+    }
+    return packList;
+  }
+
+  /**
+   * Multi-pack path: identify a candidate pack via DO `/pack-oids` probes and load a
+   * small set of packs from R2 (helps delta resolution across packs). Writes pack
+   * metadata hints back to KV when safe.
+   */
   const loadFromPacks = async () => {
     try {
-      const stub = getRepoStub(env, repoId);
-      // Step 1: Get list of available packs from the Durable Object
-      const packsRes = await stub.fetch("https://do/packs", { method: "GET" });
-      const packList: string[] = packsRes.ok
-        ? ((await packsRes.json()) as { keys: string[] }).keys || []
-        : [];
-      // Fallback to just latest if packs list is unavailable
+      // Helper: consult DO progress to avoid KV writes during active unpacking
+      const allowKvWrite = async (): Promise<boolean> => {
+        const progress = await getUnpackProgress(env, repoId);
+        // Allow writes only when no unpack is running or progress is unavailable
+        return !(progress && progress.unpacking === true);
+      };
+      // Step 1: Build candidate pack list
+      const packList = await getPackListWithLatest(env, stub, doId, skipKV);
+      logger.debug("pack-list-candidates", { count: packList.length, skipKV });
       if (packList.length === 0) {
-        const metaRes = await stub.fetch("https://do/pack-latest", { method: "GET" });
-        if (!metaRes.ok) return undefined;
-        const meta = (await metaRes.json()) as { key: string } | null;
-        if (!meta?.key) return undefined;
-        packList.push(meta.key);
+        logger.warn("pack-list-empty", { oid: oidLc, afterFallbacks: true });
+        return undefined;
+      }
+
+      // Cache pack list (only if not unpacking)
+      if (cacheCtx && packList.length > 0 && !skipKV) {
+        const canWrite = await allowKvWrite();
+        if (canWrite) {
+          cacheCtx.ctx.waitUntil(savePackList(env.PACK_METADATA_CACHE, doId, packList));
+          logger.debug("kv-pack-list-saved", { count: packList.length });
+        } else {
+          logger.debug("kv-write-skipped-unpacking", { what: "packList" });
+        }
       }
 
       // Step 2: Find which pack contains our target OID by querying pack indexes
@@ -683,6 +823,20 @@ export async function readLooseObjectRaw(
         } catch {}
       }
       if (!chosenPackKey) chosenPackKey = packList[0];
+      logger.debug("chosen-pack", { chosenPackKey, hasDirectHit: !!contains[chosenPackKey] });
+
+      // Cache OID->pack mapping if we found it (only if not unpacking)
+      if (cacheCtx && chosenPackKey && contains[chosenPackKey] && !skipKV) {
+        const canWrite = await allowKvWrite();
+        if (canWrite) {
+          cacheCtx.ctx.waitUntil(
+            saveOidToPackMapping(env.PACK_METADATA_CACHE, doId, oidLc, chosenPackKey)
+          );
+          logger.debug("kv-oid-pack-saved", { oid: oidLc, packKey: chosenPackKey });
+        } else {
+          logger.debug("kv-write-skipped-unpacking", { what: "oid->pack", oid: oidLc });
+        }
+      }
 
       // Step 3: Load up to 5 packs from R2 (includes the one with our OID)
       // Loading multiple packs is necessary for delta resolution
@@ -694,22 +848,7 @@ export async function readLooseObjectRaw(
       await Promise.all(
         uniqueLoad.map(async (key) => {
           try {
-            const [p, i] = await Promise.all([
-              env.REPO_BUCKET.get(key),
-              env.REPO_BUCKET.get(packIndexKey(key)),
-            ]);
-            if (!p || !i) return;
-            // Parallelize arrayBuffer conversions too
-            const [packArrayBuf, idxArrayBuf] = await Promise.all([
-              p.arrayBuffer(),
-              i.arrayBuffer(),
-            ]);
-            const packBuf = new Uint8Array(packArrayBuf);
-            const idxBuf = new Uint8Array(idxArrayBuf);
-            const base = key.split("/").pop()!;
-            const idxBase = base.replace(/\.pack$/i, ".idx");
-            files.set(`/git/objects/pack/${base}`, packBuf);
-            files.set(`/git/objects/pack/${idxBase}`, idxBuf);
+            await addPackToFiles(env, key, files);
           } catch {}
         })
       );
@@ -724,6 +863,12 @@ export async function readLooseObjectRaw(
         object: Uint8Array;
         type: "blob" | "tree" | "commit" | "tag";
       };
+      logger.info("object-read", {
+        source: "r2-packs",
+        chosenPackKey,
+        packsLoaded: files.size,
+        type: result.type,
+      });
       return { type: result.type, payload: result.object };
     } catch {
       return undefined;
@@ -733,7 +878,6 @@ export async function readLooseObjectRaw(
   // Helper function to load from Durable Object state (preferred for recent objects)
   const loadFromState = async (): Promise<{ type: string; payload: Uint8Array } | undefined> => {
     try {
-      const stub = getRepoStub(env, repoId);
       const res = await stub.fetch(`https://do/obj/${oidLc}`, { method: "GET" });
       if (res.ok) {
         const z = new Uint8Array(await res.arrayBuffer());
@@ -748,7 +892,10 @@ export async function readLooseObjectRaw(
         let nul = sp + 1;
         while (nul < raw.length && raw[nul] !== 0x00) nul++;
         const payload = raw.subarray(nul + 1);
+        logger.info("object-read", { source: "do-state", type });
         return { type, payload };
+      } else {
+        logger.debug("do-state-miss", { status: res.status, oid: oidLc });
       }
     } catch {}
     return undefined;
@@ -764,6 +911,16 @@ export async function readLooseObjectRaw(
         const stateResult = await loadFromState();
         if (stateResult) return stateResult;
 
+        // KV OID->pack fast path before scanning DO pack indexes
+        if (!skipKV) {
+          const cachedPackKey = await getPackForOid(env.PACK_METADATA_CACHE, doId, oidLc);
+          if (cachedPackKey) {
+            logger.debug("kv-oid-pack-hit", { packKey: cachedPackKey });
+            const result = await loadSinglePackFromR2(env, cachedPackKey, oidLc);
+            if (result) return result;
+          }
+        }
+
         // If DO fetch fails, try R2 packs
         return await loadFromPacks();
       },
@@ -771,10 +928,20 @@ export async function readLooseObjectRaw(
     );
   }
 
-  // No cache context: Try DO state first, then fall back to R2 packs
-  const stateResult = await loadFromState();
-  if (stateResult) return stateResult;
+  // No cache context: Try DO state first, KV OID fast path, then fall back to R2 packs
+  {
+    const stateResult = await loadFromState();
+    if (stateResult) return stateResult;
 
-  // Fallback: read directly from R2 packs
-  return await loadFromPacks();
+    if (!skipKV) {
+      const cachedPackKey = await getPackForOid(env.PACK_METADATA_CACHE, doId, oidLc);
+      if (cachedPackKey) {
+        logger.debug("kv-oid-pack-hit", { packKey: cachedPackKey });
+        const result = await loadSinglePackFromR2(env, cachedPackKey, oidLc);
+        if (result) return result;
+      }
+    }
+
+    return await loadFromPacks();
+  }
 }

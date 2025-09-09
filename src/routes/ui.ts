@@ -14,7 +14,6 @@ import {
   formatSize,
   bytesToText,
   formatWhen,
-  getUnpackProgress,
   renderView,
   renderViewStream,
   getMarkdownHighlightLangs,
@@ -29,6 +28,7 @@ import { HttpError } from "@/web";
 import { listReposForOwner } from "@/registry";
 import { buildCacheKeyFrom, cacheOrLoadJSON, cacheOrLoadJSONWithTTL, CacheContext } from "@/cache";
 import { handleError } from "@/web/templates";
+import { getUnpackProgress } from "@/common";
 
 // Shorthand for 400 Bad Request using the shared error handler
 async function badRequest(

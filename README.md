@@ -56,6 +56,7 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 - **Push processing**: <5s for typical commits, large pushes handled incrementally
 - **Response times**: <50ms for cached paths, <100ms globally for cold requests
 - **Pack assembly**: Streaming from R2 using `.idx` range reads, no full pack loads
+- **KV-backed pack metadata hints**: OID→pack and recent pack list cached in KV (gated during push/unpack) to reduce DO roundtrips during reads
 - **Memory efficiency**: Multi-pack-index support avoids expensive repack operations
 
 ### Implementation Details
@@ -65,6 +66,7 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 - PBKDF2-SHA256 (100k iterations) for auth tokens
 - Background object mirroring from DO to R2 for read scaling
 - Modern web UI with Tailwind CSS v4 and Liquid templates
+- Structured JSON logging with `LOG_LEVEL` (debug/info/warn/error)
 
 ## Deploy to Production
 

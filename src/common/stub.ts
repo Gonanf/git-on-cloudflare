@@ -1,5 +1,5 @@
 /**
- * Retrieves a Durable Object stub for a given repository.
+ * Get the Durable Object stub for a repository.
  * @param env - Cloudflare environment bindings
  * @param repoId - Repository identifier (owner/repo)
  * @returns DurableObjectStub for the specified repository
