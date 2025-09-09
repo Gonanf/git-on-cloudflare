@@ -5,50 +5,55 @@
 <div class="blob-container mt-4 border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-800/30">
   <div class="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700">
     <div class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
-      {% if tooLarge %}
-        <span class="inline-flex items-center rounded border border-gray-300 dark:border-gray-600 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50"
-          >Too large</span
-        >
-        {% if sizeStr %}
-          <span class="text-gray-500 dark:text-gray-400">{{ sizeStr }}</span>
-        {% endif %}
-      {% elsif isMarkdown %}
-        <span class="inline-flex items-center rounded border border-gray-300 dark:border-gray-600 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50"
-          >Markdown</span
-        >
-        {% if lineCount %}
-          <span class="text-gray-500 dark:text-gray-400">
-            {{- lineCount }} line{% if lineCount != 1 %}s{% endif -%}
-          </span>
-        {% endif %}
-      {% elsif isBinary %}
-        <span class="inline-flex items-center rounded border border-gray-300 dark:border-gray-600 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50"
-          >Binary</span
-        >
-        {% if sizeStr %}
-          <span class="text-gray-500 dark:text-gray-400">{{ sizeStr }}</span>
-        {% endif %}
-      {% else %}
+      {% if codeLang %}
         <span class="inline-flex items-center rounded border border-gray-300 dark:border-gray-600 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50">
-          {{- codeLang | default: 'plaintext' -}}
+          {{- codeLang -}}
         </span>
+      {% endif %}
+      {% if isMarkdown %}
+        <span class="inline-flex items-center rounded border border-gray-300 dark:border-gray-600 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50">
+          Markdown
+        </span>
+      {% endif %}
+      {% if isMarkdown or codeLang %}
         {% if lineCount %}
           <span class="text-gray-500 dark:text-gray-400">
             {{- lineCount }} line{% if lineCount != 1 %}s{% endif -%}
           </span>
         {% endif %}
+      {% elsif sizeStr %}
+        <span class="text-gray-500 dark:text-gray-400">{{ sizeStr }}</span>
       {% endif %}
     </div>
-    <div class="flex gap-2">
-      <a class="btn secondary sm" href="{{ viewRawHref }}">View raw</a>
+    <div class="flex items-center gap-2">
+      <div class="segmented">
+        {% if not isMarkdown and not isImage and not isPdf and not isBinary and not tooLarge %}
+          <button id="copy-raw" class="seg action" type="button">Copy</button>
+        {% endif %}
+        {% unless isImage or isPdf %}
+          <a id="view-raw-link" class="seg action" href="{{ viewRawHref }}">View</a>
+        {% endunless %}
+        <span class="seg label">Raw</span>
+      </div>
       <a class="btn sm" href="{{ rawHref }}">Download</a>
     </div>
   </div>
-  <div class="{% if contentClass %}{{ contentClass }}{% endif %} {% if isMarkdown %}p-5{% elsif isBinary or tooLarge %}p-3{% else %}p-1{% endif %}">
+  <div class="{%- if contentClass %}{{ contentClass }}{% endif %} {% if isMarkdown %}p-5{% elsif isBinary or tooLarge %}p-3{% else %}p-1{% endif %}">
     {% if tooLarge %}
       <div class="muted">File too large to preview.</div>
-    {% elsif isBinary %}
-      <div class="muted">Binary file.</div>
+    {% elsif isImage and mediaSrc %}
+      <div class="flex items-center justify-center">
+        <img src="{{ mediaSrc }}" alt="{{ fileName }}" class="max-w-full rounded-md" loading="lazy">
+      </div>
+    {% elsif isPdf and mediaSrc %}
+      <div class="w-full" style="height: 75vh;">
+        <iframe
+          src="{{ mediaSrc }}"
+          class="w-full h-full rounded-md"
+          title="{{ fileName }}"
+          loading="lazy"
+        ></iframe>
+      </div>
     {% elsif isMarkdown %}
       <div
         data-markdown="1"
@@ -59,13 +64,38 @@
       >
         <pre class="md-src">{{ markdownRaw }}</pre>
       </div>
+    {% elsif isBinary %}
+      <div class="muted">Binary file.</div>
     {% else %}
       {% if codeLang %}
-        <pre><code class="language-{{ codeLang }}">{{ codeText }}</code></pre>
+        <pre id="blob-pre"><code id="blob-code" class="language-{{ codeLang }}">{{ codeText }}</code></pre>
       {% else %}
-        <pre><code class="language-plaintext">{{ codeText }}</code></pre>
+        <pre id="blob-pre"><code id="blob-code" class="language-plaintext">{{ codeText }}</code></pre>
       {% endif %}
     {% endif %}
   </div>
 </div>
+<script>
+  (function () {
+    try {
+      var copyBtn = document.getElementById('copy-raw');
+      if (!copyBtn) return;
+      copyBtn.addEventListener('click', async function () {
+        try {
+          var link = document.getElementById('view-raw-link');
+          var href = (link && link.getAttribute('href')) || '';
+          if (!href) href = '{{ viewRawHref }}';
+          var res = await fetch(href, { credentials: 'same-origin' });
+          var txt = await res.text();
+          await navigator.clipboard.writeText(txt);
+          var old = copyBtn.textContent;
+          copyBtn.textContent = 'Copied';
+          setTimeout(function () {
+            copyBtn.textContent = old;
+          }, 1200);
+        } catch {}
+      });
+    } catch {}
+  })();
+</script>
 {% endblock %}

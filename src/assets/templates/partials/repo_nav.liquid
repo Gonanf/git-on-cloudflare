@@ -7,18 +7,88 @@
     </a>
   </div>
   {% if refEnc %}
-    <nav class="flex items-center gap-4">
-      <a
-        href="/{{ owner }}/{{ repo }}/tree?ref={{ refEnc }}"
-        class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
-        >Browse</a
-      >
-      <a
-        href="/{{ owner }}/{{ repo }}/commits?ref={{ refEnc }}"
-        class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
-        >Commits</a
-      >
-    </nav>
+    <div class="flex items-center gap-3">
+      <nav class="flex items-center gap-4">
+        {% if showRefDropdown != false %}
+          <div>
+            <label for="ref-select" class="sr-only">Ref</label>
+            <select
+              id="ref-select"
+              class="px-2 py-1 rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm"
+            >
+              <option selected disabled>Loading refs…</option>
+            </select>
+          </div>
+        {% endif %}
+        <a
+          href="/{{ owner }}/{{ repo }}/tree?ref={{ refEnc }}"
+          class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
+          >Browse</a
+        >
+        <a
+          href="/{{ owner }}/{{ repo }}/commits?ref={{ refEnc }}"
+          class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
+          >Commits</a
+        >
+      </nav>
+    </div>
+    {% if showRefDropdown != false %}
+      <script>
+        (function () {
+          try {
+            var sel = document.getElementById('ref-select');
+            if (!sel) return;
+            var api = '/{{ owner }}/{{ repo }}/api/refs';
+            var currentRef = new URL(window.location.href).searchParams.get('ref');
+            if (!currentRef) {
+              try {
+                currentRef = decodeURIComponent('{{ refEnc }}');
+              } catch (e) {
+                currentRef = '{{ refEnc }}';
+              }
+            }
+            // Populate options from API (no optgroup to avoid left padding in options)
+            fetch(api, { credentials: 'same-origin' })
+              .then(function (r) {
+                return r.ok ? r.json() : null;
+              })
+              .then(function (data) {
+                if (!data) return;
+                var opts = [];
+                if (data.branches && data.branches.length) {
+                  opts.push('<option value="" disabled>— Branches —</option>');
+                  for (var i = 0; i < data.branches.length; i++) {
+                    var b = data.branches[i];
+                    var selAttr = b.name === currentRef ? ' selected' : '';
+                    opts.push(
+                      '<option value="' + b.name + '"' + selAttr + '>' + b.displayName + '</option>'
+                    );
+                  }
+                }
+                if (data.tags && data.tags.length) {
+                  opts.push('<option value="" disabled>— Tags —</option>');
+                  for (var j = 0; j < data.tags.length; j++) {
+                    var t = data.tags[j];
+                    var selT = t.name === currentRef ? ' selected' : '';
+                    opts.push(
+                      '<option value="' + t.name + '"' + selT + '>' + t.displayName + '</option>'
+                    );
+                  }
+                }
+                sel.innerHTML = opts.join('');
+              })
+              .catch(function () {});
+            sel.addEventListener('change', function () {
+              try {
+                var u = new URL(window.location.href);
+                u.searchParams.set('ref', sel.value);
+                window.location.href = u.toString();
+              } catch {}
+            });
+          } catch {}
+        })();
+      </script>
+    {% endif %}
   {% else %}
     <div></div>
   {% endif %}

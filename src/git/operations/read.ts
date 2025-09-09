@@ -245,7 +245,7 @@ export async function readPath(
       // Content-Length is the compressed size, but we need decompressed size
       // For now, we'll use a conservative estimate (compressed * 10)
       const compressedSize = parseInt(headRes.headers.get("Content-Length") || "0", 10);
-      const MAX_SIZE = 1024 * 1024;
+      const MAX_SIZE = 5 * 1024 * 1024;
       const estimatedSize = compressedSize * 10;
 
       if (estimatedSize > MAX_SIZE) {

@@ -5,48 +5,67 @@ import {
   listCommits,
   readCommitInfo,
   readBlobStream,
-  type CommitInfo,
   type TreeEntry,
 } from "@/git";
-import { getRepoStub } from "@/common";
 import { repoKey } from "@/keys";
 import {
-  escapeHtml,
   detectBinary,
   formatSize,
   bytesToText,
   formatWhen,
   getUnpackProgress,
   renderView,
+  renderViewStream,
   getMarkdownHighlightLangs,
   getHighlightLangsForBlobSmart,
+  isValidOwnerRepo,
+  isValidRef,
+  isValidPath,
+  OID_RE,
+  getContentTypeFromName,
 } from "@/web";
+import { HttpError } from "@/web";
 import { listReposForOwner } from "@/registry";
 import { buildCacheKeyFrom, cacheOrLoadJSON, cacheOrLoadJSONWithTTL, CacheContext } from "@/cache";
+import { handleError } from "@/web/templates";
+
+// Shorthand for 400 Bad Request using the shared error handler
+async function badRequest(
+  env: Env,
+  title: string,
+  message: string,
+  extra?: { owner?: string; repo?: string; refEnc?: string; path?: string }
+): Promise<Response> {
+  return handleError(env, new HttpError(400, message, { expose: true }), title, extra);
+}
 
 export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Owner repos list
   router.get(`/:owner`, async (request, env: Env) => {
     const { owner } = request.params as { owner: string };
+    if (!isValidOwnerRepo(owner)) {
+      return badRequest(env, "Invalid owner", "Owner contains invalid characters or length");
+    }
     const repos = await listReposForOwner(env, owner);
-    // Prefer Liquid template rendering (auto-escaped, loops/conditionals)
-    const page = await renderView(env, "owner", {
+    const stream = await renderViewStream(env, "owner", {
       title: `${owner} · Repositories`,
       owner,
       repos,
     });
-    if (!page) throw new Error("Failed to render owner template");
-    return new Response(page, {
+    return new Response(stream, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "liquid-layout",
+        "X-Page-Renderer": "liquid-stream",
       },
     });
   });
   // Repo overview page
   router.get(`/:owner/:repo`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
+    }
     const repoId = repoKey(owner, repo);
 
     // Cache HEAD and refs for 60 seconds for branches, longer for tags
@@ -135,7 +154,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     // Check unpacking progress (shared helper)
     const progress = await getUnpackProgress(env, repoId);
 
-    const page = await renderView(env, "overview", {
+    const stream = await renderViewStream(env, "overview", {
       title: `${owner}/${repo}`,
       owner,
       repo,
@@ -150,12 +169,11 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       highlightLangs: readmeMd ? getMarkdownHighlightLangs() : [],
       progress,
     });
-    if (!page) throw new Error("Failed to render overview template");
-    return new Response(page, {
+    return new Response(stream, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "liquid-layout",
+        "X-Page-Renderer": "liquid-stream",
       },
     });
   });
@@ -163,10 +181,29 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Tree/Blob browser using query params: ?ref=<branch|tag|oid>&path=<path>
   router.get(`/:owner/:repo/tree`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
+    }
     const repoId = repoKey(owner, repo);
     const u = new URL(request.url);
     const ref = u.searchParams.get("ref") || "main";
     const path = u.searchParams.get("path") || "";
+    if (!isValidRef(ref)) {
+      return badRequest(env, "Invalid ref", "Ref format not allowed", {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(ref),
+        path,
+      });
+    }
+    if (path && !isValidPath(path)) {
+      return badRequest(env, "Invalid path", "Path contains invalid characters or is too long", {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(ref),
+        path,
+      });
+    }
 
     // Build cache key for tree content
     const cacheKeyTree = buildCacheKeyFrom(request, "/_cache/tree", {
@@ -272,7 +309,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
             ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(parts.slice(0, -1).join("/"))}`
             : null;
         const progress = await getUnpackProgress(env, repoId);
-        const page = await renderView(env, "tree", {
+        const stream = await renderViewStream(env, "tree", {
           title: `${path || "root"} · ${owner}/${repo}`,
           owner,
           repo,
@@ -282,12 +319,11 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           parentHref,
           entries,
         });
-        if (!page) throw new Error("Failed to render tree template");
-        return new Response(page, {
+        return new Response(stream, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Page-Renderer": "liquid-layout",
+            "X-Page-Renderer": "liquid-stream",
           },
         });
       } else {
@@ -298,7 +334,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         // Infer language and load only what we need (use smart inference with content)
         const langs = getHighlightLangsForBlobSmart(title, text);
         const codeLang = langs[0] || null;
-        const page = await renderView(env, "blob", {
+        const stream = await renderViewStream(env, "blob", {
           title: `${title} · ${owner}/${repo}`,
           owner,
           repo,
@@ -314,113 +350,112 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           needsHighlight: true,
           highlightLangs: langs,
         });
-        if (!page) throw new Error("Failed to render blob template");
-        return new Response(page, {
+        return new Response(stream, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Page-Renderer": "liquid-layout",
+            "X-Page-Renderer": "liquid-stream",
           },
         });
       }
     } catch (e: any) {
-      const debug = String(env.LOG_LEVEL || "").toLowerCase() === "debug";
-      try {
-        const errHtml = await renderView(env, "error", {
-          title: `${owner}/${repo} · Tree`,
-          message: String(e?.message || e),
-          owner,
-          repo,
-          refEnc: encodeURIComponent(ref),
-          path,
-          stack: debug ? String(e?.stack || "") : undefined,
-        });
-        if (errHtml) {
-          return new Response(errHtml, {
-            headers: { "Content-Type": "text/html; charset=utf-8" },
-            status: 500,
-          });
-        }
-      } catch {}
-      const body = `<!doctype html><meta charset="utf-8"><title>Error</title><h2>Error</h2><pre>${escapeHtml(
-        String(e?.message || e)
-      )}</pre>`;
-      return new Response(body, {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-        status: 500,
+      return handleError(env, e, `${owner}/${repo} · Tree`, {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(ref),
+        path,
       });
     }
   });
 
-  /**
-   * Blob preview endpoint - renders file content with syntax highlighting
-   * @route GET /:owner/:repo/blob
-   * @param ref - Git reference (branch/tag/commit)
-   * @param path - File path in repository
-   * @note Large files (>1MB) show size info instead of content
-   * @note Binary files are detected and show download link
-   */
+  // Blob preview endpoint - renders file content with syntax highlighting and media previews
   router.get(`/:owner/:repo/blob`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
+    }
     const repoId = repoKey(owner, repo);
     const u = new URL(request.url);
     const ref = u.searchParams.get("ref") || "main";
     const path = u.searchParams.get("path") || "";
+    if (!isValidRef(ref)) {
+      return badRequest(env, "Invalid ref", "Ref format not allowed", {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(ref),
+        path,
+      });
+    }
+    if (path && !isValidPath(path)) {
+      return badRequest(env, "Invalid path", "Path contains invalid characters or is too long", {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(ref),
+        path,
+      });
+    }
     try {
       const cacheCtx: CacheContext = { req: request, ctx };
       const result = await readPath(env, repoId, ref, path, cacheCtx);
       if (result.type !== "blob") return new Response("Not a blob\n", { status: 400 });
       const fileName = path || result.oid;
 
-      // Check if already marked as too large
+      // Too large to render inline
       if (result.tooLarge) {
+        const sizeStr = formatSize(result.size || 0);
         const viewRawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(fileName)}`;
         const rawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&download=1&name=${encodeURIComponent(fileName)}`;
-        const page = await renderView(env, "blob", {
+        const stream = await renderViewStream(env, "blob", {
           title: `${fileName} · ${owner}/${repo}`,
           owner,
           repo,
           refEnc: encodeURIComponent(ref),
-          fileName: fileName,
+          fileName,
+          tooLarge: true,
+          sizeStr,
           viewRawHref,
           rawHref,
-          tooLarge: true,
-          sizeStr: formatSize(result.size || 0),
-          contentClass: "markdown-content",
         });
-        if (!page) throw new Error("Failed to render blob template");
-        return new Response(page, {
+        return new Response(stream, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Page-Renderer": "liquid-layout",
+            "X-Page-Renderer": "liquid-stream",
           },
         });
       }
 
-      // Size and binary checks for loaded content
-      const size = result.content.byteLength;
+      // Binary vs text
       const isBinary = detectBinary(result.content);
-      const tooLarge = false; // Already checked server-side
-
+      const size = result.content.byteLength;
       const viewRawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(fileName)}`;
       const rawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&download=1&name=${encodeURIComponent(fileName)}`;
-
-      // Prepare structured fields for template rendering
-      let templateData: Record<string, unknown> = {
+      const templateData: Record<string, any> = {
         title: `${fileName} · ${owner}/${repo}`,
         owner,
         repo,
         refEnc: encodeURIComponent(ref),
-        fileName: fileName,
+        fileName,
         viewRawHref,
         rawHref,
-        contentClass: !tooLarge && !isBinary ? "markdown-content" : undefined,
+        contentClass: !isBinary ? "markdown-content" : undefined,
       };
 
       if (isBinary) {
-        templateData.isBinary = true;
-        templateData.sizeStr = formatSize(size);
+        const ext = (fileName.split(".").pop() || "").toLowerCase();
+        const isImage = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "svg"].includes(ext);
+        const isPdf = ext === "pdf";
+        if ((isImage || isPdf) && path) {
+          const name = encodeURIComponent(fileName);
+          const mediaSrc = `/${owner}/${repo}/rawpath?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(path)}&name=${name}`;
+          templateData.isImage = isImage;
+          templateData.isPdf = isPdf;
+          templateData.mediaSrc = mediaSrc;
+          templateData.sizeStr = formatSize(size);
+        } else {
+          templateData.isBinary = true;
+          templateData.sizeStr = formatSize(size);
+        }
       } else {
         const text = bytesToText(result.content);
         const lineCount = text === "" ? 0 : text.split(/\r?\n/).length;
@@ -435,50 +470,36 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           templateData.mdRepo = repo;
           templateData.mdRef = ref;
           templateData.mdBase = baseDir;
+          // Markdown rendering will handle highlighting after sanitize
           templateData.needsMarkdown = true;
-          templateData.needsHighlight = true;
-          templateData.highlightLangs = getMarkdownHighlightLangs();
         } else {
           const langs = getHighlightLangsForBlobSmart(fileName, text);
+          const codeLang = langs[0] || null;
           templateData.codeText = text;
-          templateData.codeLang = langs[0] || null;
+          templateData.codeLang = codeLang;
           templateData.lineCount = lineCount;
           templateData.needsHighlight = true;
           templateData.highlightLangs = langs;
+          if (!codeLang) {
+            templateData.sizeStr = formatSize(size);
+          }
         }
       }
 
-      const page = await renderView(env, "blob", templateData);
-      if (!page) throw new Error("Failed to render blob template");
-      return new Response(page, {
+      const stream = await renderViewStream(env, "blob", templateData);
+      return new Response(stream, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid-layout",
+          "X-Page-Renderer": "liquid-stream",
         },
       });
     } catch (e: any) {
-      const debug = String((env as any)?.LOG_LEVEL || "").toLowerCase() === "debug";
-      try {
-        const errHtml = await renderView(env, "error", {
-          title: `Error · ${owner}/${repo}`,
-          message: String(e?.message || e),
-          owner,
-          repo,
-          refEnc: encodeURIComponent(ref),
-          path,
-          stack: debug ? String(e?.stack || "") : undefined,
-        });
-        if (errHtml) {
-          return new Response(errHtml, {
-            headers: { "Content-Type": "text/html; charset=utf-8" },
-            status: 500,
-          });
-        }
-      } catch {}
-      return new Response(`<h2>Error</h2><pre>${escapeHtml(String(e?.message || e))}</pre>`, {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-        status: 500,
+      return handleError(env, e, `Error · ${owner}/${repo}`, {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(ref),
+        path,
       });
     }
   });
@@ -486,192 +507,96 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Commit list
   router.get(`/:owner/:repo/commits`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
+    }
     const repoId = repoKey(owner, repo);
     const u = new URL(request.url);
     const ref = u.searchParams.get("ref") || "main";
+    if (!isValidRef(ref)) {
+      return badRequest(env, "Invalid ref", "Ref format not allowed", {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(ref),
+      });
+    }
     const cursor = u.searchParams.get("cursor") || "";
-    const trailParam = u.searchParams.get("trail") || "";
-    const trail = trailParam
-      .split(",")
-      .map((s) => s.trim().toLowerCase())
-      .filter((s) => /^[0-9a-f]{40}$/i.test(s));
+    const perRaw = Number(u.searchParams.get("per_page") || "25");
+    const perPage = Number.isFinite(perRaw) ? Math.max(5, Math.min(100, Math.floor(perRaw))) : 25;
     try {
-      const perRaw = Number(u.searchParams.get("per_page") || "25");
-      const clamp = (n: number, min: number, max: number) =>
-        Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : min;
-      const perPage = clamp(perRaw, 10, 200);
-      // Fast path: ask the repo DO for a batched commit list to avoid many round-trips
-      let commits: CommitInfo[] = [];
-      let nextCursor: string | undefined;
-      const isFirstPage = !cursor;
-      // Attempt to serve from cache first
-      let headOid: string | undefined;
-      let isTagRef = false;
-      try {
-        if (isFirstPage) {
-          const { head, refs } = await getHeadAndRefs(env, repoId);
-          if (/^[0-9a-f]{40}$/i.test(ref)) {
-            headOid = ref.toLowerCase();
-          } else if (ref === "HEAD" && head?.target) {
-            const r = refs.find((x) => x.name === head.target);
-            headOid = r?.oid;
-            // treat HEAD as branch-like for TTL
-          } else if (ref.startsWith("refs/")) {
-            const r = refs.find((x) => x.name === ref);
-            headOid = r?.oid;
-            isTagRef = ref.startsWith("refs/tags/");
-          } else {
-            const rb = refs.find((x) => x.name === `refs/heads/${ref}`);
-            if (rb) {
-              headOid = rb.oid;
-            } else {
-              const rt = refs.find((x) => x.name === `refs/tags/${ref}`);
-              if (rt) {
-                headOid = rt.oid;
-                isTagRef = true;
-              }
-            }
-          }
-        }
-      } catch {}
-
-      const keyReq = buildCacheKeyFrom(request, "/_cache/commits", {
+      const cacheCtx: CacheContext = { req: request, ctx };
+      const cacheKey = buildCacheKeyFrom(request, "/_cache/commits", {
         repo: repoId,
         ref,
-        cursor: cursor || undefined,
-        per: String(perPage),
-        head: isFirstPage ? headOid : undefined,
+        cursor,
+        per_page: String(perPage),
       });
-
-      // Calculate TTL based on ref type
-      const ttl = cursor ? 3600 : isTagRef || /^[0-9a-f]{40}$/i.test(ref) ? 3600 : 60;
-
-      // Use cache helper for cleaner code
-      const result = await cacheOrLoadJSON<{ items: CommitInfo[]; next?: string }>(
-        keyReq,
+      const commitsView = await cacheOrLoadJSONWithTTL<
+        Array<{
+          oid: string;
+          shortOid: string;
+          firstLine: string;
+          authorName: string;
+          when: string;
+        }>
+      >(
+        cacheKey,
         async () => {
-          try {
-            const stub = getRepoStub(env, repoId);
-            const qp = new URLSearchParams({ ref, max: String(perPage) });
-            if (cursor) qp.set("cursor", cursor);
-            const doRes = await stub.fetch(`https://do/commits?${qp.toString()}`, {
-              method: "GET",
-            });
-            if (doRes.ok) {
-              const parsed = (await doRes.json()) as { items: CommitInfo[]; next?: string };
-              return { items: parsed.items || [], next: parsed.next };
-            } else {
-              const cacheCtx: CacheContext = { req: request, ctx };
-              const items = await listCommits(env, repoId, ref, perPage, cacheCtx);
-              return { items, next: undefined };
-            }
-          } catch {
-            // Fallback to existing path on any error
-            const cacheCtx: CacheContext = { req: request, ctx };
-            const items = await listCommits(env, repoId, ref, perPage, cacheCtx);
-            return { items, next: undefined };
-          }
+          const start = cursor || ref;
+          const commits = await listCommits(env, repoId, start, perPage, cacheCtx);
+          return commits.map((c) => ({
+            oid: c.oid,
+            shortOid: c.oid.slice(0, 7),
+            firstLine: (c.message || "").split(/\r?\n/, 1)[0],
+            authorName: c.author?.name || "",
+            when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
+          }));
         },
-        ttl,
+        () => {
+          const isOid = OID_RE.test(ref);
+          const isTag = ref.startsWith("refs/tags/");
+          return isOid || isTag ? 3600 : 60;
+        },
         ctx
       );
-
-      commits = result?.items || [];
-      nextCursor = result?.next;
-      // Transform commits to structured data for template
-      const commitsData = commits.map((c) => ({
-        oid: c.oid,
-        shortOid: c.oid.slice(0, 7),
-        firstLine: c.message.split("\n")[0],
-        authorName: c.author?.name || "",
-        when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
-      }));
-      // Build pager data structure
-      const baseQs = new URLSearchParams({ ref, per_page: String(perPage) });
-      const currentStart = commits.length > 0 ? commits[0].oid : "";
-
-      let newerHref: string | null = null;
-      if (trail.length > 0) {
-        const prevCursor = trail[trail.length - 1];
-        const remainingTrail = trail.slice(0, -1);
-        if (remainingTrail.length === 0) {
-          const qs = new URLSearchParams(baseQs);
-          newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
-        } else {
-          const qs = new URLSearchParams(baseQs);
-          qs.set("cursor", prevCursor);
-          qs.set("trail", remainingTrail.join(","));
-          newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
-        }
-      }
-
-      let olderHref: string | null = null;
-      if (nextCursor && currentStart) {
-        const nextQs = new URLSearchParams(baseQs);
-        nextQs.set("cursor", nextCursor);
-        const nextTrail = trail.concat([currentStart]).join(",");
-        if (nextTrail) nextQs.set("trail", nextTrail);
-        olderHref = `/${owner}/${repo}/commits?${nextQs.toString()}`;
-      }
-
+      const list = commitsView || [];
+      const last = list[list.length - 1]?.oid || "";
+      const refEnc = encodeURIComponent(ref);
       const pager = {
-        perPageLinks: [
-          {
-            href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "25" }).toString()}`,
-            text: "25",
-          },
-          {
-            href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "50" }).toString()}`,
-            text: "50",
-          },
-          {
-            href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "100" }).toString()}`,
-            text: "100",
-          },
-        ],
-        newerHref,
-        olderHref,
+        perPageLinks: [10, 25, 50].map((n) => ({
+          text: String(n),
+          href: `/${owner}/${repo}/commits?ref=${refEnc}&per_page=${n}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+        })),
+        newerHref: cursor
+          ? `/${owner}/${repo}/commits?ref=${refEnc}&per_page=${perPage}`
+          : undefined,
+        olderHref: last
+          ? `/${owner}/${repo}/commits?ref=${refEnc}&cursor=${encodeURIComponent(last)}&per_page=${perPage}`
+          : undefined,
       };
       const progress = await getUnpackProgress(env, repoId);
-      const page = await renderView(env, "commits", {
-        title: `Commits · ${owner}/${repo}`,
+      const stream = await renderViewStream(env, "commits", {
+        title: `Commits on ${ref} · ${owner}/${repo}`,
         owner,
         repo,
         ref,
-        refEnc: encodeURIComponent(ref),
-        commits: commitsData,
+        refEnc,
+        commits: list,
         pager,
         progress,
       });
-      if (!page) throw new Error("Failed to render commits template");
-      return new Response(page, {
+      return new Response(stream, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid-layout",
+          "X-Page-Renderer": "liquid-stream",
         },
       });
     } catch (e: any) {
-      const debug = String((env as any)?.LOG_LEVEL || "").toLowerCase() === "debug";
-      try {
-        const errHtml = await renderView(env, "error", {
-          title: `Error · ${owner}/${repo}`,
-          message: String(e?.message || e),
-          owner,
-          repo,
-          refEnc: encodeURIComponent(ref),
-          stack: debug ? String(e?.stack || "") : undefined,
-        });
-        if (errHtml) {
-          return new Response(errHtml, {
-            headers: { "Content-Type": "text/html; charset=utf-8" },
-            status: /not found/i.test(String(e?.message || e)) ? 404 : 500,
-          });
-        }
-      } catch {}
-      return new Response(`<h2>Error</h2><pre>${escapeHtml(String(e?.message || e))}</pre>`, {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-        status: 500,
+      return handleError(env, e, `Error · ${owner}/${repo}`, {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(ref),
       });
     }
   });
@@ -679,13 +604,23 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Commit details
   router.get(`/:owner/:repo/commit/:oid`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo, oid } = request.params;
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
+    }
+    if (!OID_RE.test(oid)) {
+      return badRequest(env, "Invalid commit OID", "Commit id must be 40-hex", {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(oid),
+      });
+    }
     const repoId = repoKey(owner, repo);
     try {
       const cacheCtx: CacheContext = { req: request, ctx };
       const c = await readCommitInfo(env, repoId, oid, cacheCtx);
       const when = c.author ? formatWhen(c.author.when, c.author.tz) : "";
       const parents = (c.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
-      const page = await renderView(env, "commit", {
+      const stream = await renderViewStream(env, "commit", {
         title: `${c.oid.slice(0, 7)} · ${owner}/${repo}`,
         owner,
         repo,
@@ -693,41 +628,24 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         commitShort: c.oid.slice(0, 7),
         authorName: c.author?.name || "",
         authorEmail: c.author?.email || "",
-        when: when,
+        when,
         parents,
-        treeShort: c.tree.slice(0, 7),
-        message: c.message,
+        treeShort: (c.tree || "").slice(0, 7),
+        message: c.message || "",
       });
-      if (!page) throw new Error("Failed to render commit template");
-      return new Response(page, {
+      return new Response(stream, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid-layout",
+          "X-Page-Renderer": "liquid-stream",
         },
       });
     } catch (e: any) {
-      const debug = String((env as any)?.LOG_LEVEL || "").toLowerCase() === "debug";
-      try {
-        const errHtml = await renderView(env, "error", {
-          title: `Error · ${owner}/${repo}`,
-          message: String(e?.message || e),
-          owner,
-          repo,
-          refEnc: encodeURIComponent(oid),
-          path: "",
-          stack: debug ? String(e?.stack || "") : undefined,
-        });
-        if (errHtml) {
-          return new Response(errHtml, {
-            headers: { "Content-Type": "text/html; charset=utf-8" },
-            status: 500,
-          });
-        }
-      } catch {}
-      return new Response(`<h2>Error</h2><pre>${escapeHtml(String(e?.message || e))}</pre>`, {
-        headers: { "Content-Type": "text/html; charset=utf-8" },
-        status: 500,
+      return handleError(env, e, `Error · ${owner}/${repo}`, {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(oid),
+        path: "",
       });
     }
   });
@@ -735,8 +653,12 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Raw blob endpoint - streams file content without buffering
   router.get(`/:owner/:repo/raw`, async (request, env: Env) => {
     const { owner, repo } = request.params;
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return new Response("Bad Request\n", { status: 400 });
+    }
     const url = new URL(request.url);
     const oid = url.searchParams.get("oid") || "";
+    if (!OID_RE.test(oid)) return new Response("Bad Request\n", { status: 400 });
     const fileName = url.searchParams.get("name") || oid;
     const download = url.searchParams.get("download") === "1";
 
@@ -766,10 +688,15 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Raw blob by ref+path (used for images in Markdown)
   router.get(`/:owner/:repo/rawpath`, async (request: any, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return new Response("Bad Request\n", { status: 400 });
+    }
     const url = new URL(request.url);
     const ref = url.searchParams.get("ref") || "main";
     const path = url.searchParams.get("path") || "";
     const name = url.searchParams.get("name") || path.split("/").pop() || "file";
+    if (!isValidRef(ref) || !isValidPath(path))
+      return new Response("Bad Request\n", { status: 400 });
     const download = url.searchParams.get("download") === "1";
 
     // Basic hotlink protection: require same-origin Referer
@@ -797,30 +724,73 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       if (!streamResponse) return new Response("Not found\n", { status: 404 });
 
       const headers = new Headers(streamResponse.headers);
-      // Best-effort content type based on extension for inline rendering in <img>
-      const ext = (name.split(".").pop() || "").toLowerCase();
-      const ct =
-        ext === "png"
-          ? "image/png"
-          : ext === "jpg" || ext === "jpeg"
-            ? "image/jpeg"
-            : ext === "gif"
-              ? "image/gif"
-              : ext === "webp"
-                ? "image/webp"
-                : ext === "bmp"
-                  ? "image/bmp"
-                  : ext === "ico"
-                    ? "image/x-icon"
-                    : ext === "svg"
-                      ? "image/svg+xml"
-                      : "application/octet-stream";
-      headers.set("Content-Type", ct);
+      headers.set("Content-Type", getContentTypeFromName(name));
       if (download) headers.set("Content-Disposition", `attachment; filename="${name}"`);
       else headers.set("Content-Disposition", `inline; filename="${name}"`);
       return new Response(streamResponse.body, { status: streamResponse.status, headers });
     } catch (e: any) {
       return new Response("Not found\n", { status: 404 });
+    }
+  });
+
+  // Async refs API for repo_nav dropdown
+  router.get(`/:owner/:repo/api/refs`, async (request, env: Env, ctx: ExecutionContext) => {
+    const { owner, repo } = request.params;
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return new Response(JSON.stringify({ branches: [], tags: [] }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const repoId = repoKey(owner, repo);
+    try {
+      const cacheKey = buildCacheKeyFrom(request, "/_cache/refs", { repo: repoId });
+      const refsData = await cacheOrLoadJSON<{ refs: any[] }>(
+        cacheKey,
+        async () => {
+          try {
+            const result = await getHeadAndRefs(env, repoId);
+            return { refs: result.refs };
+          } catch {
+            return null;
+          }
+        },
+        60,
+        ctx
+      );
+      const refs = refsData?.refs || [];
+      const branches = refs
+        .filter((r: any) => r.name && r.name.startsWith("refs/heads/"))
+        .map((b: any) => {
+          const short = b.name.replace("refs/heads/", "");
+          return {
+            name: encodeURIComponent(short),
+            displayName: short.length > 30 ? short.slice(0, 27) + "..." : short,
+          };
+        });
+      const tags = refs
+        .filter((r: any) => r.name && r.name.startsWith("refs/tags/"))
+        .map((t: any) => {
+          const short = t.name.replace("refs/tags/", "");
+          return {
+            name: encodeURIComponent(short),
+            displayName: short.length > 30 ? short.slice(0, 27) + "..." : short,
+          };
+        });
+      return new Response(JSON.stringify({ branches, tags }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Cache-Control": "public, max-age=60",
+        },
+      });
+    } catch (e: any) {
+      return new Response(
+        JSON.stringify({ branches: [], tags: [], error: String(e?.message || e) }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
     }
   });
 }
