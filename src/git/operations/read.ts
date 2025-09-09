@@ -6,6 +6,7 @@ import { createMemPackFs } from "@/git/pack/unpack.ts";
 import { createStubLooseLoader } from "@/git/pack/loose-loader.ts";
 import { createInflateStream } from "@/common/compression.ts";
 import { buildObjectCacheKey, cacheOrLoadObject, type CacheContext } from "@/cache/cache.ts";
+import { createLogger } from "@/common/logger.ts";
 import * as git from "isomorphic-git";
 
 /**
@@ -19,6 +20,10 @@ import * as git from "isomorphic-git";
  * @param env - Cloudflare environment bindings
  * @param repoId - Repository identifier (format: "owner/repo")
  * @returns `{ head, refs }` where `head` may be undefined if not initialized
+ * @example
+ * const { head, refs } = await getHeadAndRefs(env, "owner/repo");
+ * // head: { target: "refs/heads/main", oid: "abc123..." }
+ * // refs: [{ name: "refs/heads/main", oid: "abc123..." }]
  */
 export async function getHeadAndRefs(
   env: Env,
@@ -37,14 +42,20 @@ export async function getHeadAndRefs(
 /**
  * Resolve a ref-ish to a 40-char commit OID.
  *
- * - Accepts: `HEAD`, fully qualified refs (e.g., `refs/heads/main`), short names (e.g., `main` or `v1.0`),
- *   or a 40-hex OID (in which case it is normalized to lowercase).
- * - Resolution order for short names: branches first (`refs/heads/*`), then tags (`refs/tags/*`).
+ * Resolution order:
+ * 1. If already a 40-hex OID, return normalized (lowercase)
+ * 2. If "HEAD", resolve to current branch's OID
+ * 3. If fully qualified ref (starts with "refs/"), exact match
+ * 4. For short names: try branches first, then tags
  *
  * @param env - Cloudflare environment bindings
  * @param repoId - Repository identifier (format: "owner/repo")
  * @param refOrOid - Reference, short name, or 40-char OID
  * @returns Resolved commit OID (lowercase) or undefined if not found
+ * @example
+ * await resolveRef(env, "owner/repo", "HEAD");           // "abc123..."
+ * await resolveRef(env, "owner/repo", "main");           // "def456..."
+ * await resolveRef(env, "owner/repo", "refs/tags/v1.0"); // "789abc..."
  */
 export async function resolveRef(
   env: Env,
@@ -70,6 +81,16 @@ export async function resolveRef(
   return undefined;
 }
 
+/**
+ * Read and parse a commit object.
+ *
+ * @param env - Cloudflare environment bindings
+ * @param repoId - Repository identifier (format: "owner/repo")
+ * @param oid - Commit object ID (SHA-1 hash)
+ * @param cacheCtx - Optional cache context for object caching
+ * @returns Parsed commit with tree, parents, and message
+ * @throws {Error} If object not found or not a commit
+ */
 export async function readCommit(
   env: Env,
   repoId: string,
@@ -83,6 +104,9 @@ export async function readCommit(
   return { tree: parsed.tree, parents: parsed.parents, message: parsed.message };
 }
 
+/**
+ * Complete commit information including author and committer details.
+ */
 export interface CommitInfo {
   oid: string;
   tree: string;
@@ -92,6 +116,18 @@ export interface CommitInfo {
   message: string;
 }
 
+/**
+ * Read and parse a commit object with full metadata.
+ *
+ * Similar to readCommit but includes author/committer information.
+ *
+ * @param env - Cloudflare environment bindings
+ * @param repoId - Repository identifier (format: "owner/repo")
+ * @param oid - Commit object ID (SHA-1 hash)
+ * @param cacheCtx - Optional cache context for object caching
+ * @returns Full commit information including author and committer
+ * @throws {Error} If object not found or not a commit
+ */
 export async function readCommitInfo(
   env: Env,
   repoId: string,
@@ -106,18 +142,35 @@ export async function readCommitInfo(
   return { oid, tree, parents, author, committer, message };
 }
 
-// Signature parsing moved to ./git/commitParse and used via parseCommitText
-
-export async function listCommits(
+/**
+ * First-parent pagination: return `limit` commits starting at absolute `offset` from HEAD
+ * along the first-parent chain of `start`.
+ *
+ * Used by the commits page for pagination. Walks only the first-parent chain
+ * (no merge traversal), making it predictable for pagination.
+ *
+ * @param env - Cloudflare environment bindings
+ * @param repoId - Repository identifier (format: "owner/repo")
+ * @param start - Starting ref or commit OID
+ * @param offset - Number of commits to skip from start
+ * @param limit - Maximum number of commits to return
+ * @param cacheCtx - Optional cache context for object caching
+ * @returns Array of commits in the range
+ * @example
+ * // Get commits 20-40 (page 2 with 20 per page)
+ * await listCommitsFirstParentRange(env, "owner/repo", "main", 20, 20);
+ */
+export async function listCommitsFirstParentRange(
   env: Env,
   repoId: string,
   start: string,
-  max = 50,
+  offset: number,
+  limit: number,
   cacheCtx?: CacheContext
 ): Promise<CommitInfo[]> {
   let oid = await resolveRef(env, repoId, start);
   if (!oid && /^[0-9a-f]{40}$/i.test(start)) oid = start.toLowerCase();
-  // Peel annotated tags to their target commit
+  // Peel annotated tag
   if (oid) {
     const obj = await readLooseObjectRaw(env, repoId, oid, cacheCtx);
     if (obj && obj.type === "tag") {
@@ -127,24 +180,182 @@ export async function listCommits(
     }
   }
   if (!oid) throw new Error("Ref not found");
-  const commits: CommitInfo[] = [];
+  const out: CommitInfo[] = [];
   const seen = new Set<string>();
-  while (commits.length < max && oid && !seen.has(oid)) {
+  let index = 0;
+  while (oid && !seen.has(oid) && out.length < limit) {
     seen.add(oid);
     const info = await readCommitInfo(env, repoId, oid, cacheCtx);
-    commits.push(info);
-    // Follow first parent chain for now
+    if (index >= offset) {
+      out.push(info);
+    }
+    index++;
     oid = info.parents[0];
   }
-  return commits;
+  return out;
 }
 
+/**
+ * Options for controlling merge side traversal behavior.
+ */
+export interface MergeSideOptions {
+  /** Maximum commits to scan before stopping (default: limit * 3) */
+  scanLimit?: number;
+  /** Time budget in milliseconds before stopping (default: 150ms) */
+  timeBudgetMs?: number;
+  /** Number of mainline commits to probe for early stop (default: 300) */
+  mainlineProbe?: number;
+}
+
+/**
+ * Return up to `limit` commits drawn from the non-first-parent sides of a merge commit.
+ *
+ * Algorithm:
+ * 1. Probe mainline (parents[0]) to build a stop set
+ * 2. Initialize frontier with side parents (parents[1..])
+ * 3. Priority queue traversal by author date (newest first)
+ * 4. Stop when: reached limit, hit mainline, timeout, or scan limit
+ *
+ * Guardrails prevent runaway traversal:
+ * - scanLimit: max commits to examine
+ * - timeBudgetMs: max time to spend
+ * - mainlineProbe: how far to look ahead on mainline
+ *
+ * @param env - Cloudflare environment bindings
+ * @param repoId - Repository identifier (format: "owner/repo")
+ * @param mergeOid - OID of the merge commit
+ * @param limit - Maximum commits to return (default: 20)
+ * @param options - Traversal options for performance tuning
+ * @param cacheCtx - Optional cache context for object caching
+ * @returns Array of commits from merge side branches
+ */
+export async function listMergeSideFirstParent(
+  env: Env,
+  repoId: string,
+  mergeOid: string,
+  limit = 20,
+  options: MergeSideOptions = {},
+  cacheCtx?: CacheContext
+): Promise<CommitInfo[]> {
+  const logger = createLogger(env.LOG_LEVEL, { service: "listMergeSideFirstParent", repoId });
+  const scanLimit = Math.min(400, Math.max(limit * 3, options.scanLimit ?? 120));
+  const timeBudgetMs = Math.max(50, Math.min(10000, options.timeBudgetMs ?? 150)); // Allow up to 10s for production
+  const mainlineProbe = Math.min(1000, Math.max(50, options.mainlineProbe ?? 300));
+  const started = Date.now();
+
+  // Load the merge commit
+  const merge = await readCommitInfo(env, repoId, mergeOid, cacheCtx);
+  const parents = merge.parents || [];
+  if (parents.length < 2) return [];
+
+  // Probe a window of mainline (parents[0]) to stop when a side reaches it
+  const mainlineSet = new Set<string>();
+  try {
+    let cur: string | undefined = parents[0];
+    let seen = 0;
+    const visited = new Set<string>();
+    const probeStarted = Date.now();
+    // Limit probe time to 1/3 of budget to leave time for actual traversal
+    const probeTimeBudget = Math.min(1500, timeBudgetMs / 3);
+
+    while (
+      cur &&
+      seen < mainlineProbe &&
+      !visited.has(cur) &&
+      Date.now() - probeStarted < probeTimeBudget
+    ) {
+      visited.add(cur);
+      mainlineSet.add(cur);
+      const info = await readCommitInfo(env, repoId, cur, cacheCtx);
+      cur = info.parents?.[0];
+      seen++;
+    }
+
+    // Log probe performance
+    logger.info("Mainline probe completed", {
+      commits: seen,
+      timeMs: Date.now() - probeStarted,
+      mergeOid,
+    });
+  } catch {}
+
+  // Helper to compare by date desc then oid desc
+  const newerFirst = (a: CommitInfo, b: CommitInfo) => {
+    const aw = a.author?.when ?? 0;
+    const bw = b.author?.when ?? 0;
+    if (aw !== bw) return bw - aw;
+    return b.oid.localeCompare(a.oid);
+  };
+
+  // Initialize frontier with side parents (parents[1..])
+  const visited = new Set<string>();
+  const frontier: CommitInfo[] = [];
+  for (let i = 1; i < parents.length; i++) {
+    const p = parents[i];
+    try {
+      const info = await readCommitInfo(env, repoId, p, cacheCtx);
+      frontier.push(info);
+    } catch {}
+  }
+
+  const out: CommitInfo[] = [];
+  let scanned = 0;
+
+  while (
+    out.length < limit &&
+    frontier.length > 0 &&
+    scanned < scanLimit &&
+    Date.now() - started < timeBudgetMs
+  ) {
+    frontier.sort(newerFirst);
+    const current = frontier.shift()!;
+    scanned++;
+    if (visited.has(current.oid)) continue;
+    visited.add(current.oid);
+
+    // Stop the branch if we reached the mainline (approximate merge-base boundary)
+    if (mainlineSet.has(current.oid)) {
+      continue;
+    }
+
+    out.push(current);
+    if (out.length >= limit) break;
+
+    // Advance along first-parent for this branch
+    const next = current.parents?.[0];
+    if (next && !visited.has(next)) {
+      try {
+        const ni = await readCommitInfo(env, repoId, next, cacheCtx);
+        frontier.push(ni);
+      } catch {}
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Git tree entry representing a file or directory.
+ */
 export interface TreeEntry {
+  /** File mode (e.g., "100644" for regular file, "40000" for directory) */
   mode: string;
+  /** Entry name (filename or directory name) */
   name: string;
+  /** Object ID of the blob (file) or tree (directory) */
   oid: string;
 }
 
+/**
+ * Read and parse a tree object.
+ *
+ * @param env - Cloudflare environment bindings
+ * @param repoId - Repository identifier (format: "owner/repo")
+ * @param oid - Tree object ID
+ * @param cacheCtx - Optional cache context for object caching
+ * @returns Array of tree entries
+ * @throws {Error} If object not found or not a tree
+ */
 export async function readTree(
   env: Env,
   repoId: string,
@@ -163,17 +374,28 @@ export async function readTree(
 /**
  * Read a tree or blob by ref and path.
  *
- * Behavior
- * - If `path` resolves to a directory: returns `{ type: 'tree', entries, base }` where `base` is the path prefix.
- * - If `path` resolves to a file: returns `{ type: 'blob', oid, content, base }`.
- * - If the blob appears too large (estimated from compressed size via HEAD), returns `{ tooLarge: true, size }` and empty content.
- * - Supports starting from a commit ref, tree OID, tag (peeled to commit), or a blob OID (only valid with empty `path`).
+ * Versatile function that navigates the Git object tree from a ref to a path.
+ * Handles various starting points (commit, tree, tag, blob) and returns
+ * appropriate data based on whether the path points to a file or directory.
+ *
+ * For large files (>5MB), returns metadata only to avoid memory issues.
  *
  * @param env - Cloudflare environment bindings
  * @param repoId - Repository identifier (format: "owner/repo")
- * @param ref - Git reference (branch, tag, or commit SHA)
+ * @param ref - Starting point: branch, tag, commit SHA, tree OID, or blob OID
  * @param path - File or directory path (optional, defaults to root)
- * @returns Union: tree entries for directories or blob content/metadata for files
+ * @param cacheCtx - Optional cache context for object caching
+ * @returns Union type based on path target:
+ *   - Directory: `{ type: 'tree', entries, base }`
+ *   - File: `{ type: 'blob', oid, content, base, size?, tooLarge? }`
+ * @throws {Error} If ref not found, path not found, or path not a directory when expected
+ * @example
+ * // Get root directory listing
+ * await readPath(env, "owner/repo", "main");
+ * // Get specific file
+ * await readPath(env, "owner/repo", "main", "README.md");
+ * // Navigate to subdirectory
+ * await readPath(env, "owner/repo", "main", "src/utils");
  */
 export async function readPath(
   env: Env,
@@ -285,6 +507,15 @@ export async function readPath(
   return { type: "tree", entries: rootEntries, base };
 }
 
+/**
+ * Parse binary tree object format into structured entries.
+ *
+ * Git tree format: `<mode> <name>\0<20-byte-oid>`
+ * Repeated for each entry.
+ *
+ * @param buf - Raw tree object payload
+ * @returns Parsed tree entries
+ */
 function parseTree(buf: Uint8Array): TreeEntry[] {
   const td = new TextDecoder();
   const out: TreeEntry[] = [];
@@ -306,6 +537,15 @@ function parseTree(buf: Uint8Array): TreeEntry[] {
   return out;
 }
 
+/**
+ * Read a blob object and return its content.
+ *
+ * @param env - Cloudflare environment bindings
+ * @param repoId - Repository identifier (format: "owner/repo")
+ * @param oid - Blob object ID
+ * @param cacheCtx - Optional cache context for object caching
+ * @returns Blob content and type, or null if not found
+ */
 export async function readBlob(
   env: Env,
   repoId: string,
@@ -320,15 +560,16 @@ export async function readBlob(
 /**
  * Stream a blob without buffering the entire object in memory.
  *
- * Implementation detail
- * - Performs `GET /obj/:oid` to the repo DO, then pipes through a `DecompressionStream('deflate')`.
- * - Parses and strips the Git object header (`<type> <len>\0`) on the fly.
- * - Sets a long-lived `Cache-Control` and `ETag` header for efficient caching.
+ * Ideal for large files. The response streams directly from DO/R2 through
+ * decompression, stripping the Git header on the fly.
  *
  * @param env - Cloudflare environment bindings
  * @param repoId - Repository identifier (format: "owner/repo")
  * @param oid - Object ID (SHA-1 hash) of the blob
  * @returns Response with streaming body or null if not found
+ * @example
+ * const response = await readBlobStream(env, "owner/repo", "abc123...");
+ * // Stream directly to client: return response;
  */
 export async function readBlobStream(
   env: Env,
@@ -385,15 +626,20 @@ export async function readBlobStream(
 }
 
 /**
- * Read and fully buffer a raw Git object (header + payload) from storage.
+ * Read and fully buffer a raw Git object from storage.
  *
- * - Fetches `GET /obj/:oid` from the repo DO, inflates (zlib/deflate), and parses the header
- *   (`<type> <len>\0`). Returns `{ type, payload }`.
- * - For large files, prefer `readBlobStream()` to avoid buffering in memory.
+ * Storage hierarchy (in order):
+ * 1. Cache API - Edge cache, ~5-20ms latency
+ * 2. Durable Object state - Recent/active objects, ~30-50ms
+ * 3. R2 packfiles - Cold storage, ~100-300ms
+ *
+ * Objects are immutable, so aggressive caching (1 year TTL) is used.
+ * For large blobs, prefer `readBlobStream()` to avoid memory buffering.
  *
  * @param env - Cloudflare environment bindings
  * @param repoId - Repository identifier (format: "owner/repo")
  * @param oid - Object ID (SHA-1 hash)
+ * @param cacheCtx - Optional cache context for Cache API
  * @returns Decompressed object with type and payload, or undefined if not found
  */
 export async function readLooseObjectRaw(
@@ -404,11 +650,11 @@ export async function readLooseObjectRaw(
 ): Promise<{ type: string; payload: Uint8Array } | undefined> {
   const oidLc = oid.toLowerCase();
 
-  // Helper function to load from packs
+  // Helper function to load from R2 packfiles (fallback when not in DO state)
   const loadFromPacks = async () => {
     try {
       const stub = getRepoStub(env, repoId);
-      // Get recent packs recorded by the DO
+      // Step 1: Get list of available packs from the Durable Object
       const packsRes = await stub.fetch("https://do/packs", { method: "GET" });
       const packList: string[] = packsRes.ok
         ? ((await packsRes.json()) as { keys: string[] }).keys || []
@@ -422,7 +668,7 @@ export async function readLooseObjectRaw(
         packList.push(meta.key);
       }
 
-      // Prefer the pack that contains the OID, but load multiple packs to satisfy deltas
+      // Step 2: Find which pack contains our target OID by querying pack indexes
       let chosenPackKey: string | undefined;
       const contains: Record<string, boolean> = {};
       for (const key of packList) {
@@ -438,7 +684,8 @@ export async function readLooseObjectRaw(
       }
       if (!chosenPackKey) chosenPackKey = packList[0];
 
-      // Load up to the first 5 packs (newest-first) into the in-memory fs
+      // Step 3: Load up to 5 packs from R2 (includes the one with our OID)
+      // Loading multiple packs is necessary for delta resolution
       const toLoad = packList.slice(0, Math.min(5, packList.length));
       if (!toLoad.includes(chosenPackKey)) toLoad.unshift(chosenPackKey);
       const seenKeys = new Set<string>();
@@ -452,8 +699,13 @@ export async function readLooseObjectRaw(
               env.REPO_BUCKET.get(packIndexKey(key)),
             ]);
             if (!p || !i) return;
-            const packBuf = new Uint8Array(await p.arrayBuffer());
-            const idxBuf = new Uint8Array(await i.arrayBuffer());
+            // Parallelize arrayBuffer conversions too
+            const [packArrayBuf, idxArrayBuf] = await Promise.all([
+              p.arrayBuffer(),
+              i.arrayBuffer(),
+            ]);
+            const packBuf = new Uint8Array(packArrayBuf);
+            const idxBuf = new Uint8Array(idxArrayBuf);
             const base = key.split("/").pop()!;
             const idxBase = base.replace(/\.pack$/i, ".idx");
             files.set(`/git/objects/pack/${base}`, packBuf);
@@ -463,7 +715,7 @@ export async function readLooseObjectRaw(
       );
       if (files.size === 0) return undefined;
 
-      // Create a loader for existing loose objects (needed for thin packs)
+      // Step 4: Create a loader for loose objects (needed for thin pack delta resolution)
       const looseLoader = createStubLooseLoader(stub);
 
       const fs = createMemPackFs(files, { looseLoader });
@@ -478,7 +730,7 @@ export async function readLooseObjectRaw(
     }
   };
 
-  // Helper function to load from Durable Object state
+  // Helper function to load from Durable Object state (preferred for recent objects)
   const loadFromState = async (): Promise<{ type: string; payload: Uint8Array } | undefined> => {
     try {
       const stub = getRepoStub(env, repoId);
@@ -502,7 +754,7 @@ export async function readLooseObjectRaw(
     return undefined;
   };
 
-  // Use cache helper if cache context is available
+  // Main flow: Use Cache API wrapper if context available, otherwise direct load
   if (cacheCtx) {
     const cacheKey = buildObjectCacheKey(cacheCtx.req, repoId, oidLc);
     return cacheOrLoadObject(
@@ -512,14 +764,14 @@ export async function readLooseObjectRaw(
         const stateResult = await loadFromState();
         if (stateResult) return stateResult;
 
-        // If DO fetch fails, try R2 packs (fallback logic below)
+        // If DO fetch fails, try R2 packs
         return await loadFromPacks();
       },
       cacheCtx.ctx
     );
   }
 
-  // No request available, load without caching
+  // No cache context: Try DO state first, then fall back to R2 packs
   const stateResult = await loadFromState();
   if (stateResult) return stateResult;
 

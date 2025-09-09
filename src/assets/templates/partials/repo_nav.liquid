@@ -55,6 +55,42 @@
               .then(function (data) {
                 if (!data) return;
                 var opts = [];
+
+                // Check if currentRef is an OID (40 hex chars) and not a branch/tag
+                var isOid = /^[0-9a-f]{40}$/i.test(currentRef);
+                var foundInRefs = false;
+
+                // Check if current ref exists in branches or tags
+                if (data.branches) {
+                  for (var k = 0; k < data.branches.length; k++) {
+                    if (data.branches[k].name === currentRef) {
+                      foundInRefs = true;
+                      break;
+                    }
+                  }
+                }
+                if (!foundInRefs && data.tags) {
+                  for (var l = 0; l < data.tags.length; l++) {
+                    if (data.tags[l].name === currentRef) {
+                      foundInRefs = true;
+                      break;
+                    }
+                  }
+                }
+
+                // If current ref is not in branches/tags, show it as a special option
+                if (!foundInRefs && currentRef) {
+                  var displayRef = isOid
+                    ? 'Commit: ' + currentRef.substring(0, 7) + '…'
+                    : currentRef;
+                  opts.push(
+                    '<option value="' + currentRef + '" selected>' + displayRef + '</option>'
+                  );
+                  if ((data.branches && data.branches.length) || (data.tags && data.tags.length)) {
+                    opts.push('<option value="" disabled>—————————</option>');
+                  }
+                }
+
                 if (data.branches && data.branches.length) {
                   opts.push('<option value="" disabled>— Branches —</option>');
                   for (var i = 0; i < data.branches.length; i++) {

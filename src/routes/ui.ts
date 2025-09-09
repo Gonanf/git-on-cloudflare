@@ -2,7 +2,8 @@ import { AutoRouter } from "itty-router";
 import {
   getHeadAndRefs,
   readPath,
-  listCommits,
+  listCommitsFirstParentRange,
+  listMergeSideFirstParent,
   readCommitInfo,
   readBlobStream,
   type TreeEntry,
@@ -520,17 +521,23 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         refEnc: encodeURIComponent(ref),
       });
     }
-    const cursor = u.searchParams.get("cursor") || "";
+    const pageRaw = u.searchParams.get("page") || "";
     const perRaw = Number(u.searchParams.get("per_page") || "25");
     const perPage = Number.isFinite(perRaw) ? Math.max(5, Math.min(100, Math.floor(perRaw))) : 25;
     try {
       const cacheCtx: CacheContext = { req: request, ctx };
+      let page = Number(pageRaw);
+      if (!Number.isFinite(page) || page < 0) page = 0;
+      let offset = page * perPage;
+
       const cacheKey = buildCacheKeyFrom(request, "/_cache/commits", {
         repo: repoId,
         ref,
-        cursor,
         per_page: String(perPage),
+        page: String(page),
+        offset: String(offset),
       });
+
       const commitsView = await cacheOrLoadJSONWithTTL<
         Array<{
           oid: string;
@@ -542,14 +549,21 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       >(
         cacheKey,
         async () => {
-          const start = cursor || ref;
-          const commits = await listCommits(env, repoId, start, perPage, cacheCtx);
+          const commits = await listCommitsFirstParentRange(
+            env,
+            repoId,
+            ref,
+            offset,
+            perPage,
+            cacheCtx
+          );
           return commits.map((c) => ({
             oid: c.oid,
             shortOid: c.oid.slice(0, 7),
             firstLine: (c.message || "").split(/\r?\n/, 1)[0],
             authorName: c.author?.name || "",
             when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
+            isMerge: Array.isArray(c.parents) && c.parents.length > 1,
           }));
         },
         () => {
@@ -565,14 +579,16 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       const pager = {
         perPageLinks: [10, 25, 50].map((n) => ({
           text: String(n),
-          href: `/${owner}/${repo}/commits?ref=${refEnc}&per_page=${n}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+          href: `/${owner}/${repo}/commits?ref=${refEnc}&page=${page}&per_page=${n}`,
         })),
-        newerHref: cursor
-          ? `/${owner}/${repo}/commits?ref=${refEnc}&per_page=${perPage}`
-          : undefined,
-        olderHref: last
-          ? `/${owner}/${repo}/commits?ref=${refEnc}&cursor=${encodeURIComponent(last)}&per_page=${perPage}`
-          : undefined,
+        newerHref:
+          page > 0
+            ? `/${owner}/${repo}/commits?ref=${refEnc}&page=${page - 1}&per_page=${perPage}`
+            : undefined,
+        olderHref:
+          last && list.length === perPage
+            ? `/${owner}/${repo}/commits?ref=${refEnc}&page=${page + 1}&per_page=${perPage}`
+            : undefined,
       };
       const progress = await getUnpackProgress(env, repoId);
       const stream = await renderViewStream(env, "commits", {
@@ -600,6 +616,73 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       });
     }
   });
+
+  // Merge expansion fragment endpoint: returns HTML <tr> rows for side-branch commits of a merge
+  // Example: /:owner/:repo/commits/fragments/:oid?limit=20
+  router.get(
+    `/:owner/:repo/commits/fragments/:oid`,
+    async (request, env: Env, ctx: ExecutionContext) => {
+      const { owner, repo, oid } = request.params as { owner: string; repo: string; oid: string };
+      if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+        return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
+      }
+      if (!OID_RE.test(oid)) {
+        return badRequest(env, "Invalid OID", "OID must be 40 hex", {
+          owner,
+          repo,
+          refEnc: encodeURIComponent(oid),
+        });
+      }
+      const u = new URL(request.url);
+      const limitRaw = Number(u.searchParams.get("limit") || "20");
+      const limit = Number.isFinite(limitRaw)
+        ? Math.max(1, Math.min(100, Math.floor(limitRaw)))
+        : 20;
+      const repoId = repoKey(owner, repo);
+      try {
+        const cacheCtx: CacheContext = { req: request, ctx };
+        const side = await listMergeSideFirstParent(
+          env,
+          repoId,
+          oid,
+          limit,
+          {
+            scanLimit: Math.min(400, limit * 5),
+            timeBudgetMs: 5000, // Increased for production R2 latency
+            mainlineProbe: 50, // Reduced to speed up initial probe
+          },
+          cacheCtx
+        );
+        const commits = (side || []).map((c) => ({
+          oid: c.oid,
+          shortOid: c.oid.slice(0, 7),
+          firstLine: (c.message || "").split(/\r?\n/, 1)[0],
+          authorName: c.author?.name || "",
+          when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
+        }));
+        const stream = await renderViewStream(env, "commit_rows", {
+          owner,
+          repo,
+          commits,
+          compact: true,
+          mergeOf: oid,
+        });
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "X-Page-Renderer": "liquid-fragment",
+          },
+        });
+      } catch (e: any) {
+        return handleError(env, e, `Error · ${owner}/${repo}`, {
+          owner,
+          repo,
+          refEnc: encodeURIComponent(oid),
+        });
+      }
+    }
+  );
 
   // Commit details
   router.get(`/:owner/:repo/commit/:oid`, async (request, env: Env, ctx: ExecutionContext) => {

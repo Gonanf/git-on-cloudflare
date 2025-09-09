@@ -57,6 +57,11 @@ git push https://owner:token@your-domain.com/owner/repo main
   Commit history with pagination  
   Query params: `?ref=branch&per_page=50&cursor=...`
 
+- **`GET /:owner/:repo/commits/fragments/:oid`**
+  Fetch side branch commits for a merge (AJAX endpoint)
+  Query params: `?limit=20`
+  Returns: HTML fragment of commit rows for dynamic insertion
+
 - **`GET /:owner/:repo/commit/:oid`**  
   View single commit diff
 

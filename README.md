@@ -15,6 +15,7 @@ Host unlimited private Git repositories at the edge with <50ms response times gl
 - **Streaming pack assembly** from R2 with range reads for efficient clones
 - **Time-budgeted background unpacking** handles large pushes without blocking
 - **Modern web UI** with Tailwind CSS v4, Liquid templates, and dark mode (default)
+- **Interactive merge commit exploration** - expand merge commits to see side branch history
 - **Safer raw views**: `text/plain` for `/raw` by default and same‑origin Referer check for `/rawpath` to prevent hotlinking
 
 ## Quick Demo

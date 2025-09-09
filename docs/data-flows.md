@@ -47,3 +47,19 @@ The DO also records metadata to help fetch:
   - Streams the object by piping the compressed DO response through a decompression stream
   - Uses `Content-Disposition: inline` by default (add `&download=1` to force attachment)
   - Uses `text/plain; charset=utf-8` for safety (prevents HTML/JS execution)
+
+## Merge commit exploration
+
+- `GET /:owner/:repo/commits` (main page)
+  - Displays commit history with expandable merge commits
+  - Merge commits show a badge and are clickable to expand side branch history
+- `GET /:owner/:repo/commits/fragments/:oid` (AJAX fragment)
+  - Called when user clicks a merge commit row
+  - Uses `listMergeSideFirstParent()` to traverse non-mainline parents
+  - Algorithm:
+    1. Probe mainline (parents[0]) to build a stop set
+    2. Initialize frontier with side parents (parents[1..])
+    3. Priority queue traversal by author date (newest first)
+    4. Stop when: reached limit, hit mainline, timeout, or scan limit
+  - Returns HTML fragment with commit rows for dynamic insertion
+  - No caching at UI level (dynamic content)

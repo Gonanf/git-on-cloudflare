@@ -86,7 +86,9 @@ function createAssetFs(env: Env): NonNullable<FS> {
 }
 
 function getEngine(env: Env): Liquid {
-  if (cachedEngine) return cachedEngine;
+  if (cachedEngine) {
+    return cachedEngine;
+  }
   const engine = new Liquid({
     extname: ".liquid",
     root: ["templates", "templates/partials"],
