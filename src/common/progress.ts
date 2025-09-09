@@ -5,6 +5,8 @@ export interface UnpackProgress {
   processed?: number;
   total?: number;
   percent?: number;
+  queuedCount?: number; // 0 or 1 (one-deep queue)
+  currentPackKey?: string;
 }
 
 /**
@@ -17,7 +19,7 @@ export async function getUnpackProgress(env: Env, repoId: string): Promise<Unpac
     const res = await stub.fetch("https://do/unpack-progress", { method: "GET" });
     if (!res.ok) return null;
     const progress = (await res.json()) as UnpackProgress;
-    if (progress.unpacking && progress.total) {
+    if ((progress.unpacking && progress.total) || Number(progress.queuedCount || 0) > 0) {
       return progress;
     }
   } catch {}

@@ -5,8 +5,9 @@ This document describes the primary data flows of the server: pushing (receive-p
 ## Push (git-receive-pack)
 
 1. Client sends `POST /:owner/:repo/git-receive-pack` (Smart HTTP v0 style body)
-2. Worker forwards the raw body to the repository DO: `POST https://do/receive`
-3. DO `receivePack()`:
+2. Worker preflights `GET https://do/unpack-progress` on the repo DO. If an unpack is active and a next pack is already queued, the Worker returns `503 Service Unavailable` with `Retry-After: 10` without uploading the pack body.
+3. Otherwise, Worker forwards the raw body to the repository DO: `POST https://do/receive`
+4. DO `receivePack()`:
    - Parses pkt-line commands and the packfile payload
    - Writes the `.pack` to R2 under `do/<id>/objects/pack/pack-<ts>.pack`
    - Performs a fast index-only step to produce `.idx` in R2
@@ -14,7 +15,7 @@ This document describes the primary data flows of the server: pushing (receive-p
    - Validates and atomically updates refs if all commands are valid
    - Returns a pkt-line `report-status` response
 
-Concurrency: relies on Durable Object single-threaded execution; no explicit push lock is required.
+Concurrency: relies on Durable Object single-threaded execution, plus a one-deep receive-pack queue on the DO (`unpackWork` + `unpackNext`). A third concurrent push is rejected with HTTP 503 (also guarded within the DO pre-body) to avoid unbounded queuing.
 
 The DO also records metadata to help fetch:
 

@@ -23,6 +23,7 @@ export type RepoStateSchema = {
   lastAccessMs: number;
   lastMaintenanceMs: number;
   unpackWork: UnpackWork | undefined; // Pending unpack work
+  unpackNext: string | undefined; // One-deep next pack key awaiting promotion
 } & Record<ObjKey, Uint8Array | ArrayBuffer> &
   Record<PackOidsKey, string[]>;
 

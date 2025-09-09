@@ -11,7 +11,7 @@ import {
 import { r2PackKey, r2LooseKey } from "@/keys.ts";
 import * as git from "isomorphic-git";
 import { createLogger } from "@/common/index.ts";
-import { markPush, setUnpackStatus } from "@/cache";
+import { markPush, setUnpackStatus } from "@/cache/index.ts";
 
 // Connectivity check for receive-pack commands.
 // Ensures that each updated ref points to an object we can resolve immediately:
@@ -474,14 +474,27 @@ export async function receivePack(
           if (list.length > packListMax) list.length = packListMax;
           await store.put("packList", list);
 
-          await store.put("unpackWork", {
-            packKey,
-            oids: indexedOids,
-            processedCount: 0,
-            startedAt: Date.now(),
-          });
-          await state.storage.setAlarm(Date.now() + 100);
-          log.debug("unpack:scheduled", { packKey });
+          // If there is already unpack work in progress, stage this pack as next; otherwise schedule now
+          const currentWork = await store.get("unpackWork");
+          if (!currentWork) {
+            await store.put("unpackWork", {
+              packKey,
+              oids: indexedOids,
+              processedCount: 0,
+              startedAt: Date.now(),
+            });
+            await state.storage.setAlarm(Date.now() + 100);
+            log.debug("unpack:scheduled", { packKey });
+          } else {
+            const existingNext = await store.get("unpackNext");
+            if (!existingNext) {
+              await store.put("unpackNext", packKey);
+              log.info("queue:next-set", { packKey, oids: indexedOids.length });
+            } else {
+              // Defensive: this should be pre-blocked by RepoDO.handleReceive(); keep first next
+              log.warn("queue:next-already-set", { existingNext, dropped: packKey });
+            }
+          }
         }
       } catch (e) {
         log.warn("post-apply:metadata-or-unpack-schedule-failed", { error: String(e) });

@@ -21,7 +21,14 @@ import {
   receivePack,
   parseCommitText,
 } from "@/git";
-import { json, text, badRequest, createLogger, createInflateStream } from "@/common";
+import {
+  json,
+  text,
+  badRequest,
+  createLogger,
+  createInflateStream,
+  UnpackProgress,
+} from "@/common";
 import { setUnpackStatus } from "@/cache";
 
 /**
@@ -154,14 +161,17 @@ export class RepoDurableObject implements DurableObject {
 
     // Get unpacking progress
     if (url.pathname === "/unpack-progress" && request.method === "GET") {
-      const work = (await store.get("unpackWork")) as UnpackWork | undefined;
-      if (!work) return json({ unpacking: false });
+      const work = await store.get("unpackWork");
+      const nextKey = await store.get("unpackNext");
+      if (!work) return json({ unpacking: false, queuedCount: nextKey ? 1 : 0 });
       return json({
         unpacking: true,
         processed: work.processedCount,
         total: work.oids.length,
         percent: Math.round((work.processedCount / work.oids.length) * 100),
-      });
+        currentPackKey: work.packKey,
+        queuedCount: nextKey ? 1 : 0,
+      } as UnpackProgress);
     }
 
     // Debug: dump durable object state
@@ -223,7 +233,7 @@ export class RepoDurableObject implements DurableObject {
   private async handleUnpackWork(
     store: ReturnType<typeof asTypedStorage<RepoStateSchema>>
   ): Promise<boolean> {
-    const unpackWork = (await store.get("unpackWork")) as UnpackWork | undefined;
+    const unpackWork = await store.get("unpackWork");
     if (!unpackWork) return false;
 
     try {
@@ -250,8 +260,8 @@ export class RepoDurableObject implements DurableObject {
     try {
       const cfg = this.getConfig();
       const now = Date.now();
-      const lastAccess = (await store.get("lastAccessMs")) as unknown as number | undefined;
-      const lastMaint = (await store.get("lastMaintenanceMs")) as unknown as number | undefined;
+      const lastAccess = await store.get("lastAccessMs");
+      const lastMaint = await store.get("lastMaintenanceMs");
 
       // Check if idle cleanup is needed
       if (await this.shouldCleanupIdle(store, cfg.idleMs, lastAccess)) {
@@ -290,9 +300,9 @@ export class RepoDurableObject implements DurableObject {
     if (!idleExceeded) return false;
 
     // Check if repo looks empty
-    const refs = ((await store.get("refs")) as { name: string; oid: string }[] | undefined) ?? [];
-    const head = (await store.get("head")) as Head | undefined;
-    const lastPackKey = (await store.get("lastPackKey")) as string | undefined;
+    const refs = (await store.get("refs")) ?? [];
+    const head = await store.get("head");
+    const lastPackKey = await store.get("lastPackKey");
 
     return refs.length === 0 && (!head || head.unborn || !head.target) && !lastPackKey;
   }
@@ -415,8 +425,9 @@ export class RepoDurableObject implements DurableObject {
     cfg: ReturnType<typeof this.getConfig>,
     now: number
   ): Promise<boolean> {
-    const work = (await store.get("unpackWork")) as UnpackWork | undefined;
-    if (!work) return false;
+    const work = await store.get("unpackWork");
+    const next = await store.get("unpackNext");
+    if (!work && !next) return false;
 
     const existing = (await this.state.storage.getAlarm()) as number | null | undefined;
     const soon = now + cfg.unpackDelayMs;
@@ -432,8 +443,8 @@ export class RepoDurableObject implements DurableObject {
     cfg: ReturnType<typeof this.getConfig>,
     now: number
   ): Promise<void> {
-    const lastMaint = (await store.get("lastMaintenanceMs")) as unknown as number | undefined;
-    const existing = (await this.state.storage.getAlarm()) as number | null | undefined;
+    const lastMaint = await store.get("lastMaintenanceMs");
+    const existing = await this.state.storage.getAlarm();
 
     const nextIdle = now + cfg.idleMs;
     const nextMaint = (lastMaint ?? now) + cfg.maintMs;
@@ -542,7 +553,7 @@ export class RepoDurableObject implements DurableObject {
   } | null> {
     // Prefer DO-stored loose object to avoid R2/HTTP hops
     const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    let data = (await store.get(objKey(oid))) as ArrayBuffer | Uint8Array | undefined;
+    let data = await store.get(objKey(oid));
 
     if (!data) {
       // Fallback: try R2-stored loose copy
@@ -579,7 +590,7 @@ export class RepoDurableObject implements DurableObject {
    */
   private async getRefs(): Promise<{ name: string; oid: string }[]> {
     const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    return ((await store.get("refs")) as { name: string; oid: string }[] | undefined) ?? [];
+    return (await store.get("refs")) ?? [];
   }
 
   /**
@@ -602,7 +613,7 @@ export class RepoDurableObject implements DurableObject {
    */
   private async resolveHead(): Promise<Head> {
     const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const stored = (await store.get("head")) as Head | undefined;
+    const stored = await store.get("head");
     const refs = await this.getRefs();
 
     // Determine target (default to main)
@@ -657,7 +668,7 @@ export class RepoDurableObject implements DurableObject {
 
   private async handlePackLatestGet(): Promise<Response> {
     const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const key = (await store.get("lastPackKey")) || null;
+    const key = await store.get("lastPackKey");
     if (!key) return text("Not found\n", 404);
     const oids = ((await store.get("lastPackOids")) || []).slice(0, 10000);
     return json({ key, oids });
@@ -693,12 +704,13 @@ export class RepoDurableObject implements DurableObject {
   // ---- Debug helpers ----
   private async handleDebugState(): Promise<Response> {
     const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const refs = ((await store.get("refs")) as { name: string; oid: string }[] | undefined) ?? [];
-    const head = (await store.get("head")) as Head | undefined;
-    const lastPackKey = (await store.get("lastPackKey")) as string | undefined;
-    const lastPackOids = ((await store.get("lastPackOids")) as string[] | undefined) ?? [];
-    const packList = ((await store.get("packList")) as string[] | undefined) ?? [];
-    const unpackWork = (await store.get("unpackWork")) as UnpackWork | undefined;
+    const refs = (await store.get("refs")) ?? [];
+    const head = await store.get("head");
+    const lastPackKey = await store.get("lastPackKey");
+    const lastPackOids = (await store.get("lastPackOids")) ?? [];
+    const packList = (await store.get("packList")) ?? [];
+    const unpackWork = await store.get("unpackWork");
+    const unpackNext = await store.get("unpackNext");
 
     // Sample a few loose object keys to avoid large payloads
     const looseSample: string[] = [];
@@ -717,6 +729,7 @@ export class RepoDurableObject implements DurableObject {
       packListCount: packList.length,
       packList,
       unpackWork: unpackWork || null,
+      unpackNext: unpackNext || null,
       looseSample,
     });
   }
@@ -728,11 +741,11 @@ export class RepoDurableObject implements DurableObject {
 
     // Check pack membership via stored indices first
     const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const packList = ((await store.get("packList")) as string[] | undefined) ?? [];
+    const packList = (await store.get("packList")) ?? [];
     const membership: Record<string, { hasCommit: boolean; hasTree: boolean }> = {};
     for (const key of packList) {
       try {
-        const oids = ((await store.get(packOidsKey(key))) as string[] | undefined) ?? [];
+        const oids = (await store.get(packOidsKey(key))) ?? [];
         const set = new Set(oids.map((x) => x.toLowerCase()));
         membership[key] = { hasCommit: set.has(commit), hasTree: false };
       } catch {}
@@ -762,7 +775,7 @@ export class RepoDurableObject implements DurableObject {
       // Update membership.hasTree using discovered tree
       for (const key of Object.keys(membership)) {
         try {
-          const oids = ((await store.get(packOidsKey(key))) as string[] | undefined) ?? [];
+          const oids = (await store.get(packOidsKey(key))) ?? [];
           const set = new Set(oids.map((x) => x.toLowerCase()));
           membership[key].hasTree = !!tree && set.has(tree);
         } catch {}
@@ -834,7 +847,7 @@ export class RepoDurableObject implements DurableObject {
 
     // Fallback to DO storage
     const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const data = (await store.get(objKey(oid))) as ArrayBuffer | Uint8Array | undefined;
+    const data = await store.get(objKey(oid));
 
     if (!data) return null;
     return data instanceof ArrayBuffer ? data.byteLength : data.byteLength;
@@ -852,7 +865,7 @@ export class RepoDurableObject implements DurableObject {
 
     // Fallback to DO storage
     const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const data = (await store.get(objKey(oid))) as ArrayBuffer | Uint8Array | undefined;
+    const data = await store.get(objKey(oid));
 
     return data || null;
   }
@@ -889,6 +902,22 @@ export class RepoDurableObject implements DurableObject {
   private async handleReceive(request: Request) {
     // Delegate to extracted implementation for clarity and testability.
     this.logger.info("receive:start", {});
+    // Pre-body guard: block when current unpack is running and a next pack is already queued
+    try {
+      const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+      const work = await store.get("unpackWork");
+      const next = await store.get("unpackNext");
+      if (work && next) {
+        this.logger.warn("receive:block-busy", { retryAfter: 10 });
+        return new Response("Repository is busy unpacking; please retry shortly.\n", {
+          status: 503,
+          headers: {
+            "Retry-After": "10",
+            "Content-Type": "text/plain; charset=utf-8",
+          },
+        });
+      }
+    } catch {}
     const res = await receivePack(this.state, this.env, this.prefix(), request);
     this.logger.info("receive:end", { status: res.status });
     return res;
@@ -935,17 +964,18 @@ export class RepoDurableObject implements DurableObject {
   private async runMaintenance(keepPacks: number) {
     const store = asTypedStorage<RepoStateSchema>(this.state.storage);
     // Ensure packList exists
-    const packList = ((await store.get("packList")) as string[] | undefined) ?? [];
+    const packList = (await store.get("packList")) ?? [];
     if (packList.length === 0) return;
     // Determine which packs to keep.
     // packList is maintained newest-first (most recent at index 0), so keep the first N.
     const keep = packList.slice(0, keepPacks);
     const keepSet = new Set(keep);
     const removed = packList.filter((k) => !keepSet.has(k));
-    // Trim packList in storage
-    if (removed.length > 0) await store.put("packList", keep);
+    const newList = packList.filter((k) => keepSet.has(k));
+    // Trim packList in storage while preserving additional kept keys
+    if (removed.length > 0) await store.put("packList", newList);
     // Adjust lastPackKey/lastPackOids if needed
-    const lastPackKey = (await store.get("lastPackKey")) as string | undefined;
+    const lastPackKey = await store.get("lastPackKey");
     if (!lastPackKey || !keepSet.has(lastPackKey)) {
       // Choose the newest kept pack as the latest reference
       const newest = keep[0];
@@ -953,7 +983,7 @@ export class RepoDurableObject implements DurableObject {
         await store.put("lastPackKey", newest);
         const oids = ((await store.get("lastPackOids")) || []).slice(0, 10000);
         // Try to load oids for the newest from packOids:<key> if present
-        const alt = (await store.get(packOidsKey(newest))) as string[] | undefined;
+        const alt = await store.get(packOidsKey(newest));
         await store.put("lastPackOids", alt ?? oids);
       } else {
         // No packs remain
@@ -1108,12 +1138,36 @@ export class RepoDurableObject implements DurableObject {
     const cfg = this.getConfig();
 
     if (result.processed >= work.oids.length) {
-      // Done unpacking
+      // Done unpacking current pack
       await store.delete("unpackWork");
       this.logger.info("unpack:done", { packKey: work.packKey, total: work.oids.length });
 
-      // Clear unpacking status in KV
-      // Use DO ID as cache key since we don't have access to owner/repo inside DO
+      // If a next pack is queued, promote it and continue without clearing status
+      const nextKey = await store.get("unpackNext");
+      if (nextKey) {
+        const nextOids = (await store.get(packOidsKey(nextKey))) ?? [];
+        if (nextOids.length > 0) {
+          await store.put("unpackWork", {
+            packKey: nextKey,
+            oids: nextOids,
+            processedCount: 0,
+            startedAt: Date.now(),
+          });
+          await store.delete("unpackNext");
+          // Keep unpacking status set to true in KV
+          await setUnpackStatus(this.env.PACK_METADATA_CACHE, this.state.id.toString(), true);
+          // Schedule next alarm soon to continue unpacking
+          await this.state.storage.setAlarm(Date.now() + cfg.unpackDelayMs);
+          this.logger.info("queue:promote-next", { packKey: nextKey, total: nextOids.length });
+          return;
+        } else {
+          // No oids recorded for next pack (unexpected); drop it
+          await store.delete("unpackNext");
+          this.logger.warn("queue:next-missing-oids", { packKey: nextKey });
+        }
+      }
+
+      // No queued work remains; clear unpacking status
       await setUnpackStatus(this.env.PACK_METADATA_CACHE, this.state.id.toString(), false);
     } else {
       // Update progress and reschedule

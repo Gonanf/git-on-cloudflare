@@ -11,8 +11,13 @@ import {
   shouldSkipKVCache,
   savePackList,
   getPackList,
-} from "@/cache";
-import { getUnpackProgress, createLogger, createInflateStream, getRepoStub } from "@/common";
+} from "@/cache/index.ts";
+import {
+  getUnpackProgress,
+  createLogger,
+  createInflateStream,
+  getRepoStub,
+} from "@/common/index.ts";
 import * as git from "isomorphic-git";
 
 /**

@@ -46,10 +46,18 @@ The codebase is organized into focused modules with `index.ts` export files:
   - `GET|HEAD /obj/:oid` — read loose object (R2-first, fallback DO)
   - `PUT /obj/:oid` — write loose object (DO then mirror to R2)
   - `GET /pack-latest`, `GET /packs`, `GET /pack-oids?key=...` — pack metadata
-  - `GET /unpack-progress` — unpacking status/progress for gating KV writes and UI
+  - `GET /unpack-progress` — unpacking status/progress for gating KV writes and UI. Includes `queuedCount` (0|1) and `currentPackKey`.
   - `POST /receive` — receive-pack (push) handler
 - Push flow: raw `.pack` is written to R2, a fast index-only step writes `.idx`, and unpack is queued for background processing on the DO alarm in small time-budgeted chunks.
 - Maintains pack metadata (`lastPackKey`, `lastPackOids`, `packList`, `packOids:<key>`) used by fetch assembly.
+
+#### Receive-pack queueing
+
+- The DO maintains at most one active unpack (`unpackWork`) and a one-deep next slot (`unpackNext`).
+- When a push arrives while unpacking is active:
+  - If `unpackNext` is empty, the new pack is staged as `unpackNext`.
+  - If `unpackNext` is already occupied, the DO returns HTTP 503 with `Retry-After` pre-body.
+- The Worker performs a preflight call to `GET /unpack-progress` and returns 503 early when a next pack is already queued, avoiding unnecessary upload.
 
 ### Auth DO (`src/auth/authDO.ts`)
 

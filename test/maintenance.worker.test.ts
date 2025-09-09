@@ -45,39 +45,41 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS (default 
     await state.storage.setAlarm(Date.now() + 1_000);
   });
   const ran = await runDurableObjectAlarm(stub);
-  expect(ran).toBe(true);
+  expect(ran, "alarm should run").toBe(true);
 
   // Expect only the first 3 packs (newest) to remain in R2
   const listed = await env.REPO_BUCKET.list({ prefix: `${prefix}/objects/pack/` });
   const r2Keys = new Set((listed.objects || []).map((o: any) => o.key));
   const keep = keys.slice(0, 3); // Keep the first 3 (newest)
   for (const k of keep) {
-    expect(r2Keys.has(k)).toBe(true);
-    expect(r2Keys.has(k.replace(/\.pack$/, ".idx"))).toBe(true);
+    expect(r2Keys.has(k), "key " + k + " should be kept").toBe(true);
+    expect(r2Keys.has(k.replace(/\.pack$/, ".idx")), "key " + k + ".idx should be kept").toBe(true);
   }
   // Older ones should be gone
   for (const k of keys.slice(3)) {
     // Everything after the first 3
-    expect(r2Keys.has(k)).toBe(false);
-    expect(r2Keys.has(k.replace(/\.pack$/, ".idx"))).toBe(false);
+    expect(r2Keys.has(k), "key " + k + " should be removed").toBe(false);
+    expect(r2Keys.has(k.replace(/\.pack$/, ".idx")), "key " + k + ".idx should be removed").toBe(
+      false
+    );
   }
 
   // Storage assertions
   await runInDurableObject(stub, async (_instance, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
     const packList = (await store.get("packList")) as string[] | undefined;
-    expect(packList).toEqual(keep);
+    expect(packList, "packList should be updated").toEqual(keep);
     const lastPackKey = (await store.get("lastPackKey")) as string | undefined;
-    expect(lastPackKey).toBe(keep[0]); // Should be the newest (first in list)
+    expect(lastPackKey, "lastPackKey should be updated").toBe(keep[0]); // Should be the newest (first in list)
     // Removed packOids entries should be deleted (keys[3] and keys[4] were removed)
     const p3 = await store.get(packOidsKey(keys[3]) as any);
     const p4 = await store.get(packOidsKey(keys[4]) as any);
-    expect(p3).toBeUndefined();
-    expect(p4).toBeUndefined();
+    expect(p3, "packOidsKey(keys[3]) should be deleted").toBeUndefined();
+    expect(p4, "packOidsKey(keys[4]) should be deleted").toBeUndefined();
     // Kept packOids entries should still exist (keys[0], keys[1], keys[2] were kept)
     const p0 = await store.get(packOidsKey(keys[0]) as any);
     const p1 = await store.get(packOidsKey(keys[1]) as any);
-    expect(p0).toEqual(["a"]);
-    expect(p1).toEqual(["b"]);
+    expect(p0, "packOidsKey(keys[0]) should exist").toEqual(["a"]);
+    expect(p1, "packOidsKey(keys[1]) should exist").toEqual(["b"]);
   });
 });

@@ -32,6 +32,34 @@ export async function buildPack(
   return out;
 }
 
+export async function makeCommit(treeOid: string, msg: string) {
+  const author = `You <you@example.com> 0 +0000`;
+  const payload = new TextEncoder().encode(
+    `tree ${treeOid}\n` + `author ${author}\n` + `committer ${author}\n\n${msg}`
+  );
+  const head = new TextEncoder().encode(`commit ${payload.byteLength}\0`);
+  const raw = new Uint8Array(head.length + payload.length);
+  raw.set(head, 0);
+  raw.set(payload, head.length);
+  const hash = await crypto.subtle.digest("SHA-1", raw);
+  const oid = Array.from(new Uint8Array(hash))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return { oid, payload };
+}
+
+export async function makeTree(): Promise<{ oid: string; payload: Uint8Array }> {
+  const payload = new Uint8Array(0);
+  const header = new TextEncoder().encode(`tree ${payload.byteLength}\0`);
+  const raw = new Uint8Array(header.length + payload.length);
+  raw.set(header, 0);
+  raw.set(payload, header.length);
+  const oid = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-1", raw)))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return { oid, payload };
+}
+
 /**
  * Get zero OID (40 zeros)
  */

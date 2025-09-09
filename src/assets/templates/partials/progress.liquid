@@ -1,5 +1,9 @@
-{% if progress and progress.unpacking and progress.total %}
-  <div class="alert warn">
-    📦 Unpacking objects: {{ progress.processed }}/{{ progress.total }} ({{ progress.percent }}%)
-  </div>
+{% if progress %}
+  {% if progress.unpacking and progress.total %}
+    <div class="alert warn">
+      📦 Unpacking objects: {{ progress.processed }}/{{ progress.total }} ({{ progress.percent }}%)
+    </div>
+  {% elsif progress.queuedCount and progress.queuedCount > 0 %}
+    <div class="alert">⏳ A push is queued and will start shortly.</div>
+  {% endif %}
 {% endif %}
