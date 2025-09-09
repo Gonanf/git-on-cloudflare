@@ -1,15 +1,21 @@
 {% layout 'layout' %}
 {% block %}
-<h2>{{ owner }}</h2>
-<h3>Repositories</h3>
-<div class="list">
+<header class="page-header">
+  <div class="font-semibold text-lg">{{ owner }}</div>
+  <div></div>
+</header>
+<h2>Repositories</h2>
+<div class="repo-grid">
   {% if repos and repos.size > 0 %}
     {% for r in repos %}
-      <div>
-        <a href="/{{ owner }}/{{ r }}"
-          ><strong>{{ owner }}</strong>/{{ r -}}
-        </a>
-      </div>
+      <a
+        href="/{{ owner }}/{{ r }}"
+        class="block card p-4 hover:shadow-sm transition"
+      >
+        <div class="text-lg font-medium">
+          <strong>{{ owner }}</strong>/<span>{{ r }}</span>
+        </div>
+      </a>
     {% endfor %}
   {% else %}
     <div class="muted">No repositories</div>

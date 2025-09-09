@@ -61,12 +61,18 @@ git push https://owner:token@your-domain.com/owner/repo main
   View single commit diff
 
 - **`GET /:owner/:repo/raw`**  
-  Download raw file by OID  
-  Query params: `?oid=...&name=file.txt`
+  Raw file by OID (inline by default)  
+  Query params: `?oid=...&name=file.txt[&download=1]`  
+  Notes:
+  - Defaults to `Content-Disposition: inline` and `Content-Type: text/plain; charset=utf-8` for safety
+  - Add `download=1` to force `attachment` and trigger a file download
 
 - **`GET /:owner/:repo/rawpath`**  
-  Download raw file by path  
-  Query params: `?ref=branch&path=src/file.ts&name=file.ts`
+  Raw file by path (primarily for Markdown images and assets)  
+  Query params: `?ref=branch&path=src/file.ts&name=file.ts[&download=1]`  
+  Notes:
+  - Best-effort `Content-Type` is derived from the file extension for inline rendering
+  - Requires a same-origin `Referer` header (hotlink protection). Requests from other origins will be rejected with 403.
 
 ## Authentication Management
 

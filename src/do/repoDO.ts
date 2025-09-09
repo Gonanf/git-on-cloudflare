@@ -155,10 +155,6 @@ export class RepoDurableObject implements DurableObject {
     if (url.pathname === "/unpack-progress" && request.method === "GET") {
       const work = (await store.get("unpackWork")) as UnpackWork | undefined;
       if (!work) return json({ unpacking: false });
-      // Kick the alarm to continue work promptly
-      try {
-        await this.state.storage.setAlarm(Date.now() + 100);
-      } catch {}
       return json({
         unpacking: true,
         processed: work.processedCount,

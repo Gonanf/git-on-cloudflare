@@ -16,18 +16,13 @@ import {
   formatSize,
   bytesToText,
   formatWhen,
-  renderPage,
   getUnpackProgress,
   renderView,
+  getMarkdownHighlightLangs,
+  getHighlightLangsForBlobSmart,
 } from "@/web";
 import { listReposForOwner } from "@/registry";
-import {
-  buildCacheKeyFrom,
-  cacheGetJSON,
-  cachePutJSON,
-  cacheOrLoadJSON,
-  CacheContext,
-} from "@/cache";
+import { buildCacheKeyFrom, cacheOrLoadJSON, cacheOrLoadJSONWithTTL, CacheContext } from "@/cache";
 
 export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Owner repos list
@@ -59,26 +54,21 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       repo: repoId,
     });
 
-    let head: any;
-    let refs: any[] = [];
-
-    // Try cache first
-    try {
-      const cached = await cacheGetJSON<{ head: any; refs: any[] }>(cacheKeyRefs);
-      if (cached) {
-        head = cached.head;
-        refs = cached.refs;
-      }
-    } catch {}
-
-    // Fetch if not cached
-    if (!refs || refs.length === 0) {
-      const result = await getHeadAndRefs(env, repoId);
-      head = result.head;
-      refs = result.refs;
-      // Cache for 60 seconds
-      await cachePutJSON(cacheKeyRefs, { head, refs }, 60);
-    }
+    const refsData = await cacheOrLoadJSON<{ head: any; refs: any[] }>(
+      cacheKeyRefs,
+      async () => {
+        try {
+          const result = await getHeadAndRefs(env, repoId);
+          return { head: result.head, refs: result.refs };
+        } catch {
+          return null;
+        }
+      },
+      60,
+      ctx
+    );
+    const head: any = refsData?.head;
+    const refs: any[] = refsData?.refs || [];
 
     const defaultRef = head?.target || (refs[0]?.name ?? "refs/heads/main");
     const refShort = defaultRef.replace(/^refs\/(heads|tags)\//, "");
@@ -103,51 +93,44 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         };
       });
 
-    // Try to load README at repo root on default branch with caching
-    let readmeHtml = "";
+    // Try to load README at repo root on default branch with caching (5 minutes)
     const cacheKeyReadme = buildCacheKeyFrom(request, "/_cache/readme", {
       repo: repoId,
       ref: refShort,
     });
-
-    // Try cache first for README
-    try {
-      const cachedReadme = await cacheGetJSON<{ html: string }>(cacheKeyReadme);
-      if (cachedReadme) {
-        readmeHtml = cachedReadme.html;
-      }
-    } catch {}
-
-    if (!readmeHtml) {
-      try {
-        // Load all candidates in parallel for better performance
-        const candidates = ["README.md", "README.MD", "Readme.md", "README", "readme.md"];
-        const readmePromises = candidates.map(async (name) => {
-          try {
-            const cacheCtx: CacheContext = { req: request, ctx };
-            const res = await readPath(env, repoId, refShort, name, cacheCtx);
-            if (res.type === "blob") {
-              return { name, content: res.content };
-            }
-          } catch {}
-          return null;
-        });
-
-        const results = await Promise.all(readmePromises);
-        const found = results.find((r) => r !== null);
-
-        if (found) {
+    const readmeData = await cacheOrLoadJSON<{ md: string }>(
+      cacheKeyReadme,
+      async () => {
+        try {
+          // Load all candidates in parallel for better performance
+          const candidates = ["README.md", "README.MD", "Readme.md", "README", "readme.md"];
+          const cacheCtx: CacheContext = { req: request, ctx };
+          const results = await Promise.all(
+            candidates.map(async (name) => {
+              try {
+                const res = await readPath(env, repoId, refShort, name, cacheCtx);
+                if (res.type === "blob") {
+                  return { name, content: res.content };
+                }
+              } catch {}
+              return null;
+            })
+          );
+          const found = results.find((r) => r !== null) as {
+            name: string;
+            content: Uint8Array;
+          } | null;
+          if (!found) return null;
           const text = bytesToText(found.content);
-          readmeHtml = `<h3>README</h3><div data-markdown="1" data-md-owner="${escapeHtml(
-            owner
-          )}" data-md-repo="${escapeHtml(repo)}" data-md-ref="${escapeHtml(
-            refShort
-          )}" data-md-base=""><pre class="md-src">${escapeHtml(text)}</pre></div>`;
-          // Cache README for 5 minutes
-          await cachePutJSON(cacheKeyReadme, { html: readmeHtml }, 300);
+          return { md: text };
+        } catch {
+          return null;
         }
-      } catch {}
-    }
+      },
+      300,
+      ctx
+    );
+    const readmeMd = readmeData?.md || "";
 
     // Check unpacking progress (shared helper)
     const progress = await getUnpackProgress(env, repoId);
@@ -160,7 +143,11 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       refEnc: refEnc,
       branches: branchesData,
       tags: tagsData,
-      readme: readmeHtml,
+      readmeMd,
+      // Load markdown + syntax highlighting assets only if README is present
+      needsMarkdown: Boolean(readmeMd),
+      needsHighlight: Boolean(readmeMd),
+      highlightLangs: readmeMd ? getMarkdownHighlightLangs() : [],
       progress,
     });
     if (!page) throw new Error("Failed to render overview template");
@@ -188,24 +175,42 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       path,
     });
 
-    // Try cache first
-    let result: any = null;
-    try {
-      const cached = await cacheGetJSON<any>(cacheKeyTree);
-      if (cached) {
-        result = cached;
-      }
-    } catch {}
+    const result = await cacheOrLoadJSONWithTTL<any>(
+      cacheKeyTree,
+      async () => {
+        try {
+          const cacheCtx: CacheContext = { req: request, ctx };
+          return await readPath(env, repoId, ref, path, cacheCtx);
+        } catch {
+          return null;
+        }
+      },
+      (value) => (value && value.type === "tree" ? 60 : 300),
+      ctx
+    );
+
+    // Handle missing tree/blob result gracefully (e.g., non-existent repo or path)
+    if (!result) {
+      try {
+        const errHtml = await renderView(env, "error", {
+          title: `${owner}/${repo} · Tree`,
+          message: "Not found",
+          owner,
+          repo,
+          refEnc: encodeURIComponent(ref),
+          path,
+        });
+        if (errHtml) {
+          return new Response(errHtml, {
+            status: 404,
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+          });
+        }
+      } catch {}
+      return new Response("Not found\n", { status: 404 });
+    }
 
     try {
-      // Fetch if not cached
-      if (!result) {
-        const cacheCtx: CacheContext = { req: request, ctx };
-        result = await readPath(env, repoId, ref, path, cacheCtx);
-        // Cache tree listings for 60 seconds, blob metadata for 5 minutes
-        const ttl = result.type === "tree" ? 60 : 300;
-        await cachePutJSON(cacheKeyTree, result, ttl);
-      }
       if (result.type === "tree") {
         // Format tree entries as structured data
         let entries: Array<{
@@ -288,7 +293,11 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       } else {
         const raw = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}`;
         const text = bytesToText(result.content);
+        const lineCount = text === "" ? 0 : text.split(/\r?\n/).length;
         const title = path || result.oid;
+        // Infer language and load only what we need (use smart inference with content)
+        const langs = getHighlightLangsForBlobSmart(title, text);
+        const codeLang = langs[0] || null;
         const page = await renderView(env, "blob", {
           title: `${title} · ${owner}/${repo}`,
           owner,
@@ -297,7 +306,13 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           fileName: title,
           viewRawHref: `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(title)}`,
           rawHref: raw,
-          contentHtml: `<pre>${escapeHtml(text)}</pre>`,
+          // Structured fields instead of HTML
+          codeText: text,
+          codeLang,
+          lineCount,
+          contentClass: "markdown-content",
+          needsHighlight: true,
+          highlightLangs: langs,
         });
         if (!page) throw new Error("Failed to render blob template");
         return new Response(page, {
@@ -309,18 +324,31 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         });
       }
     } catch (e: any) {
-      // Error path: include unpack progress banner so users understand transient states
-      const refEnc = encodeURIComponent(ref);
-      const progress = await getUnpackProgress(env, repoId);
-      const progressHtml = progress
-        ? `<div class="alert warn">📦 Unpacking objects: ${progress.processed}/${progress.total} (${progress.percent}%)</div>`
-        : "";
-      const body = `<nav><a href="/${owner}/${repo}"><strong>${owner}/${repo}</strong></a> <a href="/${owner}/${repo}/tree?ref=${refEnc}">Browse</a> <a href="/${owner}/${repo}/commits?ref=${refEnc}">Commits</a></nav>
-      <h2>Tree</h2>
-      ${progressHtml}
-      <div class="alert warn">Unable to browse${path ? `: ${escapeHtml(path)}` : ""}</div>
-      <pre>${escapeHtml(String(e?.message || e))}</pre>`;
-      return renderPage(env, request, `${owner}/${repo} · Tree`, body);
+      const debug = String(env.LOG_LEVEL || "").toLowerCase() === "debug";
+      try {
+        const errHtml = await renderView(env, "error", {
+          title: `${owner}/${repo} · Tree`,
+          message: String(e?.message || e),
+          owner,
+          repo,
+          refEnc: encodeURIComponent(ref),
+          path,
+          stack: debug ? String(e?.stack || "") : undefined,
+        });
+        if (errHtml) {
+          return new Response(errHtml, {
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+            status: 500,
+          });
+        }
+      } catch {}
+      const body = `<!doctype html><meta charset="utf-8"><title>Error</title><h2>Error</h2><pre>${escapeHtml(
+        String(e?.message || e)
+      )}</pre>`;
+      return new Response(body, {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+        status: 500,
+      });
     }
   });
 
@@ -346,16 +374,8 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
 
       // Check if already marked as too large
       if (result.tooLarge) {
-        const viewRawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(
-          result.oid
-        )}&view=1&name=${encodeURIComponent(fileName)}`;
-        const rawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(
-          result.oid
-        )}&download=1&name=${encodeURIComponent(fileName)}`;
-        const contentHtml = `<div class="muted">File too large to preview (${formatSize(
-          result.size || 0
-        )}). <a href="${viewRawHref}">View raw</a></div>`;
-        const title = fileName;
+        const viewRawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(fileName)}`;
+        const rawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&download=1&name=${encodeURIComponent(fileName)}`;
         const page = await renderView(env, "blob", {
           title: `${fileName} · ${owner}/${repo}`,
           owner,
@@ -364,7 +384,9 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           fileName: fileName,
           viewRawHref,
           rawHref,
-          contentHtml,
+          tooLarge: true,
+          sizeStr: formatSize(result.size || 0),
+          contentClass: "markdown-content",
         });
         if (!page) throw new Error("Failed to render blob template");
         return new Response(page, {
@@ -381,35 +403,11 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       const isBinary = detectBinary(result.content);
       const tooLarge = false; // Already checked server-side
 
-      const viewRawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(
-        result.oid
-      )}&view=1&name=${encodeURIComponent(fileName)}`;
-      const rawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(
-        result.oid
-      )}&download=1&name=${encodeURIComponent(fileName)}`;
+      const viewRawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(fileName)}`;
+      const rawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&download=1&name=${encodeURIComponent(fileName)}`;
 
-      let contentHtml: string;
-      if (tooLarge) {
-        contentHtml = `<div class="muted">File too large to preview (${formatSize(
-          size
-        )}). <a href="${viewRawHref}">View raw</a></div>`;
-      } else if (isBinary) {
-        contentHtml = `<div class="muted">Binary file (${formatSize(size)}). <a href="${rawHref}">Download</a></div>`;
-      } else {
-        const text = bytesToText(result.content);
-        const isMd =
-          fileName.toLowerCase().endsWith(".md") || fileName.toLowerCase().endsWith(".markdown");
-        const baseDir = (path || "").split("/").filter(Boolean).slice(0, -1).join("/");
-        contentHtml = isMd
-          ? `<div data-markdown="1" data-md-owner="${escapeHtml(owner)}" data-md-repo="${escapeHtml(
-              repo
-            )}" data-md-ref="${escapeHtml(ref)}" data-md-base="${escapeHtml(
-              baseDir
-            )}"><pre class="md-src">${escapeHtml(text)}</pre></div>`
-          : `<pre><code>${escapeHtml(text)}</code></pre>`;
-      }
-      const title = fileName;
-      const page = await renderView(env, "blob", {
+      // Prepare structured fields for template rendering
+      let templateData: Record<string, unknown> = {
         title: `${fileName} · ${owner}/${repo}`,
         owner,
         repo,
@@ -417,8 +415,40 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         fileName: fileName,
         viewRawHref,
         rawHref,
-        contentHtml,
-      });
+        contentClass: !tooLarge && !isBinary ? "markdown-content" : undefined,
+      };
+
+      if (isBinary) {
+        templateData.isBinary = true;
+        templateData.sizeStr = formatSize(size);
+      } else {
+        const text = bytesToText(result.content);
+        const lineCount = text === "" ? 0 : text.split(/\r?\n/).length;
+        const isMd =
+          fileName.toLowerCase().endsWith(".md") || fileName.toLowerCase().endsWith(".markdown");
+        if (isMd) {
+          const baseDir = (path || "").split("/").filter(Boolean).slice(0, -1).join("/");
+          templateData.isMarkdown = true;
+          templateData.markdownRaw = text;
+          templateData.lineCount = lineCount;
+          templateData.mdOwner = owner;
+          templateData.mdRepo = repo;
+          templateData.mdRef = ref;
+          templateData.mdBase = baseDir;
+          templateData.needsMarkdown = true;
+          templateData.needsHighlight = true;
+          templateData.highlightLangs = getMarkdownHighlightLangs();
+        } else {
+          const langs = getHighlightLangsForBlobSmart(fileName, text);
+          templateData.codeText = text;
+          templateData.codeLang = langs[0] || null;
+          templateData.lineCount = lineCount;
+          templateData.needsHighlight = true;
+          templateData.highlightLangs = langs;
+        }
+      }
+
+      const page = await renderView(env, "blob", templateData);
       if (!page) throw new Error("Failed to render blob template");
       return new Response(page, {
         headers: {
@@ -428,6 +458,24 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         },
       });
     } catch (e: any) {
+      const debug = String((env as any)?.LOG_LEVEL || "").toLowerCase() === "debug";
+      try {
+        const errHtml = await renderView(env, "error", {
+          title: `Error · ${owner}/${repo}`,
+          message: String(e?.message || e),
+          owner,
+          repo,
+          refEnc: encodeURIComponent(ref),
+          path,
+          stack: debug ? String(e?.stack || "") : undefined,
+        });
+        if (errHtml) {
+          return new Response(errHtml, {
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+            status: 500,
+          });
+        }
+      } catch {}
       return new Response(`<h2>Error</h2><pre>${escapeHtml(String(e?.message || e))}</pre>`, {
         headers: { "Content-Type": "text/html; charset=utf-8" },
         status: 500,
@@ -447,159 +495,185 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       .split(",")
       .map((s) => s.trim().toLowerCase())
       .filter((s) => /^[0-9a-f]{40}$/i.test(s));
-    const perRaw = Number(u.searchParams.get("per_page") || "25");
-    const clamp = (n: number, min: number, max: number) =>
-      Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : min;
-    const perPage = clamp(perRaw, 10, 200);
-    // Fast path: ask the repo DO for a batched commit list to avoid many round-trips
-    let commits: CommitInfo[] = [];
-    let nextCursor: string | undefined;
-    const isFirstPage = !cursor;
-    // Attempt to serve from cache first
-    let headOid: string | undefined;
-    let isTagRef = false;
     try {
-      if (isFirstPage) {
-        const { head, refs } = await getHeadAndRefs(env, repoId);
-        if (/^[0-9a-f]{40}$/i.test(ref)) {
-          headOid = ref.toLowerCase();
-        } else if (ref === "HEAD" && head?.target) {
-          const r = refs.find((x) => x.name === head.target);
-          headOid = r?.oid;
-          // treat HEAD as branch-like for TTL
-        } else if (ref.startsWith("refs/")) {
-          const r = refs.find((x) => x.name === ref);
-          headOid = r?.oid;
-          isTagRef = ref.startsWith("refs/tags/");
-        } else {
-          const rb = refs.find((x) => x.name === `refs/heads/${ref}`);
-          if (rb) {
-            headOid = rb.oid;
+      const perRaw = Number(u.searchParams.get("per_page") || "25");
+      const clamp = (n: number, min: number, max: number) =>
+        Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : min;
+      const perPage = clamp(perRaw, 10, 200);
+      // Fast path: ask the repo DO for a batched commit list to avoid many round-trips
+      let commits: CommitInfo[] = [];
+      let nextCursor: string | undefined;
+      const isFirstPage = !cursor;
+      // Attempt to serve from cache first
+      let headOid: string | undefined;
+      let isTagRef = false;
+      try {
+        if (isFirstPage) {
+          const { head, refs } = await getHeadAndRefs(env, repoId);
+          if (/^[0-9a-f]{40}$/i.test(ref)) {
+            headOid = ref.toLowerCase();
+          } else if (ref === "HEAD" && head?.target) {
+            const r = refs.find((x) => x.name === head.target);
+            headOid = r?.oid;
+            // treat HEAD as branch-like for TTL
+          } else if (ref.startsWith("refs/")) {
+            const r = refs.find((x) => x.name === ref);
+            headOid = r?.oid;
+            isTagRef = ref.startsWith("refs/tags/");
           } else {
-            const rt = refs.find((x) => x.name === `refs/tags/${ref}`);
-            if (rt) {
-              headOid = rt.oid;
-              isTagRef = true;
+            const rb = refs.find((x) => x.name === `refs/heads/${ref}`);
+            if (rb) {
+              headOid = rb.oid;
+            } else {
+              const rt = refs.find((x) => x.name === `refs/tags/${ref}`);
+              if (rt) {
+                headOid = rt.oid;
+                isTagRef = true;
+              }
             }
           }
         }
-      }
-    } catch {}
+      } catch {}
 
-    const keyReq = buildCacheKeyFrom(request, "/_cache/commits", {
-      repo: repoId,
-      ref,
-      cursor: cursor || undefined,
-      per: String(perPage),
-      head: isFirstPage ? headOid : undefined,
-    });
+      const keyReq = buildCacheKeyFrom(request, "/_cache/commits", {
+        repo: repoId,
+        ref,
+        cursor: cursor || undefined,
+        per: String(perPage),
+        head: isFirstPage ? headOid : undefined,
+      });
 
-    // Calculate TTL based on ref type
-    const ttl = cursor ? 3600 : isTagRef || /^[0-9a-f]{40}$/i.test(ref) ? 3600 : 60;
+      // Calculate TTL based on ref type
+      const ttl = cursor ? 3600 : isTagRef || /^[0-9a-f]{40}$/i.test(ref) ? 3600 : 60;
 
-    // Use cache helper for cleaner code
-    const result = await cacheOrLoadJSON<{ items: CommitInfo[]; next?: string }>(
-      keyReq,
-      async () => {
-        try {
-          const stub = getRepoStub(env, repoId);
-          const qp = new URLSearchParams({ ref, max: String(perPage) });
-          if (cursor) qp.set("cursor", cursor);
-          const doRes = await stub.fetch(`https://do/commits?${qp.toString()}`, { method: "GET" });
-          if (doRes.ok) {
-            const parsed = (await doRes.json()) as { items: CommitInfo[]; next?: string };
-            return { items: parsed.items || [], next: parsed.next };
-          } else {
+      // Use cache helper for cleaner code
+      const result = await cacheOrLoadJSON<{ items: CommitInfo[]; next?: string }>(
+        keyReq,
+        async () => {
+          try {
+            const stub = getRepoStub(env, repoId);
+            const qp = new URLSearchParams({ ref, max: String(perPage) });
+            if (cursor) qp.set("cursor", cursor);
+            const doRes = await stub.fetch(`https://do/commits?${qp.toString()}`, {
+              method: "GET",
+            });
+            if (doRes.ok) {
+              const parsed = (await doRes.json()) as { items: CommitInfo[]; next?: string };
+              return { items: parsed.items || [], next: parsed.next };
+            } else {
+              const cacheCtx: CacheContext = { req: request, ctx };
+              const items = await listCommits(env, repoId, ref, perPage, cacheCtx);
+              return { items, next: undefined };
+            }
+          } catch {
+            // Fallback to existing path on any error
             const cacheCtx: CacheContext = { req: request, ctx };
             const items = await listCommits(env, repoId, ref, perPage, cacheCtx);
             return { items, next: undefined };
           }
-        } catch {
-          // Fallback to existing path on any error
-          const cacheCtx: CacheContext = { req: request, ctx };
-          const items = await listCommits(env, repoId, ref, perPage, cacheCtx);
-          return { items, next: undefined };
+        },
+        ttl,
+        ctx
+      );
+
+      commits = result?.items || [];
+      nextCursor = result?.next;
+      // Transform commits to structured data for template
+      const commitsData = commits.map((c) => ({
+        oid: c.oid,
+        shortOid: c.oid.slice(0, 7),
+        firstLine: c.message.split("\n")[0],
+        authorName: c.author?.name || "",
+        when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
+      }));
+      // Build pager data structure
+      const baseQs = new URLSearchParams({ ref, per_page: String(perPage) });
+      const currentStart = commits.length > 0 ? commits[0].oid : "";
+
+      let newerHref: string | null = null;
+      if (trail.length > 0) {
+        const prevCursor = trail[trail.length - 1];
+        const remainingTrail = trail.slice(0, -1);
+        if (remainingTrail.length === 0) {
+          const qs = new URLSearchParams(baseQs);
+          newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
+        } else {
+          const qs = new URLSearchParams(baseQs);
+          qs.set("cursor", prevCursor);
+          qs.set("trail", remainingTrail.join(","));
+          newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
         }
-      },
-      ttl,
-      ctx
-    );
-
-    commits = result?.items || [];
-    nextCursor = result?.next;
-    // Transform commits to structured data for template
-    const commitsData = commits.map((c) => ({
-      oid: c.oid,
-      shortOid: c.oid.slice(0, 7),
-      firstLine: c.message.split("\n")[0],
-      authorName: c.author?.name || "",
-      when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
-    }));
-    // Build pager data structure
-    const baseQs = new URLSearchParams({ ref, per_page: String(perPage) });
-    const currentStart = commits.length > 0 ? commits[0].oid : "";
-
-    let newerHref: string | null = null;
-    if (trail.length > 0) {
-      const prevCursor = trail[trail.length - 1];
-      const remainingTrail = trail.slice(0, -1);
-      if (remainingTrail.length === 0) {
-        const qs = new URLSearchParams(baseQs);
-        newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
-      } else {
-        const qs = new URLSearchParams(baseQs);
-        qs.set("cursor", prevCursor);
-        qs.set("trail", remainingTrail.join(","));
-        newerHref = `/${owner}/${repo}/commits?${qs.toString()}`;
       }
-    }
 
-    let olderHref: string | null = null;
-    if (nextCursor && currentStart) {
-      const nextQs = new URLSearchParams(baseQs);
-      nextQs.set("cursor", nextCursor);
-      const nextTrail = trail.concat([currentStart]).join(",");
-      if (nextTrail) nextQs.set("trail", nextTrail);
-      olderHref = `/${owner}/${repo}/commits?${nextQs.toString()}`;
-    }
+      let olderHref: string | null = null;
+      if (nextCursor && currentStart) {
+        const nextQs = new URLSearchParams(baseQs);
+        nextQs.set("cursor", nextCursor);
+        const nextTrail = trail.concat([currentStart]).join(",");
+        if (nextTrail) nextQs.set("trail", nextTrail);
+        olderHref = `/${owner}/${repo}/commits?${nextQs.toString()}`;
+      }
 
-    const pager = {
-      perPageLinks: [
-        {
-          href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "25" }).toString()}`,
-          text: "25",
+      const pager = {
+        perPageLinks: [
+          {
+            href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "25" }).toString()}`,
+            text: "25",
+          },
+          {
+            href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "50" }).toString()}`,
+            text: "50",
+          },
+          {
+            href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "100" }).toString()}`,
+            text: "100",
+          },
+        ],
+        newerHref,
+        olderHref,
+      };
+      const progress = await getUnpackProgress(env, repoId);
+      const page = await renderView(env, "commits", {
+        title: `Commits · ${owner}/${repo}`,
+        owner,
+        repo,
+        ref,
+        refEnc: encodeURIComponent(ref),
+        commits: commitsData,
+        pager,
+        progress,
+      });
+      if (!page) throw new Error("Failed to render commits template");
+      return new Response(page, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          "X-Page-Renderer": "liquid-layout",
         },
-        {
-          href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "50" }).toString()}`,
-          text: "50",
-        },
-        {
-          href: `/${owner}/${repo}/commits?${new URLSearchParams({ ref, per_page: "100" }).toString()}`,
-          text: "100",
-        },
-      ],
-      newerHref,
-      olderHref,
-    };
-    const progress = await getUnpackProgress(env, repoId);
-    const page = await renderView(env, "commits", {
-      title: `Commits · ${owner}/${repo}`,
-      owner,
-      repo,
-      ref,
-      refEnc: encodeURIComponent(ref),
-      commits: commitsData,
-      pager,
-      progress,
-    });
-    if (!page) throw new Error("Failed to render commits template");
-    return new Response(page, {
-      headers: {
-        "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "liquid-layout",
-      },
-    });
+      });
+    } catch (e: any) {
+      const debug = String((env as any)?.LOG_LEVEL || "").toLowerCase() === "debug";
+      try {
+        const errHtml = await renderView(env, "error", {
+          title: `Error · ${owner}/${repo}`,
+          message: String(e?.message || e),
+          owner,
+          repo,
+          refEnc: encodeURIComponent(ref),
+          stack: debug ? String(e?.stack || "") : undefined,
+        });
+        if (errHtml) {
+          return new Response(errHtml, {
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+            status: /not found/i.test(String(e?.message || e)) ? 404 : 500,
+          });
+        }
+      } catch {}
+      return new Response(`<h2>Error</h2><pre>${escapeHtml(String(e?.message || e))}</pre>`, {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+        status: 500,
+      });
+    }
   });
 
   // Commit details
@@ -610,9 +684,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       const cacheCtx: CacheContext = { req: request, ctx };
       const c = await readCommitInfo(env, repoId, oid, cacheCtx);
       const when = c.author ? formatWhen(c.author.when, c.author.tz) : "";
-      const parents = c.parents
-        .map((p) => `<a href="/${owner}/${repo}/commit/${p}">${p.slice(0, 7)}</a>`)
-        .join(", ");
+      const parents = (c.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
       const page = await renderView(env, "commit", {
         title: `${c.oid.slice(0, 7)} · ${owner}/${repo}`,
         owner,
@@ -622,7 +694,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         authorName: c.author?.name || "",
         authorEmail: c.author?.email || "",
         when: when,
-        parents: parents || '<span class="muted">(none)</span>',
+        parents,
         treeShort: c.tree.slice(0, 7),
         message: c.message,
       });
@@ -635,6 +707,24 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         },
       });
     } catch (e: any) {
+      const debug = String((env as any)?.LOG_LEVEL || "").toLowerCase() === "debug";
+      try {
+        const errHtml = await renderView(env, "error", {
+          title: `Error · ${owner}/${repo}`,
+          message: String(e?.message || e),
+          owner,
+          repo,
+          refEnc: encodeURIComponent(oid),
+          path: "",
+          stack: debug ? String(e?.stack || "") : undefined,
+        });
+        if (errHtml) {
+          return new Response(errHtml, {
+            headers: { "Content-Type": "text/html; charset=utf-8" },
+            status: 500,
+          });
+        }
+      } catch {}
       return new Response(`<h2>Error</h2><pre>${escapeHtml(String(e?.message || e))}</pre>`, {
         headers: { "Content-Type": "text/html; charset=utf-8" },
         status: 500,
@@ -681,6 +771,22 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     const path = url.searchParams.get("path") || "";
     const name = url.searchParams.get("name") || path.split("/").pop() || "file";
     const download = url.searchParams.get("download") === "1";
+
+    // Basic hotlink protection: require same-origin Referer
+    try {
+      const referer = request.headers.get("referer") || "";
+      const allowed = (() => {
+        try {
+          const r = new URL(referer);
+          return r.host === url.host;
+        } catch {
+          return false;
+        }
+      })();
+      if (!allowed) {
+        return new Response("Hotlinking not allowed\n", { status: 403 });
+      }
+    } catch {}
 
     try {
       const repoId = repoKey(owner, repo);

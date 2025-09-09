@@ -5,181 +5,199 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ title | default: 'git-on-cloudflare' }}</title>
     <link rel="stylesheet" href="/dist/app.css">
-    <!-- Syntax highlighting theme -->
-    <link
-      id="hljs-theme"
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@latest/build/styles/github.min.css"
-    >
-    <!-- Markdown renderer + sanitizer + highlighter -->
-    <script src="https://cdn.jsdelivr.net/npm/marked@latest/marked.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@latest/dist/purify.min.js"></script>
-    <script
-      src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@latest/build/highlight.min.js"
-    ></script>
-    <script
-      src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@latest/build/languages/typescript.min.js"
-    ></script>
+    {% if needsMarkdown %}
+      <!-- Markdown renderer + sanitizer (conditionally loaded) -->
+      <script defer src="https://cdn.jsdelivr.net/npm/marked@latest/marked.min.js"></script>
+      <script defer src="https://cdn.jsdelivr.net/npm/dompurify@latest/dist/purify.min.js"></script>
+    {% endif %}
+    {% if needsHighlight %}
+      <!-- Syntax highlighting theme (conditionally loaded, pinned version) -->
+      <link
+        id="hljs-theme"
+        rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css"
+      >
+      <!-- Highlight.js core (conditionally loaded, pinned version) -->
+      <script
+        defer
+        src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"
+      ></script>
+      {% if highlightLangs and highlightLangs.size > 0 %}
+        {% for lang in highlightLangs %}
+          <script
+            defer
+            src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/languages/{{ lang }}.min.js"
+          ></script>
+        {% endfor %}
+      {% endif %}
+    {% endif %}
     <script>
       (function () {
         function setHljsTheme(theme) {
           try {
             var el = document.getElementById('hljs-theme');
             if (!el) return;
-            var base = 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@latest/build/styles/';
+            var base = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/';
             var href =
-              theme === 'dark' ? base + 'github-dark-dimmed.min.css' : base + 'github.min.css';
+              theme === 'dark'
+                ? base + 'github-dark-dimmed.min.css'
+                : base + 'stackoverflow-light.min.css';
             if (el.getAttribute('href') !== href) el.setAttribute('href', href);
           } catch {}
         }
         try {
-          var t = localStorage.getItem('theme');
-          if (!t) {
-            if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
-              t = 'dark';
-            else t = 'light';
-          }
+          var t = localStorage.getItem('theme') || 'dark';
           // Use Tailwind's dark mode class
-          if (t === 'dark') {
-            document.documentElement.classList.add('dark');
-          } else {
-            document.documentElement.classList.remove('dark');
-          }
+          document.documentElement.classList.remove('dark');
+          if (t === 'dark') document.documentElement.classList.add('dark');
           setHljsTheme(t);
+          updateThemeUI(t);
           window.__toggleTheme = function () {
-            var isDark = document.documentElement.classList.contains('dark');
-            var next = isDark ? 'light' : 'dark';
-            if (next === 'dark') {
-              document.documentElement.classList.add('dark');
-            } else {
-              document.documentElement.classList.remove('dark');
-            }
+            var hasDark = document.documentElement.classList.contains('dark');
+            var next = hasDark ? 'light' : 'dark';
+            document.documentElement.classList.remove('dark');
+            if (next === 'dark') document.documentElement.classList.add('dark');
             setHljsTheme(next);
+            updateThemeUI(next);
             try {
               localStorage.setItem('theme', next);
             } catch {}
           };
+          function updateThemeUI(theme) {
+            try {
+              var btn = document.getElementById('theme-toggle');
+              var l = btn.querySelector('.icon-light');
+              var d = btn.querySelector('.icon-dark');
+              l.classList.add('hidden');
+              d.classList.add('hidden');
+              if (theme === 'dark') {
+                d.classList.remove('hidden');
+                btn.setAttribute('aria-label', 'Toggle theme (current: Dark)');
+              } else {
+                l.classList.remove('hidden');
+                btn.setAttribute('aria-label', 'Toggle theme (current: Light)');
+              }
+            } catch {}
+          }
         } catch {}
       })();
     </script>
-    <script>
-      // Render any markdown blocks present on the page and rewrite relative links/images
-      // based on the container's data attributes: data-md-owner, data-md-repo, data-md-ref, data-md-base
-      (function () {
-        function isAbsoluteUrl(href) {
-          return /^(?:[a-z]+:)?\/\//i.test(href) || href.startsWith('/') || href.startsWith('#');
-        }
-        function joinPath(base, rel) {
-          if (!base) base = '';
-          if (!rel) return base;
-          // Strip query/fragment for path resolution, preserve to append later
-          var frag = '';
-          var q = rel.indexOf('#');
-          if (q !== -1) {
-            frag = rel.slice(q);
-            rel = rel.slice(0, q);
+    {% if needsMarkdown or needsHighlight %}
+      <script>
+        // Render any markdown blocks present on the page and rewrite relative links/images
+        // based on the container's data attributes: data-md-owner, data-md-repo, data-md-ref, data-md-base
+        (function () {
+          function isAbsoluteUrl(href) {
+            return /^(?:[a-z]+:)?\/\//i.test(href) || href.startsWith('/') || href.startsWith('#');
           }
-          var baseParts = base.split('/').filter(Boolean);
-          var relParts = rel.split('/').filter(function (p) {
-            return p.length > 0;
-          });
-          relParts.forEach(function (p) {
-            if (p === '.') return;
-            if (p === '..') baseParts.pop();
-            else baseParts.push(p);
-          });
-          var out = baseParts.join('/');
-          return out + frag;
-        }
-        function rewriteRelativeLinks(container) {
-          try {
-            var owner = container.getAttribute('data-md-owner') || '';
-            var repo = container.getAttribute('data-md-repo') || '';
-            var ref = container.getAttribute('data-md-ref') || '';
-            var base = container.getAttribute('data-md-base') || '';
-            if (!owner || !repo || !ref) return; // nothing to do
-            // Normalize base to a directory path (no trailing slash)
-            if (base.endsWith('/')) base = base.slice(0, -1);
-
-            // Rewrite anchors
-            container.querySelectorAll('a[href]').forEach(function (a) {
-              var href = a.getAttribute('href') || '';
-              if (!href || isAbsoluteUrl(href)) return;
-              // Preserve fragment if present
-              var frag = '';
-              var i = href.indexOf('#');
-              if (i !== -1) {
-                frag = href.slice(i);
-                href = href.slice(0, i);
-              }
-              var resolved = joinPath(base, href);
-              var url =
-                '/' +
-                encodeURIComponent(owner) +
-                '/' +
-                encodeURIComponent(repo) +
-                '/blob?ref=' +
-                encodeURIComponent(ref) +
-                '&path=' +
-                encodeURIComponent(resolved) +
-                frag;
-              a.setAttribute('href', url);
+          function joinPath(base, rel) {
+            if (!base) base = '';
+            if (!rel) return base;
+            // Strip query/fragment for path resolution, preserve to append later
+            var frag = '';
+            var q = rel.indexOf('#');
+            if (q !== -1) {
+              frag = rel.slice(q);
+              rel = rel.slice(0, q);
+            }
+            var baseParts = base.split('/').filter(Boolean);
+            var relParts = rel.split('/').filter(function (p) {
+              return p.length > 0;
             });
-
-            // Rewrite images to raw-by-path endpoint so they render inline
-            container.querySelectorAll('img[src]').forEach(function (img) {
-              var src = img.getAttribute('src') || '';
-              if (!src || isAbsoluteUrl(src)) return;
-              var resolved = joinPath(base, src);
-              var name = resolved.split('/').pop() || 'file';
-              var url =
-                '/' +
-                encodeURIComponent(owner) +
-                '/' +
-                encodeURIComponent(repo) +
-                '/rawpath?ref=' +
-                encodeURIComponent(ref) +
-                '&path=' +
-                encodeURIComponent(resolved) +
-                '&name=' +
-                encodeURIComponent(name);
-              img.setAttribute('src', url);
+            relParts.forEach(function (p) {
+              if (p === '.') return;
+              if (p === '..') baseParts.pop();
+              else baseParts.push(p);
             });
-          } catch {}
-        }
-        function renderMarkdownBlocks() {
-          try {
-            var nodes = document.querySelectorAll('[data-markdown="1"]');
-            nodes.forEach(function (node) {
-              var pre = node.querySelector('pre.md-src');
-              if (!pre) return;
-              var raw = pre.textContent || '';
-              var html = marked.parse(raw);
-              var clean = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
-              node.innerHTML = clean;
-              rewriteRelativeLinks(node);
-              node.querySelectorAll('pre code').forEach(function (el) {
-                try {
-                  hljs.highlightElement(el);
-                } catch {}
+            var out = baseParts.join('/');
+            return out + frag;
+          }
+          function rewriteRelativeLinks(container) {
+            try {
+              var owner = container.getAttribute('data-md-owner') || '';
+              var repo = container.getAttribute('data-md-repo') || '';
+              var ref = container.getAttribute('data-md-ref') || '';
+              var base = container.getAttribute('data-md-base') || '';
+              if (!owner || !repo || !ref) return; // nothing to do
+              // Normalize base to a directory path (no trailing slash)
+              if (base.endsWith('/')) base = base.slice(0, -1);
+
+              // Rewrite anchors
+              container.querySelectorAll('a[href]').forEach(function (a) {
+                var href = a.getAttribute('href') || '';
+                if (!href || isAbsoluteUrl(href)) return;
+                // Preserve fragment if present
+                var frag = '';
+                var i = href.indexOf('#');
+                if (i !== -1) {
+                  frag = href.slice(i);
+                  href = href.slice(0, i);
+                }
+                var resolved = joinPath(base, href);
+                var url =
+                  '/' +
+                  encodeURIComponent(owner) +
+                  '/' +
+                  encodeURIComponent(repo) +
+                  '/blob?ref=' +
+                  encodeURIComponent(ref) +
+                  '&path=' +
+                  encodeURIComponent(resolved) +
+                  frag;
+                a.setAttribute('href', url);
               });
-            });
-          } catch {}
-        }
-        function run() {
-          renderMarkdownBlocks();
-          try {
-            hljs.highlightAll();
-          } catch {}
-        }
-        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
-        else run();
-      })();
-    </script>
+
+              // Rewrite images to raw-by-path endpoint so they render inline
+              container.querySelectorAll('img[src]').forEach(function (img) {
+                var src = img.getAttribute('src') || '';
+                if (!src || isAbsoluteUrl(src)) return;
+                var resolved = joinPath(base, src);
+                var name = resolved.split('/').pop() || 'file';
+                var url =
+                  '/' +
+                  encodeURIComponent(owner) +
+                  '/' +
+                  encodeURIComponent(repo) +
+                  '/rawpath?ref=' +
+                  encodeURIComponent(ref) +
+                  '&path=' +
+                  encodeURIComponent(resolved) +
+                  '&name=' +
+                  encodeURIComponent(name);
+                img.setAttribute('src', url);
+              });
+            } catch {}
+          }
+          function renderMarkdownBlocks() {
+            try {
+              var nodes = document.querySelectorAll('[data-markdown="1"]');
+              nodes.forEach(function (node) {
+                var pre = node.querySelector('pre.md-src');
+                if (!pre) return;
+                var raw = pre.textContent || '';
+                var html = marked.parse(raw);
+                var clean = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+                node.innerHTML = clean;
+                rewriteRelativeLinks(node);
+              });
+            } catch {}
+          }
+          function run() {
+            renderMarkdownBlocks();
+            try {
+              hljs.highlightAll();
+            } catch {}
+          }
+          // Wait until all resources (including CSS) are loaded to avoid FOUC/layout thrash
+          if (document.readyState === 'complete') run();
+          else window.addEventListener('load', run);
+        })();
+      </script>
+    {% endif %}
   </head>
-  <body class="min-h-full bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100">
+  <body class="min-h-full text-gray-900 dark:text-gray-100">
     <div class="container py-4">
-      <header class="flex justify-between items-center mb-6 pb-4 border-b border-gray-200 dark:border-gray-700">
+      <header class="flex justify-between items-center mb-6 pb-4 border-b border-gray-300 dark:border-gray-700">
         <nav class="flex items-center gap-4">
           <a
             href="/"
@@ -194,30 +212,32 @@
         </nav>
         <div>
           <button
-            class="text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+            id="theme-toggle"
+            class="flex items-center gap-2 text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100 px-2 py-1 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors cursor-pointer"
             onclick="__toggleTheme()"
             aria-label="Toggle theme"
           >
-            <svg class="w-5 h-5 dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path>
+            <!-- Light icon -->
+            <svg class="icon-light w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v2m0 14v2m8-8h-2M6 12H4m12.364 6.364l-1.414-1.414M7.05 7.05L5.636 5.636m12.728 0l-1.414 1.414M7.05 16.95l-1.414 1.414M12 8a4 4 0 100 8 4 4 0 000-8z"></path>
             </svg>
+            <!-- Dark icon -->
             <svg
-              class="w-5 h-5 hidden dark:block"
+              class="icon-dark w-5 h-5 hidden"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
             >
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path>
             </svg>
           </button>
         </div>
       </header>
       <main class="min-h-[calc(100vh-200px)]">
-        {{ content | raw }}
         {% block -%}
         {%- endblock %}
       </main>
-      <footer class="mt-12 pt-8 pb-4 border-t border-gray-200 dark:border-gray-700">
+      <footer class="mt-12 pt-8 pb-4 border-t border-gray-300 dark:border-gray-700">
         <div class="text-center text-sm text-gray-600 dark:text-gray-400">
           <p class="mb-2"><span class="text-red-500">❤️</span> Made with Cloudflare</p>
           <div class="flex justify-center gap-6">

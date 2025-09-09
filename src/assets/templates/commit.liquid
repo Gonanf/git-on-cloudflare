@@ -7,7 +7,17 @@
   {{ authorName }} &lt;{{ authorEmail }}&gt;
   <span class="muted">{{ when }}</span>
 </p>
-<p><strong>Parents:</strong> {{ parents | raw }}</p>
+<p>
+  <strong>Parents:</strong>
+  {% if parents and parents.size > 0 %}
+    {% for p in parents %}
+      {% if forloop.index > 1 %}, {% endif %}
+      <a href="/{{ owner }}/{{ repo }}/commit/{{ p.oid }}">{{ p.short }}</a>
+    {% endfor %}
+  {% else %}
+    <span class="muted">(none)</span>
+  {% endif %}
+</p>
 <p>
   <strong>Tree:</strong> <a href="/{{ owner }}/{{ repo }}/tree?ref={{ refEnc }}">{{ treeShort }}</a>
 </p>

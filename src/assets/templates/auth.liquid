@@ -1,71 +1,69 @@
 {% layout 'layout' %}
 {% block %}
-<div class="max-w-4xl mx-auto">
-  <div class="mb-6">
-    <h1 class="text-3xl font-bold mb-2">Auth Management</h1>
-    <p class="text-gray-600 dark:text-gray-400">Centralized (owner → token) store</p>
-  </div>
-  <p class="text-gray-600 dark:text-gray-400 mb-6">
-    Use your root admin token to manage owners and tokens. Tokens are stored as SHA‑256 hashes. You
-    can add and delete owners; individual token removal coming later.
-  </p>
+<header class="page-header">
+  <h2 class="m-0">Auth Management</h2>
+  <div></div>
+</header>
+<p class="muted mb-6">
+  Use your root admin token to manage owners and tokens. Tokens are stored as SHA‑256 hashes. You
+  can add and delete owners; individual token removal coming later.
+</p>
 
-  <div id="message" class="hidden mb-4 p-4 rounded-lg" aria-live="polite" role="status"></div>
+<div id="message" class="hidden mb-4 p-4 rounded-lg" aria-live="polite" role="status"></div>
 
-  <div class="grid gap-6 md:grid-cols-2 mb-6">
-    <div class="bg-gray-50 dark:bg-gray-800/30 rounded-lg p-6">
-      <h3 class="text-lg font-semibold mb-4">1) Admin Token</h3>
-      <div class="space-y-3">
-        <input
-          id="adm"
-          type="password"
-          placeholder="Enter AUTH_ADMIN_TOKEN"
-          class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
-        >
-        <button class="btn w-full sm:w-auto" id="load">Load Users</button>
-      </div>
-      <div class="text-sm text-gray-600 dark:text-gray-400">
-        Your browser will remember this for the current tab (localStorage).
-      </div>
-    </div>
-    <div class="bg-gray-50 dark:bg-gray-800/30 rounded-lg p-6">
-      <h3 class="text-lg font-semibold mb-4">2) Add Owner / Token</h3>
-      <div class="space-y-3">
-        <input
-          id="owner"
-          placeholder="owner (e.g., rachel)"
-          class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
-        >
-        <input
-          id="token"
-          placeholder="token (raw)"
-          class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
-        >
-        <button class="btn w-full sm:w-auto" id="add">Add</button>
-      </div>
-      <div class="text-sm text-gray-600 dark:text-gray-400">
-        Tip: Each collaborator uses their own token. For Git Basic auth, set username = owner and
-        password = token.
-      </div>
-    </div>
-  </div>
-
-  <div class="bg-gray-50 dark:bg-gray-800/30 rounded-lg p-6 mb-6">
-    <div class="flex justify-between items-center mb-4">
-      <h3 class="text-lg font-semibold">Owners</h3>
-      <span class="px-3 py-1 bg-gray-200 dark:bg-gray-700 text-sm rounded-full" id="owners-count"
-        >0 owners</span
+<div class="grid gap-6 md:grid-cols-2 mb-6">
+  <div class="card p-6">
+    <h3>1) Admin Token</h3>
+    <div class="space-y-3">
+      <input
+        id="adm"
+        type="password"
+        placeholder="Enter AUTH_ADMIN_TOKEN"
+        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
       >
+      <button class="btn w-full sm:w-auto" id="load">Load Users</button>
     </div>
-    <div id="users" class="text-gray-500 dark:text-gray-400">(none)</div>
+    <div class="text-sm muted mt-3">
+      Your browser will remember this for the current tab (localStorage).
+    </div>
   </div>
+  <div class="card p-6">
+    <h3>2) Add Owner / Token</h3>
+    <div class="space-y-3">
+      <input
+        id="owner"
+        placeholder="owner (e.g., rachel)"
+        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+      >
+      <input
+        id="token"
+        placeholder="token (raw)"
+        class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md bg-white dark:bg-gray-800 focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+      >
+      <button class="btn w-full sm:w-auto" id="add">Add</button>
+    </div>
+    <div class="text-sm muted mt-3">
+      Tip: Each collaborator uses their own token. For Git Basic auth, set username = owner and
+      password = token.
+    </div>
+  </div>
+</div>
 
-  <div class="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-6">
-    <h3 class="text-lg font-semibold mb-3">Usage examples</h3>
-    <ul class="space-y-2 text-gray-600 dark:text-gray-400">
-      <li>Git Basic auth: use <code>username = owner</code>, <code>password = token</code>.</li>
-    </ul>
+<div class="card p-6 mb-6">
+  <div class="flex justify-between items-center mb-4">
+    <h3>Owners</h3>
+    <span class="px-3 py-1 bg-gray-200 dark:bg-gray-700 text-sm rounded-full" id="owners-count"
+      >0 owners</span
+    >
   </div>
+  <div id="users" class="text-gray-500 dark:text-gray-400">(none)</div>
+</div>
+
+<div class="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-6">
+  <h3 class="text-lg font-semibold mb-3">Usage examples</h3>
+  <ul class="space-y-2 text-gray-600 dark:text-gray-400">
+    <li>Git Basic auth: use <code>username = owner</code>, <code>password = token</code>.</li>
+  </ul>
 </div>
 <script>
   const el = (id) => document.getElementById(id);

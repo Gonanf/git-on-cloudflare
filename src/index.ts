@@ -1,5 +1,5 @@
 import { AutoRouter } from "itty-router";
-import { renderTemplate, renderPage, renderView } from "./web";
+import { renderPage, renderView } from "./web";
 import { registerGitRoutes } from "./routes/git";
 import { registerAdminRoutes } from "./routes/admin";
 import { registerUiRoutes } from "./routes/ui";
@@ -14,7 +14,17 @@ registerAdminRoutes(router);
 // Register Auth routes BEFORE UI to avoid /:owner shadowing /auth
 registerAuthRoutes(router);
 
-router.get("/", (request, env: Env) => {
+router.get("/", async (request, env: Env) => {
+  const html = await renderView(env, "home", {});
+  if (html) {
+    return new Response(html, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "X-Page-Renderer": "liquid-layout",
+      },
+    });
+  }
   const body = `<h1>git-on-cloudflare</h1><p>Smart HTTP v2 skeleton running. Try <code>/:owner/:repo/info/refs?service=git-upload-pack</code>.</p>`;
   return renderPage(env, request, "git-on-cloudflare", body);
 });

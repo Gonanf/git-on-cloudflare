@@ -90,6 +90,7 @@ function getEngine(env: Env): Liquid {
     partials: ["templates/partials"],
     relativeReference: true,
     cache: true, // enable LRU parse cache
+    jsTruthy: true,
     dynamicPartials: true,
     outputEscape: "escape", // escape {{ var }} by default
     fs: createAssetFs(env),

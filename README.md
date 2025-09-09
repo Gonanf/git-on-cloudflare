@@ -14,7 +14,8 @@ Host unlimited private Git repositories at the edge with <50ms response times gl
 - **Two-tier caching** reducing latency from 200ms to <50ms for hot paths
 - **Streaming pack assembly** from R2 with range reads for efficient clones
 - **Time-budgeted background unpacking** handles large pushes without blocking
-- **Modern web UI** with Tailwind CSS v4, Liquid templates, and dark mode
+- **Modern web UI** with Tailwind CSS v4, Liquid templates, and dark mode (default)
+- **Safer raw views**: `text/plain` for `/raw` by default and same‑origin Referer check for `/rawpath` to prevent hotlinking
 
 ## Quick Demo
 
@@ -24,7 +25,8 @@ git clone https://github.com/zllovesuki/git-on-cloudflare
 cd git-on-cloudflare
 npm install
 
-# Start locally (no Docker required)
+# Build CSS (one‑time) and start locally (no Docker required)
+npm run build:css
 npm run dev
 
 # Push any repo to it
@@ -33,6 +35,8 @@ git push http://localhost:8787/test/myrepo main
 ```
 
 Visit `http://localhost:8787/test/myrepo` to browse your code. That's it — you now have a fully functional Git server.
+
+Tip: during active UI work, run `npm run watch:css` in another terminal to rebuild styles on change.
 
 ## Technical Architecture
 

@@ -1,4 +1,4 @@
-<nav class="flex items-center gap-4 mb-6 pb-4 border-b border-gray-200 dark:border-gray-700">
+<header class="page-header">
   <div class="font-semibold text-lg">
     <a href="/{{ owner }}" class="hover:text-blue-600 dark:hover:text-blue-400">{{ owner }}</a>
     <span class="text-gray-500 dark:text-gray-400">/</span>
@@ -7,15 +7,19 @@
     </a>
   </div>
   {% if refEnc %}
-    <a
-      href="/{{ owner }}/{{ repo }}/tree?ref={{ refEnc }}"
-      class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
-      >Browse</a
-    >
-    <a
-      href="/{{ owner }}/{{ repo }}/commits?ref={{ refEnc }}"
-      class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
-      >Commits</a
-    >
+    <nav class="flex items-center gap-4">
+      <a
+        href="/{{ owner }}/{{ repo }}/tree?ref={{ refEnc }}"
+        class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
+        >Browse</a
+      >
+      <a
+        href="/{{ owner }}/{{ repo }}/commits?ref={{ refEnc }}"
+        class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
+        >Commits</a
+      >
+    </nav>
+  {% else %}
+    <div></div>
   {% endif %}
-</nav>
+</header>

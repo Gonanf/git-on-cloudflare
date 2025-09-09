@@ -191,7 +191,7 @@ export async function cachePutObject(
  * @param ctx - ExecutionContext for waitUntil (optional)
  * @returns The cached or loaded git object
  */
-export async function cacheOrLoad<T extends { type: string; payload: Uint8Array }>(
+export async function cacheOrLoadObject<T extends { type: string; payload: Uint8Array }>(
   cacheKey: Request,
   loader: () => Promise<T | undefined>,
   ctx?: ExecutionContext
@@ -252,5 +252,31 @@ export async function cacheOrLoadJSON<T>(
     savePromise.catch(() => {}); // Ignore errors
   }
 
+  return result;
+}
+
+/**
+ * Variant of cacheOrLoadJSON where the TTL depends on the loaded value.
+ * Useful when the response type determines TTL (e.g., tree listings vs blob metadata).
+ */
+export async function cacheOrLoadJSONWithTTL<T>(
+  cacheKey: Request,
+  loader: () => Promise<T | null>,
+  ttlResolver: (value: T) => number,
+  ctx?: ExecutionContext
+): Promise<T | null> {
+  // Try cache first
+  const cached = await cacheGetJSON<T>(cacheKey);
+  if (cached) return cached;
+
+  // Load from source
+  const result = await loader();
+  if (!result) return null;
+
+  // Resolve TTL and save in background
+  const ttl = Math.max(0, Math.floor(ttlResolver(result)));
+  const savePromise = cachePutJSON(cacheKey, result, ttl);
+  if (ctx) ctx.waitUntil(savePromise);
+  else savePromise.catch(() => {});
   return result;
 }

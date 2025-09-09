@@ -10,7 +10,7 @@
     </p>
   </div>
   <div class="repo-grid">
-    <div class="bg-gray-50 dark:bg-gray-800/30 rounded-lg p-4">
+    <div class="card p-4">
       <h3>Branches</h3>
       <div class="list">
         {% if branches and branches.size > 0 %}
@@ -26,7 +26,7 @@
         {% endif %}
       </div>
     </div>
-    <div class="bg-gray-50 dark:bg-gray-800/30 rounded-lg p-4">
+    <div class="card p-4">
       <h3>Tags</h3>
       <div class="list">
         {% if tags and tags.size > 0 %}
@@ -41,9 +41,17 @@
       </div>
     </div>
   </div>
-  {% if readme %}
+  {% if readmeMd %}
     <div class="mt-8 border border-gray-200 dark:border-gray-700 rounded-lg p-6 bg-white dark:bg-gray-800/30 markdown-content">
-      {{ readme | raw }}
+      <div
+        data-markdown="1"
+        data-md-owner="{{ owner }}"
+        data-md-repo="{{ repo }}"
+        data-md-ref="{{ refShort }}"
+        data-md-base=""
+      >
+        <pre class="md-src">{{ readmeMd }}</pre>
+      </div>
     </div>
   {% endif %}
 </div>

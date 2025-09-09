@@ -5,7 +5,7 @@ import { packIndexKey } from "@/keys.ts";
 import { createMemPackFs } from "@/git/pack/unpack.ts";
 import { createStubLooseLoader } from "@/git/pack/loose-loader.ts";
 import { createInflateStream } from "@/common/compression.ts";
-import { buildObjectCacheKey, cacheOrLoad, type CacheContext } from "@/cache/cache.ts";
+import { buildObjectCacheKey, cacheOrLoadObject, type CacheContext } from "@/cache/cache.ts";
 import * as git from "isomorphic-git";
 
 /**
@@ -505,7 +505,7 @@ export async function readLooseObjectRaw(
   // Use cache helper if cache context is available
   if (cacheCtx) {
     const cacheKey = buildObjectCacheKey(cacheCtx.req, repoId, oidLc);
-    return cacheOrLoad(
+    return cacheOrLoadObject(
       cacheKey,
       async () => {
         // Try loose object via DO first (preferred)

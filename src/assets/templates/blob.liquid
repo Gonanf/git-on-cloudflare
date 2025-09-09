@@ -2,9 +2,70 @@
 {% block %}
 {% render 'repo_nav', owner: owner, repo: repo, refEnc: refEnc %}
 <h2>Blob: {{ fileName }}</h2>
-<p>
-  <a class="btn secondary" href="{{ viewRawHref }}">View raw</a>
-  <a class="btn" href="{{ rawHref }}">Download</a>
-</p>
-{{ contentHtml | raw }}
+<div class="blob-container mt-4 border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-800/30">
+  <div class="flex items-center justify-between px-3 py-2 border-b border-gray-200 dark:border-gray-700">
+    <div class="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
+      {% if tooLarge %}
+        <span class="inline-flex items-center rounded border border-gray-300 dark:border-gray-600 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50"
+          >Too large</span
+        >
+        {% if sizeStr %}
+          <span class="text-gray-500 dark:text-gray-400">{{ sizeStr }}</span>
+        {% endif %}
+      {% elsif isMarkdown %}
+        <span class="inline-flex items-center rounded border border-gray-300 dark:border-gray-600 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50"
+          >Markdown</span
+        >
+        {% if lineCount %}
+          <span class="text-gray-500 dark:text-gray-400">
+            {{- lineCount }} line{% if lineCount != 1 %}s{% endif -%}
+          </span>
+        {% endif %}
+      {% elsif isBinary %}
+        <span class="inline-flex items-center rounded border border-gray-300 dark:border-gray-600 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50"
+          >Binary</span
+        >
+        {% if sizeStr %}
+          <span class="text-gray-500 dark:text-gray-400">{{ sizeStr }}</span>
+        {% endif %}
+      {% else %}
+        <span class="inline-flex items-center rounded border border-gray-300 dark:border-gray-600 px-2 py-0.5 bg-gray-50 dark:bg-gray-800/50">
+          {{- codeLang | default: 'plaintext' -}}
+        </span>
+        {% if lineCount %}
+          <span class="text-gray-500 dark:text-gray-400">
+            {{- lineCount }} line{% if lineCount != 1 %}s{% endif -%}
+          </span>
+        {% endif %}
+      {% endif %}
+    </div>
+    <div class="flex gap-2">
+      <a class="btn secondary sm" href="{{ viewRawHref }}">View raw</a>
+      <a class="btn sm" href="{{ rawHref }}">Download</a>
+    </div>
+  </div>
+  <div class="{% if contentClass %}{{ contentClass }}{% endif %} {% if isMarkdown %}p-5{% elsif isBinary or tooLarge %}p-3{% else %}p-1{% endif %}">
+    {% if tooLarge %}
+      <div class="muted">File too large to preview.</div>
+    {% elsif isBinary %}
+      <div class="muted">Binary file.</div>
+    {% elsif isMarkdown %}
+      <div
+        data-markdown="1"
+        data-md-owner="{{ mdOwner }}"
+        data-md-repo="{{ mdRepo }}"
+        data-md-ref="{{ mdRef }}"
+        data-md-base="{{ mdBase }}"
+      >
+        <pre class="md-src">{{ markdownRaw }}</pre>
+      </div>
+    {% else %}
+      {% if codeLang %}
+        <pre><code class="language-{{ codeLang }}">{{ codeText }}</code></pre>
+      {% else %}
+        <pre><code class="language-plaintext">{{ codeText }}</code></pre>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
 {% endblock %}

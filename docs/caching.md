@@ -6,21 +6,20 @@ git-on-cloudflare implements a two-tier caching strategy to optimize performance
 
 ### 1. UI Layer Cache (`git-on-cf:json`)
 
-Caches JSON responses for web UI operations:
+Caches JSON responses for web UI operations. Keys are synthetic same-origin GET requests under a private `/_cache/*` path, with parameters encoded as query strings:
 
 - **HEAD/refs**: 60 seconds
   - Repository refs and HEAD state
-  - Key: `/:owner/:repo/refs`
-- **Tree listings**: 60 seconds
-  - Directory contents
-  - Key: `/:owner/:repo/tree/:ref/:path`
+  - Key path: `/_cache/refs?repo=<owner/repo>`
+- **Tree listings / blob metadata**: 60s for trees, 300s for blob metadata (TTL depends on result type)
+  - Directory contents (trees) and small blob previews
+  - Key path: `/_cache/tree?repo=<owner/repo>&ref=<ref>&path=<path>`
 - **README content**: 5 minutes
-  - Rendered README HTML
-  - Key: `/:owner/:repo/readme/:ref`
+  - Rendered README markdown (raw markdown is rendered client-side)
+  - Key path: `/_cache/readme?repo=<owner/repo>&ref=<ref>`
 - **Commits**: Variable TTL
-  - Branch commits: 60 seconds
-  - Tag/OID commits: 1 hour (immutable)
-  - Key: `/:owner/:repo/commits/:ref/:page`
+  - Branch commits: 60 seconds; Tag/OID commits: 1 hour (immutable)
+  - Key path: `/_cache/commits?repo=<owner/repo>&ref=<ref>&page=<n>`
 
 ### 2. Git Object Cache (`git-on-cf:objects`)
 
@@ -64,6 +63,7 @@ await cachePutObject(keyReq: Request, type: string, payload: Uint8Array)
 // Helper patterns with ctx.waitUntil support
 await cacheOrLoad<T>(cacheKey, loader, ctx?: ExecutionContext)
 await cacheOrLoadJSON<T>(cacheKey, loader, ttl, ctx?: ExecutionContext)
+await cacheOrLoadJSONWithTTL<T>(cacheKey, loader, ttlResolver: (v: T) => number, ctx?: ExecutionContext)
 ```
 
 ### CacheContext Interface
