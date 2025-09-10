@@ -2,8 +2,10 @@
  * Shared test utilities for Git operations
  */
 
+import { runInDurableObject } from "cloudflare:test";
 import { deflate, zeroOid } from "@/common/index.ts";
 import { concatChunks, encodeObjHeader, GitObjectType, objTypeCode } from "@/git/index.ts";
+import type { RepoDurableObject } from "@/do";
 
 /**
  * Build a Git pack file from objects
@@ -71,3 +73,73 @@ export function zero40(): string {
  * Re-export encodeObjHeader for tests that need it directly
  */
 export { encodeObjHeader } from "@/git/index.ts";
+
+/**
+ * Generate a per-test unique repo id suffix to avoid shared storage collisions
+ * when isolatedStorage is disabled.
+ */
+export function uniqueRepoId(prefix = "r"): string {
+  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Run a function against a Durable Object instance with a retry that reacquires
+ * the stub if workerd invalidated the previous instance due to HMR.
+ */
+export async function runDOWithRetry<T>(
+  getStub: () => DurableObjectStub<RepoDurableObject>,
+  fn: (instance: any, state: any) => Promise<T> | T
+): Promise<T> {
+  const exec = async (stub: DurableObjectStub<RepoDurableObject>): Promise<T> => {
+    return await runInDurableObject(stub, (instance: any, state: any) => fn(instance, state));
+  };
+  try {
+    return await exec(getStub());
+  } catch (e) {
+    const msg = String(e || "");
+    if (msg.includes("invalidating this Durable Object")) {
+      return await exec(getStub());
+    }
+    throw e;
+  }
+}
+
+/**
+ * Call a method on a DurableObjectStub with invalidation-aware retry.
+ */
+export async function callStubWithRetry<T>(
+  getStub: () => DurableObjectStub<RepoDurableObject>,
+  fn: (stub: DurableObjectStub<RepoDurableObject>) => Promise<T>
+): Promise<T> {
+  try {
+    return await fn(getStub());
+  } catch (e) {
+    const msg = String(e || "");
+    if (msg.includes("invalidating this Durable Object")) {
+      return await fn(getStub());
+    }
+    throw e;
+  }
+}
+
+/**
+ * Temporarily override selected env bindings for the duration of fn(), restoring afterwards.
+ */
+export async function withEnvOverrides<T>(
+  env: Env,
+  overrides: Record<string, string>,
+  fn: () => Promise<T>
+): Promise<T> {
+  const prev: Record<string, string | undefined> = {};
+  for (const k of Object.keys(overrides)) {
+    prev[k] = (env as any)[k];
+    (env as any)[k] = overrides[k];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const k of Object.keys(overrides)) {
+      (env as any)[k] = prev[k] as any;
+    }
+  }
+}

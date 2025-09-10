@@ -1,7 +1,8 @@
 import { it, expect } from "vitest";
-import { env, runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:test";
 import { computeNeeded } from "@/git";
 import type { RepoDurableObject } from "@/index";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
   const cs: any = new (globalThis as any).CompressionStream("deflate");
@@ -26,23 +27,27 @@ async function encodeGitObjectAndDeflate(
   return { oid, zdata };
 }
 
-async function putObj(stub: DurableObjectStub<RepoDurableObject>, oid: string, z: Uint8Array) {
-  await runInDurableObject(stub, async (instance: RepoDurableObject) => {
+async function putObj(
+  getStub: () => DurableObjectStub<RepoDurableObject>,
+  oid: string,
+  z: Uint8Array
+) {
+  await runDOWithRetry(getStub, async (instance: RepoDurableObject) => {
     await instance.putLooseObject(oid, z);
   });
 }
 
 it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", async () => {
   const owner = "o";
-  const repo = "r-compute-merge";
+  const repo = uniqueRepoId("r-compute-merge");
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
-  const stub: DurableObjectStub<RepoDurableObject> = env.REPO_DO.get(id);
+  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
 
   // Build a shared empty tree T
   const treePayload = new Uint8Array(0);
   const { oid: treeOid, zdata: treeZ } = await encodeGitObjectAndDeflate("tree", treePayload);
-  await putObj(stub, treeOid, treeZ);
+  await putObj(getStub, treeOid, treeZ);
 
   // Root commit R
   const author = `You <you@example.com> 0 +0000`;
@@ -52,7 +57,7 @@ it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", as
     `tree ${treeOid}\n` + `author ${author}\n` + `committer ${committer}\n\n${msg}`
   );
   const { oid: rootOid, zdata: rootZ } = await encodeGitObjectAndDeflate("commit", rootPayload);
-  await putObj(stub, rootOid, rootZ);
+  await putObj(getStub, rootOid, rootZ);
 
   // Branch A: commit A -> parent R, same tree T
   const aPayload = new TextEncoder().encode(
@@ -62,7 +67,7 @@ it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", as
       `committer ${committer}\n\nA\n`
   );
   const { oid: aOid, zdata: aZ } = await encodeGitObjectAndDeflate("commit", aPayload);
-  await putObj(stub, aOid, aZ);
+  await putObj(getStub, aOid, aZ);
 
   // Branch B: commit B -> parent R, same tree T
   const bPayload = new TextEncoder().encode(
@@ -72,7 +77,7 @@ it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", as
       `committer ${committer}\n\nB\n`
   );
   const { oid: bOid, zdata: bZ } = await encodeGitObjectAndDeflate("commit", bPayload);
-  await putObj(stub, bOid, bZ);
+  await putObj(getStub, bOid, bZ);
 
   // Merge M: parents A and B, same tree T
   const mPayload = new TextEncoder().encode(
@@ -83,7 +88,7 @@ it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", as
       `committer ${committer}\n\nmerge\n`
   );
   const { oid: mOid, zdata: mZ } = await encodeGitObjectAndDeflate("commit", mPayload);
-  await putObj(stub, mOid, mZ);
+  await putObj(getStub, mOid, mZ);
 
   // Case 1: want B, have A -> need only B (tree/root pruned via have closure)
   const need1 = await computeNeeded(env as any, repoId, [bOid], [aOid]);

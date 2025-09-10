@@ -4,6 +4,7 @@ import type { RepoDurableObject } from "@/index";
 import * as git from "isomorphic-git";
 import { asTypedStorage, RepoStateSchema } from "@/do/repoState.ts";
 import { createMemPackFs } from "@/git";
+import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
 
 function pktLine(s: string | Uint8Array): Uint8Array {
   const enc = typeof s === "string" ? new TextEncoder().encode(s) : s;
@@ -38,10 +39,10 @@ async function inflateZlib(z: Uint8Array): Promise<Uint8Array> {
 }
 
 async function readLoose(
-  stub: DurableObjectStub<RepoDurableObject>,
+  getStub: () => DurableObjectStub<RepoDurableObject>,
   oid: string
 ): Promise<{ type: string; payload: Uint8Array }> {
-  const obj = await stub.getObject(oid);
+  const obj = await callStubWithRetry(getStub, (s) => s.getObject(oid));
   if (!obj) throw new Error("missing loose " + oid);
   const z = new Uint8Array(obj);
   const raw = await inflateZlib(z);
@@ -119,22 +120,22 @@ function buildFetchBody({
 
 it("multi-pack union assembles packfile from two R2 packs", async () => {
   const owner = "o";
-  const repo = "r-multipack";
+  const repo = uniqueRepoId("r-multipack");
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
-  const stub = env.REPO_DO.get(id);
+  const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
 
   // Seed DO repo with a commit + empty tree via runInDurableObject
-  const { commitOid, treeOid } = await runInDurableObject(
-    stub,
+  const { commitOid, treeOid } = await runDOWithRetry(
+    getStub,
     async (instance: RepoDurableObject) => {
       return instance.seedMinimalRepo();
     }
   );
 
   // Read loose objects
-  const commit = await readLoose(stub, commitOid);
-  const tree = await readLoose(stub, treeOid);
+  const commit = await readLoose(getStub, commitOid);
+  const tree = await readLoose(getStub, treeOid);
 
   // Build two packs: A(commit), B(tree)
   const packA = await buildPack([commit]);
@@ -164,7 +165,7 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
   await env.REPO_BUCKET.put(keyB.replace(/\.pack$/, ".idx"), idxB);
 
   // Register pack metadata in DO storage
-  await runInDurableObject(stub, async (_instance, state: DurableObjectState) => {
+  await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
     await store.put("packList", [keyA, keyB]);
     await store.put(`packOids:${keyA}`, [commitOid]);

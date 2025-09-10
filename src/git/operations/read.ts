@@ -17,6 +17,7 @@ import {
   createLogger,
   createInflateStream,
   getRepoStub,
+  BinaryHeap,
 } from "@/common/index.ts";
 import * as git from "isomorphic-git";
 import type { RepoDurableObject } from "@/do/index.ts";
@@ -303,18 +304,19 @@ export async function listMergeSideFirstParent(
       frontier.push(info);
     } catch {}
   }
+  // Build initial heap using generic BinaryHeap
+  const heap = new BinaryHeap<CommitInfo>(newerFirst, frontier);
 
   const out: CommitInfo[] = [];
   let scanned = 0;
 
   while (
     out.length < limit &&
-    frontier.length > 0 &&
+    !heap.isEmpty() &&
     scanned < scanLimit &&
     Date.now() - started < timeBudgetMs
   ) {
-    frontier.sort(newerFirst);
-    const current = frontier.shift()!;
+    const current = heap.pop()!;
     scanned++;
     if (visited.has(current.oid)) continue;
     visited.add(current.oid);
@@ -332,7 +334,7 @@ export async function listMergeSideFirstParent(
     if (next && !visited.has(next)) {
       try {
         const ni = await readCommitInfo(env, repoId, next, cacheCtx);
-        frontier.push(ni);
+        heap.push(ni);
       } catch {}
     }
   }
@@ -722,7 +724,7 @@ export async function readLooseObjectRaw(
         object: Uint8Array;
         type: "blob" | "tree" | "commit" | "tag";
       };
-      logger.info("object-read", { source: "r2-pack-single", packKey, type: result.type });
+      logger.debug("object-read", { source: "r2-pack-single", packKey, type: result.type });
       return { type: result.type, payload: result.object };
     } catch {
       return undefined;
@@ -858,7 +860,7 @@ export async function readLooseObjectRaw(
         object: Uint8Array;
         type: "blob" | "tree" | "commit" | "tag";
       };
-      logger.info("object-read", {
+      logger.debug("object-read", {
         source: "r2-packs",
         chosenPackKey,
         packsLoaded: files.size,
@@ -886,7 +888,7 @@ export async function readLooseObjectRaw(
         let nul = sp + 1;
         while (nul < raw.length && raw[nul] !== 0x00) nul++;
         const payload = raw.subarray(nul + 1);
-        logger.info("object-read", { source: "do-state", type });
+        logger.debug("object-read", { source: "do-state", type });
         return { type, payload };
       } else {
         logger.debug("do-state-miss", { oid: oidLc });

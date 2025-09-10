@@ -1,7 +1,8 @@
 import { it, expect } from "vitest";
-import { env, SELF, runInDurableObject } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import { pktLine, delimPkt, flushPkt, concatChunks } from "@/git";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 function buildFetchBody({
   wants,
@@ -24,14 +25,14 @@ function buildFetchBody({
 
 it("upload-pack fetch returns acknowledgments and packfile", async () => {
   const owner = "o";
-  const repo = "r";
+  const repo = uniqueRepoId("r");
   const repoId = `${owner}/${repo}`;
   // Seed tiny repo and get commit OID via DO instance
   const id = env.REPO_DO.idFromName(repoId);
-  const stub = env.REPO_DO.get(id);
-  const { commitOid } = await runInDurableObject(stub, async (instance: RepoDurableObject) => {
-    return instance.seedMinimalRepo();
-  });
+  const { commitOid } = await runDOWithRetry(
+    () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
+    async (instance: RepoDurableObject) => instance.seedMinimalRepo()
+  );
 
   const body = buildFetchBody({ wants: [commitOid] });
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;

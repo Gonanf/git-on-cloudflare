@@ -1,12 +1,13 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
 import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/git";
+import { uniqueRepoId } from "./util/test-helpers.ts";
 import { buildPack, zero40 } from "./util/test-helpers.ts";
 import { bytesToHex } from "@/common/hex.ts";
 
 it("receive-pack connectivity: rejects commit whose root tree is missing", async () => {
   const owner = "o";
-  const repo = "r-connectivity-missing-tree";
+  const repo = uniqueRepoId("r-connectivity-missing-tree");
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   // Construct a commit that points to a tree OID that is NOT present anywhere on the server
@@ -59,7 +60,7 @@ it("receive-pack connectivity: rejects commit whose root tree is missing", async
 
 it("receive-pack connectivity: accepts annotated tag pointing to commit with present tree", async () => {
   const owner = "o";
-  const repo = "r-tag-commit-ok";
+  const repo = uniqueRepoId("r-tag-commit-ok");
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   // Build empty tree and commit
@@ -124,7 +125,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to commit with pre
 
 it("receive-pack connectivity: accepts annotated tag pointing to tree present", async () => {
   const owner = "o";
-  const repo = "r-tag-tree-ok";
+  const repo = uniqueRepoId("r-tag-tree-ok");
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   const treePayload = new Uint8Array(0);
@@ -170,7 +171,7 @@ it("receive-pack connectivity: accepts annotated tag pointing to tree present", 
 
 it("receive-pack connectivity: rejects annotated tag pointing to commit with missing tree", async () => {
   const owner = "o";
-  const repo = "r-tag-commit-missing-tree";
+  const repo = uniqueRepoId("r-tag-commit-missing-tree");
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
   const missingTreeOid = "c".repeat(40);
   const author = `You <you@example.com> 0 +0000`;
@@ -222,7 +223,7 @@ it("receive-pack connectivity: rejects annotated tag pointing to commit with mis
 
 it("receive-pack connectivity: accepts direct ref to tree present", async () => {
   const owner = "o";
-  const repo = "r-tree-ref-ok";
+  const repo = uniqueRepoId("r-tree-ref-ok");
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   // Build an empty tree
@@ -254,7 +255,7 @@ it("receive-pack connectivity: accepts direct ref to tree present", async () => 
 
 it("receive-pack connectivity: accepts direct ref to blob present", async () => {
   const owner = "o";
-  const repo = "r-blob-ref-ok";
+  const repo = uniqueRepoId("r-blob-ref-ok");
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   const blobPayload = new TextEncoder().encode("hello\n");
@@ -285,7 +286,7 @@ it("receive-pack connectivity: accepts direct ref to blob present", async () => 
 
 it("receive-pack connectivity: accepts nested tag->tag->tree present", async () => {
   const owner = "o";
-  const repo = "r-nested-tag-tree-ok";
+  const repo = uniqueRepoId("r-nested-tag-tree-ok");
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   const treePayload = new Uint8Array(0);

@@ -245,6 +245,17 @@ export async function unpackOidsChunkFromPackBytes(
     log.warn("chunk:index-fallback", {});
   }
   let ok = 0;
+  // Use a small, fixed concurrency for R2 mirrors to avoid excessive parallelism
+  const r2Concurrency = 4;
+  const pendingR2: Promise<void>[] = [];
+
+  async function flushPending() {
+    if (pendingR2.length === 0) return;
+    try {
+      await Promise.allSettled(pendingR2.splice(0, pendingR2.length));
+    } catch {}
+  }
+
   for (const oid of oids) {
     try {
       const { object, type } = (await git.readObject({
@@ -259,16 +270,26 @@ export async function unpackOidsChunkFromPackBytes(
       };
       const { zdata } = await encodeGitObjectAndDeflate(type, object);
       await store.put(objKey(oid), zdata);
-      try {
-        await env.REPO_BUCKET.put(r2LooseKey(prefix, oid), zdata);
-      } catch (e) {
-        log.warn("chunk:mirror-r2-failed", { oid, error: String(e) });
+      // Mirror to R2 with limited concurrency
+      pendingR2.push(
+        (async () => {
+          try {
+            await env.REPO_BUCKET.put(r2LooseKey(prefix, oid), zdata);
+          } catch (e) {
+            log.warn("chunk:mirror-r2-failed", { oid, error: String(e) });
+          }
+        })()
+      );
+      if (pendingR2.length >= r2Concurrency) {
+        await flushPending();
       }
       ok++;
     } catch (e) {
       log.debug("chunk:read-failed", { oid, error: String(e) });
     }
   }
+  // Flush any remaining R2 mirrors
+  await flushPending();
   log.debug("chunk:done", { processed: ok, requested: oids.length });
   return ok;
 }

@@ -1,7 +1,9 @@
 import { it, expect } from "vitest";
-import { env, SELF, runInDurableObject } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/git";
 import { makeCommit, makeTree, zero40, encodeObjHeader } from "./util/test-helpers";
+import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers";
+import type { UnpackProgress } from "@/common";
 
 async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
   const cs: any = new (globalThis as any).CompressionStream("deflate");
@@ -40,7 +42,7 @@ it("receive-pack: one-deep queue, third push blocked with 503", async () => {
   env.REPO_UNPACK_BACKOFF_MS = "50";
 
   const owner = "o";
-  const repo = "r-queue-503";
+  const repo = uniqueRepoId("r-queue-503");
   const url = `https://example.com/${owner}/${repo}/git-receive-pack`;
 
   // Build objects for three independent pushes
@@ -88,8 +90,10 @@ it("receive-pack: one-deep queue, third push blocked with 503", async () => {
   // Ensure state reflects: unpacking in progress and exactly one queued
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
-  const stub = env.REPO_DO.get(id);
-  const pre3 = await stub.getUnpackProgress();
+  const getStub = () => env.REPO_DO.get(id);
+  const pre3 = await callStubWithRetry<UnpackProgress>(getStub as any, (s: any) =>
+    s.getUnpackProgress()
+  );
   expect(pre3.unpacking).toBe(true);
   expect(Number(pre3.queuedCount || 0)).toBe(1);
 
@@ -114,14 +118,14 @@ it("receive-pack: one-deep queue, third push blocked with 503", async () => {
   // Drive alarm until everything completes
   // Drive until done
 
-  const progress = async () => {
-    return stub.getUnpackProgress();
+  const progress = async (): Promise<UnpackProgress> => {
+    return callStubWithRetry<UnpackProgress>(getStub as any, (s: any) => s.getUnpackProgress());
   };
 
   let guard = 300;
   while (guard-- > 0) {
-    await runInDurableObject(stub, async (instance) => {
-      await (instance as any).alarm();
+    await runDOWithRetry(getStub as any, async (instance: any) => {
+      await instance.alarm();
     });
     const cur = await progress();
     if (!cur.unpacking) break;

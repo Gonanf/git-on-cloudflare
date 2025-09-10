@@ -68,9 +68,15 @@ import { setUnpackStatus } from "@/cache/index.ts";
  */
 export class RepoDurableObject extends DurableObject {
   declare env: Env;
+  // Throttle lastAccessMs writes to storage to reduce per-request write amplification
+  private lastAccessMemMs: number | undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    ctx.blockConcurrencyWhile(async () => {
+      this.lastAccessMemMs = await ctx.storage.get("lastAccessMs");
+      await this.ensureAccessAndAlarm();
+    });
   }
 
   // Thin request router: delegates to focused handlers below.
@@ -179,6 +185,38 @@ export class RepoDurableObject extends DurableObject {
       return !!head;
     } catch {}
     return false;
+  }
+
+  /**
+   * Batch membership check for loose objects. Returns an array of booleans aligned with input OIDs.
+   * Uses small concurrency for R2 HEADs; DO storage checks are performed directly.
+   */
+  public async hasLooseBatch(oids: string[]): Promise<boolean[]> {
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const prefix = this.prefix();
+    const env = this.env;
+
+    const checkOne = async (oid: string): Promise<boolean> => {
+      if (!/^[0-9a-f]{40}$/i.test(oid)) return false;
+      const data = await store.get(objKey(oid));
+      if (data) return true;
+      try {
+        const head = await env.REPO_BUCKET.head(r2LooseKey(prefix, oid));
+        return !!head;
+      } catch {
+        return false;
+      }
+    };
+
+    const MAX = 16;
+    const out: boolean[] = [];
+    for (let i = 0; i < oids.length; i += MAX) {
+      const part = oids.slice(i, i + MAX);
+      const res = await Promise.all(part.map((oid) => checkOne(oid)));
+      out.push(...res);
+    }
+    return out;
   }
 
   public async getPackLatest(): Promise<{ key: string; oids: string[] } | null> {
@@ -564,8 +602,13 @@ export class RepoDurableObject extends DurableObject {
     const now = Date.now();
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
 
-    // Update last access time
-    await store.put("lastAccessMs", now);
+    // Update last access time with throttling (max once per 60s)
+    try {
+      if (!this.lastAccessMemMs || now - this.lastAccessMemMs >= 60_000) {
+        await store.put("lastAccessMs", now);
+        this.lastAccessMemMs = now;
+      }
+    } catch {}
 
     try {
       // Check if we need to prioritize unpack work
@@ -741,8 +784,6 @@ export class RepoDurableObject extends DurableObject {
     if (!obj) return text("Pack not found in R2\n", 404);
     const bytes = new Uint8Array(await obj.arrayBuffer());
     this.logger.info("reindex:start", { key });
-    // Re-indexing reads pack bytes from R2, indexes them and unpacks objects in chunks
-    // (bounded by configured time budget) by scheduling alarm work internally.
     await unpackPackToLoose(bytes, this.ctx, this.env, this.prefix(), key);
     this.logger.info("reindex:done", { key });
     return text("OK\n");

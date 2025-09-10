@@ -120,7 +120,7 @@ export async function handleFetchV2(
     // ignore and fallback to loose objects
   }
 
-  // Fallback: build a minimal pack from loose objects
+  // Fallback: build a minimal pack from loose objects (allow empty pack when no objects needed)
   const oids = needed;
   const objs: { type: GitObjectType; payload: Uint8Array }[] = [];
   for (const oid of oids) {
@@ -128,9 +128,6 @@ export async function handleFetchV2(
     if (!o) continue;
     // readLooseObjectRaw returns type as string, but we know it's a valid GitObjectType
     objs.push({ type: o.type as GitObjectType, payload: o.payload });
-  }
-  if (objs.length === 0) {
-    return new Response("server error: no objects found to pack\n", { status: 500 });
   }
   const packfile = await buildPackV2(objs);
   return respondWithPackfile(packfile, done, ackOids, signal);
@@ -260,21 +257,55 @@ export async function computeNeeded(
 
 async function findCommonHaves(env: Env, repoId: string, haves: string[]): Promise<string[]> {
   const stub = getRepoStub(env, repoId);
-  const out: string[] = [];
   const limit = 128;
-  for (const oid of haves.slice(0, limit)) {
-    const has = await stub.hasLoose(oid);
-    if (has) out.push(oid);
-  }
-  // De-duplicate while preserving order
+  const sample = haves.slice(0, limit);
+
+  // Try batch RPC if available
+  try {
+    const batch: boolean[] = await stub.hasLooseBatch(sample);
+    if (Array.isArray(batch) && batch.length === sample.length) {
+      const out: string[] = [];
+      for (let i = 0; i < sample.length; i++) if (batch[i]) out.push(sample[i]);
+      // De-duplicate while preserving order
+      const seen = new Set<string>();
+      const uniq: string[] = [];
+      for (const o of out)
+        if (!seen.has(o)) {
+          seen.add(o);
+          uniq.push(o);
+        }
+      return uniq;
+    }
+  } catch {}
+
+  // Fallback: small-concurrency parallel checks
+  const concurrency = 16;
+  const outFlags = new Array(sample.length).fill(false) as boolean[];
+  let idx = 0;
+  const workers: Promise<void>[] = [];
+  const next = async () => {
+    while (idx < sample.length) {
+      const i = idx++;
+      const oid = sample[i];
+      try {
+        outFlags[i] = await stub.hasLoose(oid);
+      } catch {
+        outFlags[i] = false;
+      }
+    }
+  };
+
+  for (let i = 0; i < concurrency; i++) workers.push(next());
+  await Promise.all(workers);
+  const out: string[] = [];
+  for (let i = 0; i < sample.length; i++) if (outFlags[i]) out.push(sample[i]);
   const seen = new Set<string>();
   const uniq: string[] = [];
-  for (const o of out) {
+  for (const o of out)
     if (!seen.has(o)) {
       seen.add(o);
       uniq.push(o);
     }
-  }
   return uniq;
 }
 

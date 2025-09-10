@@ -8,3 +8,4 @@ export * from "./logger.ts";
 export * from "./response.ts";
 export * from "./stub.ts";
 export * from "./progress.ts";
+export * from "./heap.ts";

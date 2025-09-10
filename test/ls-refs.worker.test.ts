@@ -1,7 +1,8 @@
 import { it, expect } from "vitest";
-import { SELF, env, runInDurableObject } from "cloudflare:test";
+import { SELF, env } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import { decodePktLines } from "@/git";
+import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 function pktLine(s: string | Uint8Array): Uint8Array {
   const enc = typeof s === "string" ? new TextEncoder().encode(s) : s;
@@ -40,7 +41,7 @@ function buildLsRefsBody(args: string[] = []) {
 
 it("ls-refs: unborn HEAD advertises correctly", async () => {
   const owner = "o";
-  const repo = "r-lsrefs-unborn";
+  const repo = uniqueRepoId("r-lsrefs-unborn");
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
   const body = buildLsRefsBody(["ref-prefix refs/heads/"]);
   const res = await SELF.fetch(url, {
@@ -62,14 +63,14 @@ it("ls-refs: unborn HEAD advertises correctly", async () => {
 
 it("ls-refs: resolved HEAD and refs are listed after seeding", async () => {
   const owner = "o";
-  const repo = "r-lsrefs-resolved";
+  const repo = uniqueRepoId("r-lsrefs-resolved");
   // Seed directly via DO (runInDurableObject)
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
-  const stub = env.REPO_DO.get(id);
-  const { commitOid } = await runInDurableObject(stub, async (instance: RepoDurableObject) => {
-    return instance.seedMinimalRepo();
-  });
+  const { commitOid } = await runDOWithRetry(
+    () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>,
+    async (instance: RepoDurableObject) => instance.seedMinimalRepo()
+  );
 
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
   const body = buildLsRefsBody(["ref-prefix refs/heads/"]);

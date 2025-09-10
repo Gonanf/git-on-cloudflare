@@ -1,5 +1,6 @@
 import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
+import { uniqueRepoId } from "./util/test-helpers.ts";
 import { decodePktLines, pktLine, flushPkt, concatChunks, delimPkt } from "@/git";
 
 async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
@@ -58,7 +59,7 @@ it("fetch works from R2 while unpacking is pending", async () => {
   env.REPO_UNPACK_BACKOFF_MS = "50";
 
   const owner = "o";
-  const repo = "r-fetch-unpack";
+  const repo = uniqueRepoId("r-fetch-unpack");
   const recv = `https://example.com/${owner}/${repo}/git-receive-pack`;
   const fetchUrl = `https://example.com/${owner}/${repo}/git-upload-pack`;
 

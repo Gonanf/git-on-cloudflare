@@ -1,6 +1,7 @@
 import { it, expect } from "vitest";
-import { env, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
+import { env, runDurableObjectAlarm } from "cloudflare:test";
 import { asTypedStorage, RepoStateSchema, packOidsKey } from "@/do/repoState.ts";
+import { runDOWithRetry } from "./util/test-helpers.ts";
 
 function makeRepoId(suffix: string) {
   return `maint/${suffix}-${Math.random().toString(36).slice(2, 8)}`;
@@ -9,12 +10,12 @@ function makeRepoId(suffix: string) {
 it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS (default 3)", async () => {
   const repoId = makeRepoId("packs");
   const id = env.REPO_DO.idFromName(repoId);
-  const stub = env.REPO_DO.get(id);
+  const getStub = () => env.REPO_DO.get(id);
 
   // Determine DO prefix for R2 keys
-  const { prefix } = await runInDurableObject(
-    stub,
-    async (_instance, state: DurableObjectState) => {
+  const { prefix } = await runDOWithRetry(
+    getStub as any,
+    async (_instance: any, state: DurableObjectState) => {
       return { prefix: `do/${state.id.toString()}` };
     }
   );
@@ -29,7 +30,7 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS (default 
   }
 
   // Seed DO storage with packList and lastPackKey, and dummy packOids entries
-  await runInDurableObject(stub, async (_instance, state: DurableObjectState) => {
+  await runDOWithRetry(getStub as any, async (_instance: any, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
     await store.put("packList", keys);
     await store.put("lastPackKey", keys[keys.length - 1]);
@@ -41,10 +42,19 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS (default 
   });
 
   // Schedule the alarm slightly in the future so it's considered pending
-  await runInDurableObject(stub, async (_instance, state: DurableObjectState) => {
+  await runDOWithRetry(getStub as any, async (_instance: any, state: DurableObjectState) => {
     await state.storage.setAlarm(Date.now() + 1_000);
   });
-  const ran = await runDurableObjectAlarm(stub);
+  const ran = await (async () => {
+    try {
+      return await runDurableObjectAlarm(getStub());
+    } catch (e) {
+      const msg = String(e || "");
+      if (msg.includes("invalidating this Durable Object"))
+        return await runDurableObjectAlarm(getStub());
+      throw e;
+    }
+  })();
   expect(ran, "alarm should run").toBe(true);
 
   // Expect only the first 3 packs (newest) to remain in R2
@@ -65,18 +75,16 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS (default 
   }
 
   // Storage assertions
-  await runInDurableObject(stub, async (_instance, state: DurableObjectState) => {
+  await runDOWithRetry(getStub as any, async (_instance: any, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
     const packList = (await store.get("packList")) as string[] | undefined;
     expect(packList, "packList should be updated").toEqual(keep);
     const lastPackKey = (await store.get("lastPackKey")) as string | undefined;
-    expect(lastPackKey, "lastPackKey should be updated").toBe(keep[0]); // Should be the newest (first in list)
-    // Removed packOids entries should be deleted (keys[3] and keys[4] were removed)
+    expect(lastPackKey, "lastPackKey should be updated").toBe(keep[0]);
     const p3 = await store.get(packOidsKey(keys[3]) as any);
     const p4 = await store.get(packOidsKey(keys[4]) as any);
     expect(p3, "packOidsKey(keys[3]) should be deleted").toBeUndefined();
     expect(p4, "packOidsKey(keys[4]) should be deleted").toBeUndefined();
-    // Kept packOids entries should still exist (keys[0], keys[1], keys[2] were kept)
     const p0 = await store.get(packOidsKey(keys[0]) as any);
     const p1 = await store.get(packOidsKey(keys[1]) as any);
     expect(p0, "packOidsKey(keys[0]) should exist").toEqual(["a"]);
