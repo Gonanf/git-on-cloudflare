@@ -31,14 +31,9 @@ export async function verifyAuth(
   const tok = basic && basic.username === owner ? basic.password : undefined;
   if (!tok) return false;
   try {
-    const res = await stub.fetch("https://auth/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ owner, token: tok }),
-    });
-    if (!res.ok) return false;
-    const data = await res.json<any>().catch(() => ({}));
-    return !!data?.ok;
+    const clientIp = req.headers.get("CF-Connecting-IP") || "unknown";
+    const result = await stub.verify(owner, tok, clientIp);
+    return !!result.ok;
   } catch {
     return false;
   }

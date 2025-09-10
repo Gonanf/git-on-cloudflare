@@ -71,9 +71,9 @@ export async function handleFetchV2(
   // produces a valid, non-thin pack.
   if (haves.length === 0) {
     try {
-      const latest = await stub.fetch("https://do/pack-latest", { method: "GET" });
-      if (latest.ok) {
-        const { key, oids } = await latest.json<any>();
+      const meta = await stub.getPackLatest();
+      if (meta) {
+        const { key, oids } = meta;
         if (key && Array.isArray(oids) && wants.every((w: string) => oids.includes(w))) {
           if (signal?.aborted) return new Response("client aborted\n", { status: 499 });
           const assembled = await assemblePackFromR2(env, key, oids, signal);
@@ -93,9 +93,9 @@ export async function handleFetchV2(
 
   // Try to serve from R2 using pack+idx range reads (assemble minimal pack)
   try {
-    const latest = await stub.fetch("https://do/pack-latest", { method: "GET" });
-    if (latest.ok) {
-      const { key, oids } = await latest.json<any>();
+    const meta = await stub.getPackLatest();
+    if (meta) {
+      const { key, oids } = meta;
       if (key && Array.isArray(oids) && needed.every((w: string) => oids.includes(w))) {
         const assembled = await assemblePackFromR2(env, key, needed);
         if (assembled) return respondWithPackfile(assembled, done, ackOids, signal);
@@ -103,25 +103,18 @@ export async function handleFetchV2(
     }
 
     // If latest doesn't cover, try recent packs for a full cover
-    const packsRes = await stub.fetch("https://do/packs", { method: "GET" });
-    if (packsRes.ok) {
-      const { keys } = await packsRes.json<any>();
-      if (Array.isArray(keys)) {
-        for (const k of keys) {
-          const oidsRes = await stub.fetch("https://do/pack-oids?key=" + encodeURIComponent(k), {
-            method: "GET",
-          });
-          if (!oidsRes.ok) continue;
-          const { oids } = await oidsRes.json<any>();
-          if (Array.isArray(oids) && needed.every((w: string) => oids.includes(w))) {
-            const assembled = await assemblePackFromR2(env, k, needed);
-            if (assembled) return respondWithPackfile(assembled, done, ackOids);
-          }
+    const keys = await stub.getPacks();
+    if (Array.isArray(keys)) {
+      for (const k of keys) {
+        const oids = await stub.getPackOids(k);
+        if (Array.isArray(oids) && needed.every((w: string) => oids.includes(w))) {
+          const assembled = await assemblePackFromR2(env, k, needed);
+          if (assembled) return respondWithPackfile(assembled, done, ackOids);
         }
-        // Multi-pack union: try assembling from multiple recent packs
-        const mpAssembled = await assemblePackFromMultiplePacks(env, keys.slice(0, 10), needed);
-        if (mpAssembled) return respondWithPackfile(mpAssembled, done, ackOids);
       }
+      // Multi-pack union: try assembling from multiple recent packs
+      const mpAssembled = await assemblePackFromMultiplePacks(env, keys.slice(0, 10), needed);
+      if (mpAssembled) return respondWithPackfile(mpAssembled, done, ackOids);
     }
   } catch {
     // ignore and fallback to loose objects
@@ -270,8 +263,8 @@ async function findCommonHaves(env: Env, repoId: string, haves: string[]): Promi
   const out: string[] = [];
   const limit = 128;
   for (const oid of haves.slice(0, limit)) {
-    const res = await stub.fetch(`https://do/obj/${oid}`, { method: "GET" });
-    if (res.ok) out.push(oid);
+    const has = await stub.hasLoose(oid);
+    if (has) out.push(oid);
   }
   // De-duplicate while preserving order
   const seen = new Set<string>();

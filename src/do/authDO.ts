@@ -1,3 +1,4 @@
+import { DurableObject } from "cloudflare:workers";
 import { createLogger } from "@/common";
 import { asTypedStorage } from "./repoState";
 import {
@@ -7,11 +8,6 @@ import {
   makeOwnerRateLimitKey,
   makeAdminRateLimitKey,
 } from "./authState";
-function json(data: unknown, status = 200, headers: HeadersInit = {}) {
-  const h = new Headers(headers);
-  if (!h.has("Content-Type")) h.set("Content-Type", "application/json");
-  return new Response(JSON.stringify(data), { status, headers: h });
-}
 
 /**
  * Generates a cryptographically secure random salt
@@ -92,11 +88,12 @@ const RATE_LIMIT = {
  * Durable Object for managing repository authentication and rate limiting
  * Handles token verification, admin operations, and automatic cleanup
  */
-export class AuthDurableObject implements DurableObject {
-  constructor(
-    private state: DurableObjectState,
-    private env: Env
-  ) {}
+export class AuthDurableObject extends DurableObject {
+  declare env: Env;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+  }
 
   /**
    * Alarm handler that cleans up expired rate limit entries
@@ -108,13 +105,13 @@ export class AuthDurableObject implements DurableObject {
     const ONE_HOUR = 60 * 60 * 1000;
     const log = this.logger;
     try {
-      const keys = await this.state.storage.list({ prefix: "ratelimit:" });
+      const keys = await this.ctx.storage.list({ prefix: "ratelimit:" });
       let removed = 0;
       for (const [key, value] of keys) {
         const entry = value as RateLimitEntry;
         if (entry && entry.lastAttempt && now - entry.lastAttempt > ONE_HOUR) {
           try {
-            await this.state.storage.delete(key);
+            await this.ctx.storage.delete(key);
             removed++;
           } catch (e) {
             log.warn("ratelimit:cleanup-failed", { key, error: String(e) });
@@ -128,231 +125,230 @@ export class AuthDurableObject implements DurableObject {
   }
 
   private async getStore(): Promise<AuthUsers> {
-    const store = asTypedStorage<AuthStateSchema>(this.state.storage);
+    const store = asTypedStorage<AuthStateSchema>(this.ctx.storage);
     return (await store.get("users")) ?? {};
   }
   private async putStore(obj: AuthUsers) {
-    const store = asTypedStorage<AuthStateSchema>(this.state.storage);
+    const store = asTypedStorage<AuthStateSchema>(this.ctx.storage);
     await store.put("users", obj);
   }
 
-  private isAdmin(req: Request): boolean {
-    const tok = (req.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "");
-    const admin = this.env.AUTH_ADMIN_TOKEN || "";
-    return admin.length > 0 && tok === admin;
-  }
-
-  async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    const method = request.method.toUpperCase();
+  /**
+   * RPC: Verify an owner's token with rate limiting (owner + client IP)
+   * Mirrors the logic of POST /verify in the fetch() handler.
+   */
+  public async verify(
+    owner: string,
+    token: string,
+    clientIp: string = "unknown"
+  ): Promise<{ ok: boolean; blocked?: boolean; error?: string }> {
     const log = this.logger;
-    log.debug("fetch", { path: url.pathname, method });
+    owner = String(owner || "").trim();
+    token = String(token || "").trim();
+    if (!owner || !token) return { ok: false };
 
-    if (url.pathname === "/verify" && method === "POST") {
-      const body = await request.json<any>().catch(() => ({}));
-      const owner = String(body.owner || "").trim();
-      const token = String(body.token || "").trim();
-      if (!owner || !token) return json({ ok: false }, 200);
+    // Owner/IP rate limit
+    const rateLimitKey = makeOwnerRateLimitKey(owner, clientIp);
+    const now = Date.now();
+    const astore = asTypedStorage<AuthStateSchema>(this.ctx.storage);
+    const rateLimit = (await astore.get(rateLimitKey)) as RateLimitEntry | undefined;
 
-      // Rate limiting check
-      const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
-      const rateLimitKey = makeOwnerRateLimitKey(owner, clientIp);
-      const now = Date.now();
-      const astore = asTypedStorage<AuthStateSchema>(this.state.storage);
-      const rateLimit = await astore.get(rateLimitKey);
+    // Ensure cleanup alarm is scheduled at least hourly
+    const alarmTime = await this.ctx.storage.getAlarm();
+    if (!alarmTime) {
+      await this.ctx.storage.setAlarm(Date.now() + 60 * 60 * 1000);
+    }
 
-      // Schedule cleanup if not already scheduled
-      const alarmTime = await this.state.storage.getAlarm();
-      if (!alarmTime) {
-        // Schedule cleanup in 1 hour
-        await this.state.storage.setAlarm(Date.now() + 60 * 60 * 1000);
+    if (rateLimit) {
+      if (rateLimit.blockedUntil && now < rateLimit.blockedUntil) {
+        log.warn("verify:blocked", { owner, clientIp });
+        return { ok: false, blocked: true, error: "Too many attempts. Please try again later." };
       }
-
-      if (rateLimit) {
-        // Check if blocked
-        if (rateLimit.blockedUntil && now < rateLimit.blockedUntil) {
-          log.warn("verify:blocked", { owner, clientIp });
-          return json({ ok: false, error: "Too many attempts. Please try again later." }, 429);
+      if (now - rateLimit.lastAttempt < RATE_LIMIT.windowMs) {
+        if (rateLimit.attempts >= RATE_LIMIT.maxAttempts) {
+          rateLimit.blockedUntil = now + RATE_LIMIT.blockDurationMs;
+          await astore.put(rateLimitKey, rateLimit);
+          log.warn("verify:block", { owner, clientIp });
+          return { ok: false, blocked: true, error: "Too many attempts. Please try again later." };
         }
-
-        // Check if within rate limit window
-        if (now - rateLimit.lastAttempt < RATE_LIMIT.windowMs) {
-          if (rateLimit.attempts >= RATE_LIMIT.maxAttempts) {
-            // Block the user
-            rateLimit.blockedUntil = now + RATE_LIMIT.blockDurationMs;
-            await astore.put(rateLimitKey, rateLimit);
-            log.warn("verify:block", { owner, clientIp });
-            return json({ ok: false, error: "Too many attempts. Please try again later." }, 429);
-          }
-        } else {
-          // Reset counter if outside window
-          rateLimit.attempts = 0;
-        }
+      } else {
+        rateLimit.attempts = 0;
       }
+    }
 
-      const users = await this.getStore();
-      const list = users[owner] || [];
-      if (list.length === 0) {
-        // Update rate limit on failed attempt
-        await astore.put(rateLimitKey, {
-          attempts: (rateLimit?.attempts || 0) + 1,
-          lastAttempt: now,
-          blockedUntil: rateLimit?.blockedUntil,
-        });
-        log.info("verify:unknown-owner", { owner, clientIp });
-        return json({ ok: false }, 200);
-      }
-
-      // Check against all stored hashes (supports both legacy and new format)
-      for (const storedHash of list) {
-        if (await verifyToken(token, storedHash)) {
-          // Clear rate limit on successful auth
-          await astore.delete(rateLimitKey);
-          log.info("verify:ok", { owner, clientIp });
-          return json({ ok: true }, 200);
-        }
-      }
-
-      // Update rate limit on failed attempt
+    const users = await this.getStore();
+    const list = users[owner] || [];
+    if (list.length === 0) {
       await astore.put(rateLimitKey, {
         attempts: (rateLimit?.attempts || 0) + 1,
         lastAttempt: now,
         blockedUntil: rateLimit?.blockedUntil,
       });
-      log.info("verify:fail", { owner, clientIp });
-      return json({ ok: false }, 200);
+      log.info("verify:unknown-owner", { owner, clientIp });
+      return { ok: false };
     }
 
-    // Admin-only endpoints below
-    if (!this.isAdmin(request)) {
-      // Rate limit admin auth attempts
-      const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
-      const adminRateLimitKey = makeAdminRateLimitKey(clientIp);
-      const now = Date.now();
-      const astore = asTypedStorage<AuthStateSchema>(this.state.storage);
-      const adminRateLimit = await astore.get(adminRateLimitKey);
-      if (adminRateLimit) {
-        if (adminRateLimit.blockedUntil && now < adminRateLimit.blockedUntil) {
-          return new Response("Too many attempts\n", {
-            status: 429,
-            headers: {
-              "Retry-After": String(Math.ceil((adminRateLimit.blockedUntil - now) / 1000)),
-            },
-          });
-        }
-
-        if (now - adminRateLimit.lastAttempt < RATE_LIMIT.windowMs) {
-          if (adminRateLimit.attempts >= RATE_LIMIT.maxAttempts) {
-            adminRateLimit.blockedUntil = now + RATE_LIMIT.blockDurationMs;
-            await astore.put(adminRateLimitKey, adminRateLimit);
-            this.logger.warn("admin:block", { clientIp });
-            return new Response("Too many attempts\n", {
-              status: 429,
-              headers: { "Retry-After": String(RATE_LIMIT.blockDurationMs / 1000) },
-            });
-          }
-        } else {
-          adminRateLimit.attempts = 0;
-        }
+    for (const storedHash of list) {
+      if (await verifyToken(token, storedHash)) {
+        await astore.delete(rateLimitKey);
+        log.info("verify:ok", { owner, clientIp });
+        return { ok: true };
       }
-
-      // Update rate limit on failed admin auth
-      await astore.put(adminRateLimitKey, {
-        attempts: (adminRateLimit?.attempts || 0) + 1,
-        lastAttempt: now,
-        blockedUntil: adminRateLimit?.blockedUntil,
-      });
-
-      this.logger.info("admin:unauthorized", { clientIp, path: url.pathname, method });
-      return new Response("Unauthorized\n", {
-        status: 401,
-        headers: { "WWW-Authenticate": "Bearer" },
-      });
     }
 
-    // Clear admin rate limit on successful auth
-    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
-    const adminRateLimitKey = makeAdminRateLimitKey(clientIp);
-    const astore = asTypedStorage<AuthStateSchema>(this.state.storage);
-    await astore.delete(adminRateLimitKey);
+    await astore.put(rateLimitKey, {
+      attempts: (rateLimit?.attempts || 0) + 1,
+      lastAttempt: now,
+      blockedUntil: rateLimit?.blockedUntil,
+    });
+    log.info("verify:fail", { owner, clientIp });
+    return { ok: false };
+  }
 
-    if (url.pathname === "/users" && method === "GET") {
-      const users = await this.getStore();
-      const data = Object.entries(users).map(([owner, hashes]) => ({ owner, tokens: hashes }));
-      this.logger.debug("users:list", { count: data.length });
-      return json({ users: data });
+  /**
+   * RPC: List users (admin data model exposure; callers must enforce admin)
+   */
+  public async getUsers(): Promise<{ owner: string; tokens: string[] }[]> {
+    const users = await this.getStore();
+    const data = Object.entries(users).map(([owner, hashes]) => ({ owner, tokens: hashes }));
+    this.logger.debug("users:list", { count: data.length });
+    return data;
+  }
+
+  /**
+   * RPC: Add tokens for an owner (hash via PBKDF2). Returns updated count.
+   */
+  public async addTokens(
+    owner: string,
+    tokens: string[]
+  ): Promise<{ ok: true; owner: string; count: number }> {
+    owner = String(owner || "").trim();
+    if (!owner || !Array.isArray(tokens) || tokens.length === 0) {
+      throw new Error("owner and tokens required");
     }
+    const users = await this.getStore();
+    const cur = new Set<string>(users[owner] || []);
+    for (const t of tokens) {
+      const salt = generateSalt();
+      const h = await hashTokenWithPBKDF2(String(t), salt);
+      cur.add(h);
+    }
+    users[owner] = Array.from(cur);
+    await this.putStore(users);
+    this.logger.info("users:added", { owner, count: users[owner].length });
+    return { ok: true as const, owner, count: users[owner].length };
+  }
 
-    if (url.pathname === "/users" && method === "POST") {
-      const body = await request.json<any>().catch(() => ({}));
-      const owner = String(body.owner || "").trim();
-      const token: string | undefined = body.token ? String(body.token) : undefined;
-      const tokens: string[] | undefined = Array.isArray(body.tokens)
-        ? body.tokens.map(String)
-        : undefined;
-      if (!owner || (!token && !tokens)) return json({ error: "owner and token(s) required" }, 400);
-      const users = await this.getStore();
-      const cur = new Set<string>(users[owner] || []);
-      const toAdd: string[] = [];
-      if (token) toAdd.push(token);
-      if (tokens) toAdd.push(...tokens);
-      for (const t of toAdd) {
-        const salt = generateSalt();
-        const h = await hashTokenWithPBKDF2(t, salt);
-        cur.add(h);
-      }
-      users[owner] = Array.from(cur);
+  /**
+   * RPC: Delete all tokens for an owner
+   */
+  public async deleteOwner(owner: string): Promise<{ ok: true }> {
+    owner = String(owner || "").trim();
+    if (!owner) throw new Error("owner required");
+    const users = await this.getStore();
+    if (owner in users) {
+      delete users[owner];
       await this.putStore(users);
-      this.logger.info("users:added", { owner, count: users[owner].length });
-      return json({ ok: true, owner, count: users[owner].length });
+      this.logger.info("users:owner-deleted", { owner });
+    }
+    return { ok: true as const };
+  }
+
+  /**
+   * RPC: Admin authorization with rate limiting.
+   * Returns { ok: true } if provided token matches env.AUTH_ADMIN_TOKEN.
+   * Applies IP-based rate limiting on failures and clearing on success.
+   */
+  public async adminAuthorizeOrRateLimit(
+    providedToken: string,
+    clientIp: string = "unknown"
+  ): Promise<{ ok: boolean; status: number; retryAfter?: number }> {
+    const admin = this.env.AUTH_ADMIN_TOKEN || "";
+    const astore = asTypedStorage<AuthStateSchema>(this.ctx.storage);
+    const now = Date.now();
+    const key = makeAdminRateLimitKey(clientIp);
+    const cur = (await astore.get(key)) as RateLimitEntry | undefined;
+
+    // Schedule cleanup if not already scheduled
+    const alarmTime = await this.ctx.storage.getAlarm();
+    if (!alarmTime) {
+      await this.ctx.storage.setAlarm(Date.now() + 60 * 60 * 1000);
     }
 
-    if (url.pathname === "/users" && method === "DELETE") {
-      const body = await request.json<any>().catch(() => ({}));
-      const owner = String(body.owner || "").trim();
-      const token: string | undefined = body.token ? String(body.token) : undefined;
-      const tokenHash: string | undefined = body.tokenHash ? String(body.tokenHash) : undefined;
-      if (!owner) return json({ error: "owner required" }, 400);
-      const users = await this.getStore();
-      if (!(owner in users)) return json({ ok: true });
-      if (!token && !tokenHash) {
-        // No specific token provided, delete entire owner
-        delete users[owner];
-        await this.putStore(users);
-        this.logger.info("users:owner-deleted", { owner });
-        return json({ ok: true });
-      }
-      if (tokenHash) {
-        // Direct hash removal
-        users[owner] = (users[owner] || []).filter((x) => x !== tokenHash);
-        if (users[owner].length === 0) delete users[owner];
-        await this.putStore(users);
-        this.logger.info("users:tokenhash-deleted", { owner });
-      } else if (token) {
-        // Find and remove matching token (check all stored hashes)
-        const remaining: string[] = [];
-        for (const storedHash of users[owner] || []) {
-          if (!(await verifyToken(token, storedHash))) {
-            remaining.push(storedHash);
-          }
-        }
-        if (remaining.length < (users[owner] || []).length) {
-          users[owner] = remaining;
-          if (users[owner].length === 0) delete users[owner];
-          await this.putStore(users);
-          this.logger.info("users:token-deleted", { owner });
-        }
-      }
-      return json({ ok: true });
+    // Success path: verify token and clear rate limit entry
+    if (admin.length > 0 && providedToken === admin) {
+      await astore.delete(key);
+      return { ok: true, status: 200 };
     }
 
-    return new Response("Not found\n", { status: 404 });
+    // Failure path: apply rate limiting
+    if (cur) {
+      if (cur.blockedUntil && now < cur.blockedUntil) {
+        return {
+          ok: false,
+          status: 429,
+          retryAfter: Math.ceil((cur.blockedUntil - now) / 1000),
+        };
+      }
+      if (now - cur.lastAttempt < RATE_LIMIT.windowMs) {
+        if (cur.attempts >= RATE_LIMIT.maxAttempts) {
+          cur.blockedUntil = now + RATE_LIMIT.blockDurationMs;
+          await astore.put(key, cur);
+          return { ok: false, status: 429, retryAfter: RATE_LIMIT.blockDurationMs / 1000 };
+        }
+      } else {
+        cur.attempts = 0;
+      }
+    }
+
+    // Record failed attempt
+    await astore.put(key, {
+      attempts: (cur?.attempts || 0) + 1,
+      lastAttempt: now,
+      blockedUntil: cur?.blockedUntil,
+    });
+    return { ok: false, status: 401 };
+  }
+
+  /**
+   * RPC: Delete a token by stored hash
+   */
+  public async deleteTokenByHash(owner: string, tokenHash: string): Promise<{ ok: true }> {
+    owner = String(owner || "").trim();
+    if (!owner || !tokenHash) throw new Error("owner and tokenHash required");
+    const users = await this.getStore();
+    users[owner] = (users[owner] || []).filter((x) => x !== tokenHash);
+    if ((users[owner] || []).length === 0) delete users[owner];
+    await this.putStore(users);
+    this.logger.info("users:tokenhash-deleted", { owner });
+    return { ok: true as const };
+  }
+
+  /**
+   * RPC: Delete a token by verifying a provided plaintext token against stored hashes
+   */
+  public async deleteToken(owner: string, token: string): Promise<{ ok: true }> {
+    owner = String(owner || "").trim();
+    token = String(token || "").trim();
+    if (!owner || !token) throw new Error("owner and token required");
+    const users = await this.getStore();
+    const remaining: string[] = [];
+    for (const storedHash of users[owner] || []) {
+      if (!(await verifyToken(token, storedHash))) remaining.push(storedHash);
+    }
+    if (remaining.length < (users[owner] || []).length) {
+      users[owner] = remaining;
+      if (users[owner].length === 0) delete users[owner];
+      await this.putStore(users);
+      this.logger.info("users:token-deleted", { owner });
+    }
+    return { ok: true as const };
   }
 
   private get logger() {
     return createLogger(this.env.LOG_LEVEL, {
       service: "AuthDO",
-      doId: this.state.id.toString(),
+      doId: this.ctx.id.toString(),
     });
   }
 }

@@ -1,6 +1,7 @@
 import { it, expect } from "vitest";
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { computeNeeded } from "@/git";
+import type { RepoDurableObject } from "@/index";
 
 async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
   const cs: any = new (globalThis as any).CompressionStream("deflate");
@@ -25,9 +26,10 @@ async function encodeGitObjectAndDeflate(
   return { oid, zdata };
 }
 
-async function putObj(stub: DurableObjectStub, oid: string, z: Uint8Array) {
-  const res = await stub.fetch(`https://do/obj/${oid}`, { method: "PUT", body: z } as any);
-  if (!res.ok) throw new Error("failed to PUT obj " + oid);
+async function putObj(stub: DurableObjectStub<RepoDurableObject>, oid: string, z: Uint8Array) {
+  await runInDurableObject(stub, async (instance: RepoDurableObject) => {
+    await instance.putLooseObject(oid, z);
+  });
 }
 
 it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", async () => {
@@ -35,7 +37,7 @@ it("computeNeeded prunes by have closure in merge DAG and trims haves > 128", as
   const repo = "r-compute-merge";
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
-  const stub = env.REPO_DO.get(id);
+  const stub: DurableObjectStub<RepoDurableObject> = env.REPO_DO.get(id);
 
   // Build a shared empty tree T
   const treePayload = new Uint8Array(0);

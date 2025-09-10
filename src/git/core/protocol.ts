@@ -39,11 +39,8 @@ export async function capabilityAdvertisement(
   if (repoId) {
     try {
       const stub = getRepoStub(env, repoId);
-      const r = await stub.fetch("https://do/refs", { method: "GET" });
-      if (r && r.ok) {
-        const data = await r.json();
-        if (Array.isArray(data)) refs = data as { name: string; oid: string }[];
-      }
+      const data = await stub.listRefs();
+      if (Array.isArray(data)) refs = data as { name: string; oid: string }[];
     } catch {}
   }
   const caps = [

@@ -49,11 +49,8 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
       // consider present if refs has entries
       let present = false;
       try {
-        const refsRes = await stub.fetch("https://do/refs", { method: "GET" });
-        if (refsRes.ok) {
-          const refs = (await refsRes.json<any>()) as { name: string; oid: string }[];
-          present = Array.isArray(refs) && refs.length > 0;
-        }
+        const refs = await stub.listRefs();
+        present = Array.isArray(refs) && refs.length > 0;
       } catch {}
       if (present) {
         await addRepoToOwner(env, owner, repo);
@@ -78,7 +75,14 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
       });
     }
     const stub = getRepoStub(env, repoKey(owner, repo));
-    return stub.fetch("https://do/refs", { method: "GET" });
+    try {
+      const refs = await stub.listRefs();
+      return new Response(JSON.stringify(refs), {
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch {
+      return new Response("[]", { headers: { "Content-Type": "application/json" } });
+    }
   });
 
   router.put(`/:owner/:repo/admin/refs`, async (request, env: Env) => {
@@ -91,8 +95,13 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     }
     const stub = getRepoStub(env, repoKey(owner, repo));
     const body = await request.text();
-    const ct = request.headers.get("Content-Type") || "application/json";
-    return stub.fetch("https://do/refs", { method: "PUT", body, headers: { "Content-Type": ct } });
+    try {
+      const refs = JSON.parse(body);
+      await stub.setRefs(refs);
+      return new Response("OK\n");
+    } catch {
+      return new Response("Invalid refs payload\n", { status: 400 });
+    }
   });
 
   // Admin head
@@ -105,7 +114,14 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
       });
     }
     const stub = getRepoStub(env, repoKey(owner, repo));
-    return stub.fetch("https://do/head", { method: "GET" });
+    try {
+      const head = await stub.getHead();
+      return new Response(JSON.stringify(head), {
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch {
+      return new Response("Not found\n", { status: 404 });
+    }
   });
 
   router.put(`/:owner/:repo/admin/head`, async (request, env: Env) => {
@@ -118,8 +134,13 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     }
     const stub = getRepoStub(env, repoKey(owner, repo));
     const body = await (request as Request).text();
-    const ct = (request as Request).headers.get("Content-Type") || "application/json";
-    return stub.fetch("https://do/head", { method: "PUT", body, headers: { "Content-Type": ct } });
+    try {
+      const head = JSON.parse(body);
+      await stub.setHead(head);
+      return new Response("OK\n");
+    } catch {
+      return new Response("Invalid head payload\n", { status: 400 });
+    }
   });
 
   // Debug: dump DO state (JSON)
@@ -132,7 +153,14 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
       });
     }
     const stub = getRepoStub(env, repoKey(owner, repo));
-    return stub.fetch("https://do/debug-state", { method: "GET" });
+    try {
+      const state = await stub.debugState();
+      return new Response(JSON.stringify(state), {
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch {
+      return new Response("{}", { headers: { "Content-Type": "application/json" } });
+    }
   });
 
   // Debug: check a specific commit's tree presence
@@ -148,8 +176,16 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     const url = new URL((request as Request).url);
     const commit = url.searchParams.get("commit") || "";
     const stub = getRepoStub(env, repoKey(owner, repo));
-    return stub.fetch(`https://do/debug-check?commit=${encodeURIComponent(commit)}`, {
-      method: "GET",
-    });
+    try {
+      const result = await stub.debugCheckCommit(commit);
+      return new Response(JSON.stringify(result), {
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (e) {
+      return new Response(JSON.stringify({ error: String(e) }), {
+        headers: { "Content-Type": "application/json" },
+        status: 500,
+      });
+    }
   });
 }

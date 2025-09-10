@@ -19,6 +19,7 @@ import {
   getRepoStub,
 } from "@/common/index.ts";
 import * as git from "isomorphic-git";
+import type { RepoDurableObject } from "@/do/index.ts";
 
 /**
  * Fetch HEAD and refs for a repository from its Durable Object.
@@ -41,13 +42,7 @@ export async function getHeadAndRefs(
   repoId: string
 ): Promise<{ head: HeadInfo | undefined; refs: Ref[] }> {
   const stub = getRepoStub(env, repoId);
-  const [headRes, refsRes] = await Promise.all([
-    stub.fetch("https://do/head", { method: "GET" }),
-    stub.fetch("https://do/refs", { method: "GET" }),
-  ]);
-  const head = headRes.ok ? ((await headRes.json()) as HeadInfo) : undefined;
-  const refs = refsRes.ok ? ((await refsRes.json()) as Ref[]) : [];
-  return { head, refs };
+  return stub.getHeadAndRefs();
 }
 
 /**
@@ -251,7 +246,7 @@ export async function listMergeSideFirstParent(
   const logger = createLogger(env.LOG_LEVEL, { service: "listMergeSideFirstParent", repoId });
   const scanLimit = Math.min(400, Math.max(limit * 3, options.scanLimit ?? 120));
   const timeBudgetMs = Math.max(50, Math.min(10000, options.timeBudgetMs ?? 150)); // Allow up to 10s for production
-  const mainlineProbe = Math.min(1000, Math.max(50, options.mainlineProbe ?? 300));
+  const mainlineProbe = Math.min(1000, Math.max(50, options.mainlineProbe ?? 100)); // Reduced default from 300 to 100
   const started = Date.now();
 
   // Load the merge commit
@@ -472,12 +467,12 @@ export async function readPath(
 
       // Check blob size first to avoid loading large files
       const stub = getRepoStub(env, repoId);
-      const headRes = await stub.fetch(`https://do/obj/${ent.oid}`, { method: "HEAD" });
-      if (!headRes.ok) throw new Error("Blob not found");
+      const size = await stub.getObjectSize(ent.oid);
+      if (size === null) throw new Error("Blob not found");
 
-      // Content-Length is the compressed size, but we need decompressed size
+      // Content-Length (from DO/R2) is the compressed size, but we need decompressed size
       // For now, we'll use a conservative estimate (compressed * 10)
-      const compressedSize = parseInt(headRes.headers.get("Content-Length") || "0", 10);
+      const compressedSize = size;
       const MAX_SIZE = 5 * 1024 * 1024;
       const estimatedSize = compressedSize * 10;
 
@@ -588,8 +583,8 @@ export async function readBlobStream(
   oid: string
 ): Promise<Response | null> {
   const stub = getRepoStub(env, repoId);
-  const res = await stub.fetch(`https://do/obj/${oid}`, { method: "GET" });
-  if (!res.ok) return null;
+  const objStream = await stub.getObjectStream(oid);
+  if (!objStream) return null;
 
   // State for header parsing
   let headerParsed = false;
@@ -623,8 +618,8 @@ export async function readBlobStream(
   });
 
   // Decompress and parse in a streaming fashion
-  const decompressed = res
-    .body!.pipeThrough(createInflateStream())
+  const decompressed = objStream
+    .pipeThrough(createInflateStream())
     .pipeThrough({ readable, writable });
 
   return new Response(decompressed, {
@@ -742,7 +737,7 @@ export async function readLooseObjectRaw(
    */
   async function getPackListWithLatest(
     env: Env,
-    stub: DurableObjectStub,
+    stub: DurableObjectStub<RepoDurableObject>,
     doId: string,
     skipKV: boolean
   ): Promise<string[]> {
@@ -755,26 +750,23 @@ export async function readLooseObjectRaw(
     }
     // Ensure latest pack is present (covers recent pushes)
     try {
-      const metaRes = await stub.fetch("https://do/pack-latest", { method: "GET" });
-      if (metaRes.ok) {
-        const meta = (await metaRes.json()) as { key: string } | null;
-        const latest = meta?.key;
-        if (latest && !packList.includes(latest)) packList.unshift(latest);
-      }
+      const meta = await stub.getPackLatest();
+      const latest = meta?.key;
+      if (latest && !packList.includes(latest)) packList.unshift(latest);
     } catch {}
 
     // Fallback to DO /packs if still empty
     if (packList.length === 0) {
-      const packsRes = await stub.fetch("https://do/packs", { method: "GET" });
-      packList = packsRes.ok ? ((await packsRes.json()) as { keys: string[] }).keys || [] : [];
+      try {
+        packList = await stub.getPacks();
+      } catch {
+        packList = [];
+      }
       if (packList.length === 0) {
         try {
-          const metaRes = await stub.fetch("https://do/pack-latest", { method: "GET" });
-          if (metaRes.ok) {
-            const meta = (await metaRes.json()) as { key: string } | null;
-            const latest = meta?.key;
-            if (latest) packList.push(latest);
-          }
+          const meta = await stub.getPackLatest();
+          const latest = meta?.key;
+          if (latest) packList.push(latest);
         } catch {}
       }
     }
@@ -818,10 +810,8 @@ export async function readLooseObjectRaw(
       const contains: Record<string, boolean> = {};
       for (const key of packList) {
         try {
-          const oidsRes = await stub.fetch(`https://do/pack-oids?key=${encodeURIComponent(key)}`);
-          if (!oidsRes.ok) continue;
-          const data = (await oidsRes.json()) as { key: string; oids: string[] };
-          const set = new Set((data.oids || []).map((x) => x.toLowerCase()));
+          const dataOids = await stub.getPackOids(key);
+          const set = new Set((dataOids || []).map((x: string) => x.toLowerCase()));
           const has = set.has(oidLc);
           contains[key] = has;
           if (!chosenPackKey && has) chosenPackKey = key;
@@ -883,9 +873,8 @@ export async function readLooseObjectRaw(
   // Helper function to load from Durable Object state (preferred for recent objects)
   const loadFromState = async (): Promise<{ type: string; payload: Uint8Array } | undefined> => {
     try {
-      const res = await stub.fetch(`https://do/obj/${oidLc}`, { method: "GET" });
-      if (res.ok) {
-        const z = new Uint8Array(await res.arrayBuffer());
+      const z = await stub.getObject(oidLc);
+      if (z) {
         const ds = createInflateStream();
         const stream = new Blob([z]).stream().pipeThrough(ds);
         const raw = new Uint8Array(await new Response(stream).arrayBuffer());
@@ -900,10 +889,11 @@ export async function readLooseObjectRaw(
         logger.info("object-read", { source: "do-state", type });
         return { type, payload };
       } else {
-        logger.debug("do-state-miss", { status: res.status, oid: oidLc });
+        logger.debug("do-state-miss", { oid: oidLc });
       }
-    } catch {}
-    return undefined;
+    } catch {
+      return undefined;
+    }
   };
 
   // Main flow: Use Cache API wrapper if context available, otherwise direct load

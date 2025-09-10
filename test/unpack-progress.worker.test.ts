@@ -109,8 +109,7 @@ it("unpack-progress advances via alarm and finishes", async () => {
   const stub = env.REPO_DO.get(id);
 
   const progress = async () => {
-    const r = await stub.fetch("https://do/unpack-progress", { method: "GET" });
-    return r.json<any>();
+    return stub.getUnpackProgress();
   };
 
   let p = await progress();
@@ -128,12 +127,12 @@ it("unpack-progress advances via alarm and finishes", async () => {
     if (!cur.unpacking) break;
     // ensure forward progress
     expect(cur.processed).not.toBe(lastProcessed);
-    lastProcessed = cur.processed;
+    lastProcessed = cur.processed || 0;
   }
   const done = await progress();
   expect(done.unpacking).toBe(false);
 
   // Object should be readable from DO after unpack completes
-  const head = await stub.fetch(`https://do/obj/${treeOid}`, { method: "HEAD" });
-  expect(head.status).toBe(200);
+  const size = await stub.getObjectSize(treeOid);
+  expect(size).not.toBe(null);
 });

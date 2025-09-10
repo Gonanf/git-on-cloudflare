@@ -14,8 +14,7 @@ it("computeNeeded includes commit+tree when no haves, and prunes when have commi
   const { commitOid, treeOid } = await runInDurableObject(
     stub,
     async (instance: RepoDurableObject) => {
-      const res = await instance.fetch(new Request("https://do/seed", { method: "POST" }));
-      return res.json<any>();
+      return instance.seedMinimalRepo();
     }
   );
 

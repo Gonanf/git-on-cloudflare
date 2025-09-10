@@ -26,3 +26,32 @@ export function notFound(message = "Not found\n", headers: HeadersInit = {}) {
 export function serverError(message = "Internal error\n", headers: HeadersInit = {}) {
   return text(message, 500, headers);
 }
+
+/**
+ * Extract a Bearer token from the Authorization header.
+ * Returns an empty string when missing or malformed.
+ */
+export function getBearerToken(req: Request): string {
+  const h = req.headers.get("Authorization") || "";
+  return h.replace(/^Bearer\s+/i, "");
+}
+
+/**
+ * 401 Unauthorized response with WWW-Authenticate: Bearer
+ */
+export function unauthorizedBearer(headers: HeadersInit = {}): Response {
+  const h = new Headers(headers);
+  h.set("WWW-Authenticate", "Bearer");
+  return text("Unauthorized\n", 401, h);
+}
+
+/**
+ * 429 Too Many Attempts response with optional Retry-After seconds header.
+ */
+export function tooManyAttempts(retryAfterSeconds?: number, headers: HeadersInit = {}): Response {
+  const h = new Headers(headers);
+  if (typeof retryAfterSeconds === "number" && Number.isFinite(retryAfterSeconds)) {
+    h.set("Retry-After", String(Math.ceil(retryAfterSeconds)));
+  }
+  return text("Too many attempts\n", 429, h);
+}

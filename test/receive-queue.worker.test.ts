@@ -89,9 +89,7 @@ it("receive-pack: one-deep queue, third push blocked with 503", async () => {
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
   const stub = env.REPO_DO.get(id);
-  const pre3 = await (
-    await stub.fetch("https://do/unpack-progress", { method: "GET" })
-  ).json<any>();
+  const pre3 = await stub.getUnpackProgress();
   expect(pre3.unpacking).toBe(true);
   expect(Number(pre3.queuedCount || 0)).toBe(1);
 
@@ -117,8 +115,7 @@ it("receive-pack: one-deep queue, third push blocked with 503", async () => {
   // Drive until done
 
   const progress = async () => {
-    const r = await stub.fetch("https://do/unpack-progress", { method: "GET" });
-    return r.json<any>();
+    return stub.getUnpackProgress();
   };
 
   let guard = 300;

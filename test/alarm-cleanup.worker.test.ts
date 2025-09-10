@@ -1,5 +1,6 @@
 import { it, expect } from "vitest";
 import { env, runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
+import type { RepoDurableObject } from "@/index";
 
 function makeRepoId(suffix: string) {
   return `alarm/${suffix}-${Math.random().toString(36).slice(2, 8)}`;
@@ -8,7 +9,7 @@ function makeRepoId(suffix: string) {
 it("alarm: deletes empty repo storage and R2 objects when idle", async () => {
   const repoId = makeRepoId("empty");
   const id = env.REPO_DO.idFromName(repoId);
-  const stub = env.REPO_DO.get(id);
+  const stub: DurableObjectStub<RepoDurableObject> = env.REPO_DO.get(id);
 
   // Discover prefix from the instance and prepare state as empty but with stale access
   const { prefix } = await runInDurableObject(
@@ -51,11 +52,11 @@ it("alarm: deletes empty repo storage and R2 objects when idle", async () => {
 it("alarm: does not delete a non-empty repo", async () => {
   const repoId = makeRepoId("nonempty");
   const id = env.REPO_DO.idFromName(repoId);
-  const stub = env.REPO_DO.get(id);
+  const stub: DurableObjectStub<RepoDurableObject> = env.REPO_DO.get(id);
 
   // Seed the repo to create refs/head and objects
-  await runInDurableObject(stub, async (instance) => {
-    await instance.fetch(new Request("https://do/seed", { method: "POST" }));
+  await runInDurableObject(stub, async (instance: RepoDurableObject) => {
+    await instance.seedMinimalRepo();
   });
 
   // Retrieve prefix

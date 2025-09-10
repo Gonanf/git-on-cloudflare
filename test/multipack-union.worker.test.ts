@@ -38,12 +38,12 @@ async function inflateZlib(z: Uint8Array): Promise<Uint8Array> {
 }
 
 async function readLoose(
-  stub: DurableObjectStub,
+  stub: DurableObjectStub<RepoDurableObject>,
   oid: string
 ): Promise<{ type: string; payload: Uint8Array }> {
-  const res = await stub.fetch(`https://do/obj/${oid}`, { method: "GET" });
-  if (!res.ok) throw new Error("missing loose " + oid);
-  const z = new Uint8Array(await res.arrayBuffer());
+  const obj = await stub.getObject(oid);
+  if (!obj) throw new Error("missing loose " + oid);
+  const z = new Uint8Array(obj);
   const raw = await inflateZlib(z);
   // parse header: "type size\0"
   let p = 0;
@@ -128,8 +128,7 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
   const { commitOid, treeOid } = await runInDurableObject(
     stub,
     async (instance: RepoDurableObject) => {
-      const res = await instance.fetch(new Request("https://do/seed", { method: "POST" }));
-      return res.json<any>();
+      return instance.seedMinimalRepo();
     }
   );
 

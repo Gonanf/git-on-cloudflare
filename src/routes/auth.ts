@@ -1,6 +1,6 @@
 import { AutoRouter } from "itty-router";
 import { renderViewStream, renderPage } from "@/web";
-import { getAuthStub } from "@/common";
+import { getAuthStub, getBearerToken, unauthorizedBearer, tooManyAttempts, json } from "@/common";
 
 export function registerAuthRoutes(router: ReturnType<typeof AutoRouter>) {
   // Auth UI page
@@ -20,54 +20,85 @@ export function registerAuthRoutes(router: ReturnType<typeof AutoRouter>) {
     }
   });
 
-  // Trailing slash alias
-  router.get(`/auth/`, async (request, env: Env) => {
-    try {
-      const stream = await renderViewStream(env, "auth", {});
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid-stream",
-        },
-      });
-    } catch {
-      const body = `<h1>Auth</h1><p>Auth page asset missing.</p>`;
-      return renderPage(env, request, "Auth · git-on-cloudflare", body);
-    }
-  });
-
   // List users
   router.get(`/auth/api/users`, async (request, env: Env) => {
     const stub = getAuthStub(env);
     if (!stub) return new Response("Not configured\n", { status: 501 });
-    return stub.fetch("https://auth/users", {
-      method: "GET",
-      headers: { Authorization: request.headers.get("Authorization") || "" },
-    });
+    const provided = getBearerToken(request);
+    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+    const auth = await stub.adminAuthorizeOrRateLimit(provided, clientIp);
+    if (!auth.ok) {
+      if (auth.status === 401) return unauthorizedBearer();
+      if (auth.status === 429) return tooManyAttempts(auth.retryAfter);
+      return unauthorizedBearer();
+    }
+    try {
+      const users = await stub.getUsers();
+      return json({ users });
+    } catch {
+      return json({ users: [] });
+    }
   });
 
   // Create user
   router.post(`/auth/api/users`, async (request, env: Env) => {
     const stub = getAuthStub(env);
     if (!stub) return new Response("Not configured\n", { status: 501 });
-    const body = await request.text();
-    const h = {
-      "Content-Type": "application/json",
-      Authorization: request.headers.get("Authorization") || "",
-    };
-    return stub.fetch("https://auth/users", { method: "POST", body, headers: h });
+    const provided = getBearerToken(request);
+    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+    const auth = await stub.adminAuthorizeOrRateLimit(provided, clientIp);
+    if (!auth.ok) {
+      if (auth.status === 401) return unauthorizedBearer();
+      if (auth.status === 429) return tooManyAttempts(auth.retryAfter);
+      return unauthorizedBearer();
+    }
+    const input = await request.json<any>().catch(() => ({}));
+    const owner = String(input.owner || "").trim();
+    const token: string | undefined = input.token ? String(input.token) : undefined;
+    const tokens: string[] | undefined = Array.isArray(input.tokens)
+      ? input.tokens.map(String)
+      : undefined;
+    if (!owner || (!token && !tokens)) {
+      return json({ error: "owner and token(s) required" }, 400);
+    }
+    const toAdd: string[] = [];
+    if (token) toAdd.push(token);
+    if (tokens) toAdd.push(...tokens);
+    const res = await stub.addTokens(owner, toAdd);
+    return json(res);
   });
 
   // Delete user
   router.delete(`/auth/api/users`, async (request, env: Env) => {
     const stub = getAuthStub(env);
     if (!stub) return new Response("Not configured\n", { status: 501 });
-    const body = await request.text();
-    const h = {
-      "Content-Type": "application/json",
-      Authorization: request.headers.get("Authorization") || "",
-    };
-    return stub.fetch("https://auth/users", { method: "DELETE", body, headers: h });
+    const provided = getBearerToken(request);
+    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+    const auth = await stub.adminAuthorizeOrRateLimit(provided, clientIp);
+    if (!auth.ok) {
+      if (auth.status === 401) return unauthorizedBearer();
+      if (auth.status === 429) return tooManyAttempts(auth.retryAfter);
+      return unauthorizedBearer();
+    }
+    const input = await request.json<any>().catch(() => ({}));
+    const owner = String(input.owner || "").trim();
+    const token: string | undefined = input.token ? String(input.token) : undefined;
+    const tokenHash: string | undefined = input.tokenHash ? String(input.tokenHash) : undefined;
+    if (!owner) {
+      return json({ error: "owner required" }, 400);
+    }
+    if (!token && !tokenHash) {
+      await stub.deleteOwner(owner);
+      return json({ ok: true });
+    }
+    if (tokenHash) {
+      await stub.deleteTokenByHash(owner, tokenHash);
+      return json({ ok: true });
+    }
+    if (token) {
+      await stub.deleteToken(owner, token);
+      return json({ ok: true });
+    }
+    return json({ ok: true });
   });
 }

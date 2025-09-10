@@ -99,7 +99,7 @@ TTLs and gating (defined in `src/cache/kv-pack-cache.ts`):
 Writes are conservative to avoid staleness during pushes/unpacking:
 
 1. Skip writes whenever `shouldSkipKVCache()` indicates a recent push or active unpack (based on KV markers)
-2. Additionally, the Worker consults DO `/unpack-progress` before writing, to avoid relying solely on KV's eventual consistency
+2. Additionally, the Worker consults the DO RPC `getUnpackProgress()` before writing, to avoid relying solely on KV's eventual consistency
 
 Reads treat KV as a performance hint only. If a hint is stale (e.g., a pack has been pruned), the R2 fetch will fail and the system falls back to the DO path without affecting correctness.
 

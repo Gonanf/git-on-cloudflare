@@ -3,9 +3,12 @@
  * Used with createMemPackFs to enable thin pack resolution
  */
 
-import type { TypedStorage } from "@/do/repoState.ts";
-import type { RepoStateSchema } from "@/do/repoState.ts";
-import { objKey } from "@/do/repoState.ts";
+import {
+  type RepoDurableObject,
+  type TypedStorage,
+  type RepoStateSchema,
+  objKey,
+} from "@/do/index.ts";
 import { r2LooseKey } from "@/keys.ts";
 
 /**
@@ -45,14 +48,12 @@ export function createLooseLoader(
  * @returns Loader function that returns compressed object bytes
  */
 export function createStubLooseLoader(
-  stub: DurableObjectStub
+  stub: DurableObjectStub<RepoDurableObject>
 ): (oid: string) => Promise<Uint8Array | undefined> {
   return async (oid: string): Promise<Uint8Array | undefined> => {
     try {
-      const res = await stub.fetch(`https://do/obj/${oid}`, { method: "GET" });
-      if (res.ok) {
-        return new Uint8Array(await res.arrayBuffer());
-      }
+      const obj = await stub.getObject(oid);
+      if (obj) return obj instanceof Uint8Array ? obj : new Uint8Array(obj);
     } catch {}
     return undefined;
   };

@@ -5,8 +5,8 @@ This document describes the primary data flows of the server: pushing (receive-p
 ## Push (git-receive-pack)
 
 1. Client sends `POST /:owner/:repo/git-receive-pack` (Smart HTTP v0 style body)
-2. Worker preflights `GET https://do/unpack-progress` on the repo DO. If an unpack is active and a next pack is already queued, the Worker returns `503 Service Unavailable` with `Retry-After: 10` without uploading the pack body.
-3. Otherwise, Worker forwards the raw body to the repository DO: `POST https://do/receive`
+2. Worker preflights the DO via RPC: `getUnpackProgress()`. If an unpack is active and a next pack is already queued, the Worker returns `503 Service Unavailable` with `Retry-After: 10` without uploading the pack body.
+3. Otherwise, Worker forwards the raw body to the repository DO internal endpoint: `POST https://do/receive`
 4. DO `receivePack()`:
    - Parses pkt-line commands and the packfile payload
    - Writes the `.pack` to R2 under `do/<id>/objects/pack/pack-<ts>.pack`
@@ -27,7 +27,7 @@ The DO also records metadata to help fetch:
 
 1. Client sends capability advertisement request: `GET /:owner/:repo/info/refs?service=git-upload-pack`
 2. For `POST /:owner/:repo/git-upload-pack` with a v2 body:
-   - `ls-refs` command: reads DO `/head` and `/refs` and responds with HEAD + refs
+   - `ls-refs` command: reads the DO via RPC (`getHead()` and `listRefs()`) and responds with HEAD + refs
    - `fetch` command:
      - Parses wants/haves and computes a minimal closure of needed oids
      - Tries to assemble a minimal pack from R2 using `.idx` range reads
@@ -40,13 +40,13 @@ The DO also records metadata to help fetch:
 ## Web UI blob views
 
 - `GET /:owner/:repo/blob?ref=...&path=...` (preview)
-  - Resolves path to an oid via DO reads
-  - Uses `HEAD` against DO `/obj/<oid>` to get size (no body)
+  - Resolves path to an OID via DO RPC reads
+  - Uses a DO RPC (`getObjectSize()`) which performs an R2 `HEAD` to get size without transferring data
   - If the file is "too large" (configurable threshold), shows a friendly message and links to raw
   - If not too large, fetches the object and renders text (with simple binary detection)
 
 - `GET /:owner/:repo/raw?oid=...&name=...` (raw)
-  - Streams the object by piping the compressed DO response through a decompression stream
+  - Streams the object via DO RPC (`getObjectStream()`), piping through a decompression stream and stripping the Git header on the fly
   - Uses `Content-Disposition: inline` by default (add `&download=1` to force attachment)
   - Uses `text/plain; charset=utf-8` for safety (prevents HTML/JS execution)
 

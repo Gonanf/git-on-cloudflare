@@ -15,15 +15,8 @@ it("/unpack-progress reports queued-only state and getUnpackProgress returns it"
     await store.put("lastAccessMs", Date.now() as any);
   });
 
-  // Call DO endpoint directly
-  const res = await stub.fetch("https://do/unpack-progress", { method: "GET" });
-  expect(res.status).toBe(200);
-  const json = await res.json<any>();
-  expect(json.unpacking).toBe(false);
-  expect(Number(json.queuedCount || 0)).toBe(1);
-
-  // Verify helper returns non-null when queued-only
-  const progress = await getUnpackProgress(env as any, repoId);
+  // Verify returns non-null when queued-only
+  const progress = await getUnpackProgress(env, repoId);
   expect(progress).not.toBeNull();
   expect(progress?.queuedCount).toBe(1);
 });

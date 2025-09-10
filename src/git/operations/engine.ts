@@ -29,24 +29,21 @@ export class JsRepoEngine implements RepoEngine {
 
   async listRefs(): Promise<Ref[]> {
     const stub = getRepoStub(this.env, this.repoId);
-    const res = await stub.fetch("https://do/refs", { method: "GET" });
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (Array.isArray(data)) return data as Ref[];
-    if (data && typeof data === "object" && "name" in data && "oid" in data) {
-      return [data as Ref];
+    try {
+      const refs = await stub.listRefs();
+      return Array.isArray(refs) ? (refs as Ref[]) : [];
+    } catch {
+      return [];
     }
-    return [];
   }
 
   async getHead(): Promise<HeadInfo | undefined> {
     const stub = getRepoStub(this.env, this.repoId);
-    const res = await stub.fetch("https://do/head", { method: "GET" });
-    if (!res.ok) return undefined;
-    const data = await res.json();
-    if (data && typeof data === "object" && "target" in data) {
-      return data as HeadInfo;
+    try {
+      const head = await stub.getHead();
+      return head as HeadInfo;
+    } catch {
+      return undefined;
     }
-    return undefined;
   }
 }

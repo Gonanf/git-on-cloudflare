@@ -85,19 +85,16 @@ async function handleReceivePackPOST(env: Env, repoId: string, request: Request)
   // Preflight: if the DO is currently unpacking and a one-deep queue is already occupied,
   // return 503 early so clients can retry without uploading the whole pack.
   try {
-    const p = await stub.fetch("https://do/unpack-progress", { method: "GET" });
-    if (p.ok) {
-      const j = (await p.json()) as { unpacking?: boolean; queuedCount?: number };
-      const queued = Number(j?.queuedCount || 0);
-      if (j?.unpacking === true && queued >= 1) {
-        return new Response("Repository is busy unpacking; please retry shortly.\n", {
-          status: 503,
-          headers: {
-            "Retry-After": "10",
-            "Content-Type": "text/plain; charset=utf-8",
-          },
-        });
-      }
+    const j = await stub.getUnpackProgress();
+    const queued = j.queuedCount || 0;
+    if (j.unpacking === true && queued >= 1) {
+      return new Response("Repository is busy unpacking; please retry shortly.\n", {
+        status: 503,
+        headers: {
+          "Retry-After": "10",
+          "Content-Type": "text/plain; charset=utf-8",
+        },
+      });
     }
   } catch {}
   const ct = request.headers.get("Content-Type") || "application/x-git-receive-pack-request";

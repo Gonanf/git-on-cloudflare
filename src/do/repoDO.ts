@@ -1,3 +1,4 @@
+import { DurableObject } from "cloudflare:workers";
 import {
   asTypedStorage,
   RepoStateSchema,
@@ -20,7 +21,7 @@ import {
   unpackOidsChunkFromPackBytes,
   receivePack,
   parseCommitText,
-} from "@/git";
+} from "@/git/index.ts";
 import {
   json,
   text,
@@ -28,8 +29,8 @@ import {
   createLogger,
   createInflateStream,
   UnpackProgress,
-} from "@/common";
-import { setUnpackStatus } from "@/cache";
+} from "@/common/index.ts";
+import { setUnpackStatus } from "@/cache/index.ts";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -40,19 +41,16 @@ import { setUnpackStatus } from "@/cache";
  * - Caches loose objects (zlib-compressed) in DO storage
  * - Mirrors loose objects to R2 under `do/<id>/objects/loose/<oid>` for cheap reads
  * - Writes received packfiles to R2 under `do/<id>/objects/pack/*.pack` (and .idx)
- * - Exposes small internal endpoints consumed by the worker/router and tests:
- *   - `GET /refs`, `PUT /refs` — list/update refs
- *   - `GET /head`, `PUT /head` — get/update HEAD
- *   - `GET|HEAD /obj/<oid>` — fetch loose object (R2 first, fallback DO)
- *   - `PUT /obj/<oid>` — put loose object (write DO + mirror to R2)
- *   - `GET /pack-latest`, `GET /packs`, `GET /pack-oids?key=...` — metadata for pack assembly
+ * - Exposes focused internal HTTP endpoints:
  *   - `POST /receive` — receive-pack implementation (delegates to do/receivePack.ts)
- *   - `GET /debug-state` — diagnostic state dump (refs, head, packs, sample loose)
- *   - `GET /debug-check?commit=<oid>` — check commit/tree presence across storage and packs
+ *   - `POST /reindex` — reindex latest pack (diagnostic)
+ * - All other operations are provided as typed RPC methods on the class.
  *
- * Read Path
- * - Loose object reads hit `GET /obj/<oid>`.
- * - The handler prefers R2 (range-friendly and cheap) and falls back to DO storage if missing.
+ * Read Path (RPC)
+ * - Loose object reads are exposed via RPC methods such as `getObjectStream()` and `getObject()`.
+ * - Reads prefer R2 (range-friendly and cheap) and fall back to DO storage if missing.
+ * - There is no public HTTP endpoint for object reads; this reduces the attack surface and
+ *   keeps all internal state access typed and testable.
  *
  * Write Path
  * - Loose object writes: DO storage first, then mirror to R2 via `r2LooseKey()`.
@@ -68,11 +66,12 @@ import { setUnpackStatus } from "@/cache";
  *   3) Pack maintenance: Periodically prune old pack files in R2 and their metadata in DO.
  * - Listing/sweeping uses helpers from `keys.ts` to avoid path mismatches.
  */
-export class RepoDurableObject implements DurableObject {
-  constructor(
-    private state: DurableObjectState,
-    private env: Env
-  ) {}
+export class RepoDurableObject extends DurableObject {
+  declare env: Env;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+  }
 
   // Thin request router: delegates to focused handlers below.
   // Keep this mapping explicit and small so behavior is easy to audit.
@@ -83,126 +82,285 @@ export class RepoDurableObject implements DurableObject {
     } catch {}
     const url = new URL(request.url);
     this.logger.debug("fetch", { path: url.pathname, method: request.method });
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
 
-    // Admin: seed a tiny repo (empty tree + 1 commit).
-    // Used by tests to create a minimal, valid repository state quickly.
-    if (url.pathname === "/seed" && request.method === "POST") {
-      // Build empty tree object (content is empty)
-      const treeContent = new Uint8Array(0);
-      const { oid: treeOid, zdata: treeZ } = await encodeGitObjectAndDeflate("tree", treeContent);
-
-      // Build a simple commit pointing to empty tree
-      const author = `You <you@example.com> 0 +0000`;
-      const committer = author;
-      const msg = "initial\n";
-      const commitPayload =
-        `tree ${treeOid}\n` + `author ${author}\n` + `committer ${committer}\n` + `\n${msg}`;
-      const { oid: commitOid, zdata: commitZ } = await encodeGitObjectAndDeflate(
-        "commit",
-        new TextEncoder().encode(commitPayload)
-      );
-
-      // Store objects and update refs
-      await store.put(objKey(treeOid), treeZ);
-      await store.put(objKey(commitOid), commitZ);
-      await store.put("refs", [{ name: "refs/heads/main", oid: commitOid }]);
-      await store.put("head", { target: "refs/heads/main" });
-
-      return json({ treeOid, commitOid });
-    }
-
-    // Refs storage (JSON array of { name, oid })
-    if (url.pathname === "/refs" && request.method === "GET") {
-      return this.handleRefsGet();
-    }
-
-    if (url.pathname === "/refs" && request.method === "PUT") {
-      return this.handleRefsPut(request);
-    }
-
-    // HEAD storage (JSON object { target, oid?, unborn? })
-    if (url.pathname === "/head" && request.method === "GET") {
-      return this.handleHeadGet();
-    }
-
-    if (url.pathname === "/head" && request.method === "PUT") {
-      return this.handleHeadPut(request);
-    }
-
-    // Loose object storage (zlib-compressed) endpoints
-    if (
-      url.pathname.startsWith("/obj/") &&
-      (request.method === "GET" || request.method === "HEAD")
-    ) {
-      const oid = url.pathname.slice("/obj/".length);
-      return this.handleObjGet(oid, request.method);
-    }
-
-    if (url.pathname.startsWith("/obj/") && request.method === "PUT") {
-      const oid = url.pathname.slice("/obj/".length);
-      return this.handleObjPut(oid, request);
-    }
-
-    // Return latest pack key (if any)
-    if (url.pathname === "/pack-latest" && request.method === "GET") {
-      return this.handlePackLatestGet();
-    }
-
-    // List recent pack keys (maintained during unpack)
-    if (url.pathname === "/packs" && request.method === "GET") {
-      return this.handlePacksGet();
-    }
-
-    // Get oids for a specific pack key (recorded at index time)
-    if (url.pathname === "/pack-oids" && request.method === "GET") {
-      return this.handlePackOidsGet(url);
-    }
-
-    // Get unpacking progress
-    if (url.pathname === "/unpack-progress" && request.method === "GET") {
-      const work = await store.get("unpackWork");
-      const nextKey = await store.get("unpackNext");
-      if (!work) return json({ unpacking: false, queuedCount: nextKey ? 1 : 0 });
-      return json({
-        unpacking: true,
-        processed: work.processedCount,
-        total: work.oids.length,
-        percent: Math.round((work.processedCount / work.oids.length) * 100),
-        currentPackKey: work.packKey,
-        queuedCount: nextKey ? 1 : 0,
-      } as UnpackProgress);
-    }
-
-    // Debug: dump durable object state
-    if (url.pathname === "/debug-state" && request.method === "GET") {
-      return this.handleDebugState();
-    }
-
-    // Debug: check a specific commit/tree presence
-    if (url.pathname === "/debug-check" && request.method === "GET") {
-      return this.handleDebugCheck(url);
-    }
-
-    // Batched commits listing (walk first-parent chain)
-    // GET /commits?start=<oid>&ref=<ref>&max=<n>
-    // Either provide a 40-hex `start` OID or a ref/branch/tag via `ref`.
-    if (url.pathname === "/commits" && request.method === "GET") {
-      return this.handleCommitsGet(url);
-    }
-
-    // Admin: reindex the latest pack from R2 into loose objects
+    // Dev: reindex the latest pack from R2 into loose objects
+    // Note: kept as an HTTP endpoint for convenience during development and
+    // manual debugging. Production flows should rely on background unpack
+    // work scheduled via receive-pack and the DO alarm loop.
     if (url.pathname === "/reindex" && request.method === "POST") {
       return this.handleReindexPost();
     }
 
     // Receive-pack: parse update commands section and packfile, store pack to R2,
-    // update refs atomically if valid, and respond with report-status
+    // update refs atomically if valid, and respond with report-status. This remains
+    // on HTTP (instead of RPC) to preserve streaming semantics end-to-end without
+    // buffering the pack in memory.
     if (url.pathname === "/receive" && request.method === "POST") {
       return this.handleReceive(request);
     }
 
     return text("Not found\n", 404);
+  }
+
+  public async listRefs(): Promise<{ name: string; oid: string }[]> {
+    await this.ensureAccessAndAlarm();
+    return await this.getRefs();
+  }
+
+  public async setRefs(refs: { name: string; oid: string }[]): Promise<void> {
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    await store.put("refs", refs);
+  }
+
+  public async getHead(): Promise<Head> {
+    await this.ensureAccessAndAlarm();
+    return await this.resolveHead();
+  }
+
+  public async setHead(head: Head): Promise<void> {
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    await store.put("head", head);
+  }
+
+  public async getHeadAndRefs(): Promise<{ head: Head; refs: { name: string; oid: string }[] }> {
+    await this.ensureAccessAndAlarm();
+    const [head, refs] = await Promise.all([this.resolveHead(), this.getRefs()]);
+    return { head, refs };
+  }
+
+  public async getObjectStream(oid: string): Promise<ReadableStream | null> {
+    await this.ensureAccessAndAlarm();
+    if (!this.isValidOid(oid)) return null;
+    // Try R2 first
+    try {
+      const obj = await this.env.REPO_BUCKET.get(r2LooseKey(this.prefix(), oid));
+      if (obj) return obj.body;
+    } catch {}
+    // Fallback to DO storage
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const data = await store.get(objKey(oid));
+    if (!data) return null;
+    // IMPORTANT: This stream contains the Git object in its zlib-compressed form
+    // including the Git header. Callers that want the raw payload should pipe
+    // through `createInflateStream()` and strip the header ("<type> <len>\0").
+    return new ReadableStream({
+      start(controller) {
+        controller.enqueue(data);
+        controller.close();
+      },
+    });
+  }
+
+  public async getObject(oid: string): Promise<ArrayBuffer | Uint8Array | null> {
+    await this.ensureAccessAndAlarm();
+    if (!this.isValidOid(oid)) return null;
+    // Try R2 first
+    try {
+      const obj = await this.env.REPO_BUCKET.get(r2LooseKey(this.prefix(), oid));
+      if (obj) return new Uint8Array(await obj.arrayBuffer());
+    } catch {}
+    // Fallback to DO storage
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const data = await store.get(objKey(oid));
+    return data || null;
+  }
+
+  public async hasLoose(oid: string): Promise<boolean> {
+    await this.ensureAccessAndAlarm();
+    if (!this.isValidOid(oid)) return false;
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const data = await store.get(objKey(oid));
+    if (data) return true;
+    try {
+      const head = await this.env.REPO_BUCKET.head(r2LooseKey(this.prefix(), oid));
+      return !!head;
+    } catch {}
+    return false;
+  }
+
+  public async getPackLatest(): Promise<{ key: string; oids: string[] } | null> {
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const key = await store.get("lastPackKey");
+    if (!key) return null;
+    const oids = ((await store.get("lastPackOids")) || []).slice(0, 10000);
+    return { key, oids };
+  }
+
+  public async getPacks(): Promise<string[]> {
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const list = ((await store.get("packList")) || []).slice(0, 20);
+    return list;
+  }
+
+  public async getPackOids(key: string): Promise<string[]> {
+    await this.ensureAccessAndAlarm();
+    if (!key) return [];
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const oids = (await store.get(packOidsKey(key))) || [];
+    return oids;
+  }
+
+  public async getUnpackProgress(): Promise<UnpackProgress> {
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const work = await store.get("unpackWork");
+    const nextKey = await store.get("unpackNext");
+    if (!work) return { unpacking: false, queuedCount: nextKey ? 1 : 0 } as UnpackProgress;
+    return {
+      unpacking: true,
+      processed: work.processedCount,
+      total: work.oids.length,
+      percent: Math.round((work.processedCount / work.oids.length) * 100),
+      currentPackKey: work.packKey,
+      queuedCount: nextKey ? 1 : 0,
+    } as UnpackProgress;
+  }
+
+  public async debugState(): Promise<{
+    meta: { doId: string; prefix: string };
+    head?: Head;
+    refsCount: number;
+    refs: { name: string; oid: string }[];
+    lastPackKey: string | null;
+    lastPackOidsCount: number;
+    packListCount: number;
+    packList: string[];
+    unpackWork: UnpackWork | null;
+    unpackNext: string | null;
+    looseSample: string[];
+  }> {
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const refs = (await store.get("refs")) ?? [];
+    const head = await store.get("head");
+    const lastPackKey = await store.get("lastPackKey");
+    const lastPackOids = (await store.get("lastPackOids")) ?? [];
+    const packList = (await store.get("packList")) ?? [];
+    const unpackWork = await store.get("unpackWork");
+    const unpackNext = await store.get("unpackNext");
+
+    const looseSample: string[] = [];
+    try {
+      const it = await this.ctx.storage.list({ prefix: "obj:", limit: 10 });
+      for (const k of it.keys()) looseSample.push(String(k).slice(4));
+    } catch {}
+
+    return {
+      meta: { doId: this.ctx.id.toString(), prefix: this.prefix() },
+      head,
+      refsCount: refs.length,
+      refs: refs.slice(0, 20),
+      lastPackKey: lastPackKey || null,
+      lastPackOidsCount: lastPackOids.length,
+      packListCount: packList.length,
+      packList,
+      unpackWork: unpackWork || null,
+      unpackNext: unpackNext || null,
+      looseSample,
+    };
+  }
+
+  public async debugCheckCommit(commit: string): Promise<{
+    commit: { oid: string; parents: string[]; tree?: string };
+    presence: { hasLooseCommit: boolean; hasLooseTree: boolean; hasR2LooseTree: boolean };
+    membership: Record<string, { hasCommit: boolean; hasTree: boolean }>;
+  }> {
+    await this.ensureAccessAndAlarm();
+    const q = (commit || "").toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(q)) {
+      throw new Error("Invalid commit");
+    }
+
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const packList = (await store.get("packList")) ?? [];
+    const membership: Record<string, { hasCommit: boolean; hasTree: boolean }> = {};
+    for (const key of packList) {
+      try {
+        const oids = (await store.get(packOidsKey(key))) ?? [];
+        const set = new Set(oids.map((x) => x.toLowerCase()));
+        membership[key] = { hasCommit: set.has(q), hasTree: false };
+      } catch {}
+    }
+
+    let tree: string | undefined = undefined;
+    let parents: string[] = [];
+    try {
+      const info = await this.readCommitFromStore(q);
+      if (info) {
+        tree = info.tree.toLowerCase();
+        parents = info.parents;
+      }
+    } catch {}
+
+    const hasLooseCommit = !!(await this.ctx.storage.get(objKey(q)));
+    let hasLooseTree = false;
+    let hasR2LooseTree = false;
+    if (tree) {
+      hasLooseTree = !!(await this.ctx.storage.get(objKey(tree)));
+      try {
+        const head = await this.env.REPO_BUCKET.head(r2LooseKey(this.prefix(), tree));
+        hasR2LooseTree = !!head;
+      } catch {}
+      for (const key of Object.keys(membership)) {
+        try {
+          const oids = (await store.get(packOidsKey(key))) ?? [];
+          const set = new Set(oids.map((x) => x.toLowerCase()));
+          membership[key].hasTree = !!tree && set.has(tree);
+        } catch {}
+      }
+    }
+
+    return {
+      commit: { oid: q, parents, tree },
+      presence: { hasLooseCommit, hasLooseTree, hasR2LooseTree },
+      membership,
+    };
+  }
+
+  /**
+   * RPC: Seed a minimal repository with an empty tree and a single commit pointing to it.
+   * Used by tests to initialize a valid repo state without using HTTP fetch routes.
+   */
+  public async seedMinimalRepo(): Promise<{ commitOid: string; treeOid: string }> {
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    // Build empty tree object (content is empty)
+    const treeContent = new Uint8Array(0);
+    const { oid: treeOid, zdata: treeZ } = await encodeGitObjectAndDeflate("tree", treeContent);
+
+    // Build a simple commit pointing to empty tree
+    const author = `You <you@example.com> 0 +0000`;
+    const committer = author;
+    const msg = "initial\n";
+    const commitPayload =
+      `tree ${treeOid}\n` + `author ${author}\n` + `committer ${committer}\n` + `\n${msg}`;
+    const { oid: commitOid, zdata: commitZ } = await encodeGitObjectAndDeflate(
+      "commit",
+      new TextEncoder().encode(commitPayload)
+    );
+
+    // Store objects and update refs
+    await store.put(objKey(treeOid), treeZ);
+    await store.put(objKey(commitOid), commitZ);
+    await store.put("refs", [{ name: "refs/heads/main", oid: commitOid }]);
+    await store.put("head", { target: "refs/heads/main" });
+
+    return { treeOid, commitOid };
+  }
+
+  /**
+   * RPC: Store a loose object (zlib-compressed with Git header) by its OID.
+   * Mirrors to R2 best-effort. Throws on invalid OID.
+   */
+  public async putLooseObject(oid: string, zdata: Uint8Array): Promise<void> {
+    await this.ensureAccessAndAlarm();
+    if (!this.isValidOid(oid)) throw new Error("Bad oid");
+    await this.storeObject(oid, zdata);
   }
 
   // --- Alarm-based tasks ---
@@ -211,7 +369,7 @@ export class RepoDurableObject implements DurableObject {
   // 2) Idle cleanup: If the DO remains idle beyond IDLE_MS and appears empty/unused, purge storage and R2 mirror.
   // 3) Maintenance: Periodically prune stale packs and metadata even for active repos.
   async alarm(): Promise<void> {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     this.logger.debug("alarm:start", {});
 
     // Priority 1: Handle pending unpack work
@@ -242,7 +400,7 @@ export class RepoDurableObject implements DurableObject {
       this.logger.error("alarm:process-unpack-error", { error: String(e) });
       // Best-effort reschedule so we don't get stuck
       try {
-        await this.state.storage.setAlarm(Date.now() + 1000);
+        await this.ctx.storage.setAlarm(Date.now() + 1000);
       } catch {}
     }
     return true;
@@ -312,7 +470,7 @@ export class RepoDurableObject implements DurableObject {
    * Deletes all DO storage and purges the R2 mirror.
    */
   private async performIdleCleanup(): Promise<void> {
-    const storage = this.state.storage;
+    const storage = this.ctx.storage;
 
     // Purge DO storage
     try {
@@ -343,8 +501,8 @@ export class RepoDurableObject implements DurableObject {
       let cursor: string | undefined = undefined;
 
       do {
-        const res: any = await this.env.REPO_BUCKET.list({ prefix: pfx, cursor });
-        const objects: any[] = (res && res.objects) || [];
+        const res: R2Objects = await this.env.REPO_BUCKET.list({ prefix: pfx, cursor });
+        const objects: R2Object[] = (res && res.objects) || [];
 
         for (const obj of objects) {
           try {
@@ -357,7 +515,7 @@ export class RepoDurableObject implements DurableObject {
           }
         }
 
-        cursor = res && res.truncated ? res.cursor : undefined;
+        cursor = res.truncated ? res.cursor : undefined;
       } while (cursor);
     } catch (e) {
       this.logger.error("cleanup:purge-r2-failed", { error: String(e) });
@@ -374,6 +532,8 @@ export class RepoDurableObject implements DurableObject {
     now: number
   ): Promise<void> {
     try {
+      // Deletes older packs beyond the keep-window from both DO metadata and R2,
+      // and keeps `lastPackKey/lastPackOids` consistent.
       await this.runMaintenance(keepPacks);
       await store.put("lastMaintenanceMs", now);
     } catch (e) {
@@ -392,7 +552,7 @@ export class RepoDurableObject implements DurableObject {
       const nextIdleAt = (lastAccess ?? now) + idleMs;
       const nextMaintAt = (lastMaint ?? now) + maintMs;
       const next = Math.min(nextIdleAt, nextMaintAt);
-      await this.state.storage.setAlarm(next);
+      await this.ctx.storage.setAlarm(next);
       this.logger.debug("alarm:scheduled", { next });
     } catch (e) {
       this.logger.error("alarm:set-failed", { error: String(e) });
@@ -402,7 +562,7 @@ export class RepoDurableObject implements DurableObject {
   private async touchAndMaybeSchedule(): Promise<void> {
     const cfg = this.getConfig();
     const now = Date.now();
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
 
     // Update last access time
     await store.put("lastAccessMs", now);
@@ -429,11 +589,11 @@ export class RepoDurableObject implements DurableObject {
     const next = await store.get("unpackNext");
     if (!work && !next) return false;
 
-    const existing = (await this.state.storage.getAlarm()) as number | null | undefined;
+    const existing = (await this.ctx.storage.getAlarm()) as number | null | undefined;
     const soon = now + cfg.unpackDelayMs;
 
     if (!existing || existing < now || existing > soon) {
-      await this.state.storage.setAlarm(soon);
+      await this.ctx.storage.setAlarm(soon);
     }
     return true;
   }
@@ -444,102 +604,30 @@ export class RepoDurableObject implements DurableObject {
     now: number
   ): Promise<void> {
     const lastMaint = await store.get("lastMaintenanceMs");
-    const existing = await this.state.storage.getAlarm();
+    const existing = await this.ctx.storage.getAlarm();
 
     const nextIdle = now + cfg.idleMs;
     const nextMaint = (lastMaint ?? now) + cfg.maintMs;
     const next = Math.min(nextIdle, nextMaint);
 
     if (!existing || existing < now || existing > next) {
-      await this.state.storage.setAlarm(next);
+      await this.ctx.storage.setAlarm(next);
     }
-  }
-
-  // ---- Small route handlers (extracted for readability) ----
-
-  private async handleRefsGet(): Promise<Response> {
-    const refs = await this.getRefs();
-    return json(refs);
-  }
-
-  private async handleRefsPut(request: Request): Promise<Response> {
-    const payload = await request.json<any>();
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    await store.put("refs", payload);
-    return text("OK\n");
   }
 
   /**
-   * GET /commits?start=<oid>&ref=<ref>&max=<n>&cursor=<oid>
-   * Returns up to `max` commits (default 25) starting from the provided commit OID/ref.
-   * If `cursor` is provided, it supersedes start/ref and is used as the starting commit.
-   * Walks the first-parent chain. Reads commit objects directly from DO storage when possible.
-   * Response shape: { items: CommitInfo[], next?: string }
+   * Safe wrapper around touchAndMaybeSchedule() for RPC and internal entrypoints.
+   * Ensures last access time is updated and an alarm is scheduled without
+   * forcing every method to duplicate try/catch.
    */
-  private async handleCommitsGet(url: URL): Promise<Response> {
-    const maxRaw = Number(url.searchParams.get("max") || "25");
-    const clamp = (n: number, min: number, max: number) =>
-      Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : min;
-    const max = clamp(maxRaw, 1, 100);
-
-    // Resolve starting commit OID from either explicit `start` or a `ref` name
-    const cursor = url.searchParams.get("cursor");
-    let start = url.searchParams.get("start");
-    const ref = url.searchParams.get("ref");
-    if (cursor && /^[0-9a-f]{40}$/i.test(cursor)) {
-      start = cursor;
-    } else {
-      if ((!start || start === "") && ref) {
-        const resolved = await this.resolveRefLocal(ref);
-        start = resolved ?? null;
-      }
-      if (!start || !/^[0-9a-f]{40}$/i.test(start)) {
-        return badRequest("Missing or invalid start/ref\n");
-      }
+  private async ensureAccessAndAlarm(): Promise<void> {
+    try {
+      await this.touchAndMaybeSchedule();
+    } catch (e) {
+      try {
+        this.logger.warn("touch:schedule:failed", { error: String(e) });
+      } catch {}
     }
-
-    const commits: Array<{
-      oid: string;
-      tree: string;
-      parents: string[];
-      author?: { name: string; email: string; when: number; tz: string };
-      committer?: { name: string; email: string; when: number; tz: string };
-      message: string;
-    }> = [];
-
-    const seen = new Set<string>();
-    let oid: string | undefined = (start as string).toLowerCase();
-    while (commits.length < max && oid && !seen.has(oid)) {
-      seen.add(oid);
-      const info = await this.readCommitFromStore(oid);
-      if (!info) break; // stop if object missing/unavailable yet
-      commits.push(info);
-      oid = info.parents[0]; // first-parent chain
-    }
-
-    return json({ items: commits, next: oid });
-  }
-
-  // Resolve a ref-ish locally using DO-stored refs without crossing the worker boundary
-  private async resolveRefLocal(refOrOid: string): Promise<string | undefined> {
-    if (/^[0-9a-f]{40}$/i.test(refOrOid)) return refOrOid.toLowerCase();
-    const refs = await this.getRefs();
-    // Fully qualified ref
-    if (refOrOid.startsWith("refs/")) {
-      const r = refs.find((x) => x.name === refOrOid);
-      return r?.oid?.toLowerCase();
-    }
-    // Try branches then tags
-    const c1 = refs.find((x) => x.name === `refs/heads/${refOrOid}`);
-    if (c1) return c1.oid.toLowerCase();
-    const c2 = refs.find((x) => x.name === `refs/tags/${refOrOid}`);
-    if (c2) return c2.oid.toLowerCase();
-    // Fall back to HEAD target
-    const head = (await asTypedStorage<RepoStateSchema>(this.state.storage).get("head")) as
-      | Head
-      | undefined;
-    if (head?.oid) return head.oid.toLowerCase();
-    return undefined;
   }
 
   // Read and parse a commit object directly from DO storage (fallback to R2 if needed)
@@ -552,7 +640,7 @@ export class RepoDurableObject implements DurableObject {
     message: string;
   } | null> {
     // Prefer DO-stored loose object to avoid R2/HTTP hops
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     let data = await store.get(objKey(oid));
 
     if (!data) {
@@ -589,22 +677,9 @@ export class RepoDurableObject implements DurableObject {
    * @returns Array of ref objects with name and oid, or empty array if none exist
    */
   private async getRefs(): Promise<{ name: string; oid: string }[]> {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     return (await store.get("refs")) ?? [];
-  }
-
-  /**
-   * GET /head
-   * Returns the repository HEAD as `{ target, oid? }` or `{ target, unborn: true }`.
-   * The handler resolves the current `oid` by looking up the target ref in stored refs.
-   * If the target ref does not exist, it returns `{ target, unborn: true }`.
-   *
-   * Note: The resolved value is persisted back to DO storage only if it differs
-   * from the stored value (semantic equality check).
-   */
-  private async handleHeadGet(): Promise<Response> {
-    const resolved = await this.resolveHead();
-    return json(resolved);
   }
 
   /**
@@ -612,7 +687,8 @@ export class RepoDurableObject implements DurableObject {
    * @returns The resolved HEAD object with target and either oid or unborn flag
    */
   private async resolveHead(): Promise<Head> {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     const stored = await store.get("head");
     const refs = await this.getRefs();
 
@@ -656,186 +732,28 @@ export class RepoDurableObject implements DurableObject {
     } catch {}
   }
 
-  private async handleHeadPut(request: Request): Promise<Response> {
-    const payload = await request.json<any>();
-    if (!payload || typeof payload.target !== "string") {
-      return badRequest("Invalid head payload\n");
-    }
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    await store.put("head", payload);
-    return new Response("OK\n", { status: 200 });
-  }
-
-  private async handlePackLatestGet(): Promise<Response> {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const key = await store.get("lastPackKey");
-    if (!key) return text("Not found\n", 404);
-    const oids = ((await store.get("lastPackOids")) || []).slice(0, 10000);
-    return json({ key, oids });
-  }
-
-  private async handlePacksGet(): Promise<Response> {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const list = ((await store.get("packList")) || []).slice(0, 20);
-    return json({ keys: list });
-  }
-
-  private async handlePackOidsGet(url: URL): Promise<Response> {
-    const key = url.searchParams.get("key");
-    if (!key) return badRequest("Missing key\n");
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const oids = (await store.get(packOidsKey(key))) || [];
-    return json({ key, oids });
-  }
-
   private async handleReindexPost(): Promise<Response> {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    await this.ensureAccessAndAlarm();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     const key = await store.get("lastPackKey");
     if (!key) return text("No pack to reindex\n", 404);
     const obj = await this.env.REPO_BUCKET.get(key);
     if (!obj) return text("Pack not found in R2\n", 404);
     const bytes = new Uint8Array(await obj.arrayBuffer());
     this.logger.info("reindex:start", { key });
-    await unpackPackToLoose(bytes, this.state, this.env, this.prefix(), key);
+    // Re-indexing reads pack bytes from R2, indexes them and unpacks objects in chunks
+    // (bounded by configured time budget) by scheduling alarm work internally.
+    await unpackPackToLoose(bytes, this.ctx, this.env, this.prefix(), key);
     this.logger.info("reindex:done", { key });
     return text("OK\n");
-  }
-
-  // ---- Debug helpers ----
-  private async handleDebugState(): Promise<Response> {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const refs = (await store.get("refs")) ?? [];
-    const head = await store.get("head");
-    const lastPackKey = await store.get("lastPackKey");
-    const lastPackOids = (await store.get("lastPackOids")) ?? [];
-    const packList = (await store.get("packList")) ?? [];
-    const unpackWork = await store.get("unpackWork");
-    const unpackNext = await store.get("unpackNext");
-
-    // Sample a few loose object keys to avoid large payloads
-    const looseSample: string[] = [];
-    try {
-      const it = await this.state.storage.list({ prefix: "obj:", limit: 10 });
-      for (const k of it.keys()) looseSample.push(String(k).slice(4));
-    } catch {}
-
-    return json({
-      meta: { doId: this.state.id.toString(), prefix: this.prefix() },
-      head,
-      refsCount: refs.length,
-      refs: refs.slice(0, 20),
-      lastPackKey: lastPackKey || null,
-      lastPackOidsCount: lastPackOids.length,
-      packListCount: packList.length,
-      packList,
-      unpackWork: unpackWork || null,
-      unpackNext: unpackNext || null,
-      looseSample,
-    });
-  }
-
-  private async handleDebugCheck(url: URL): Promise<Response> {
-    const q = url.searchParams;
-    const commit = (q.get("commit") || "").toLowerCase();
-    if (!/^[0-9a-f]{40}$/.test(commit)) return badRequest("Missing or invalid commit\n");
-
-    // Check pack membership via stored indices first
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
-    const packList = (await store.get("packList")) ?? [];
-    const membership: Record<string, { hasCommit: boolean; hasTree: boolean }> = {};
-    for (const key of packList) {
-      try {
-        const oids = (await store.get(packOidsKey(key))) ?? [];
-        const set = new Set(oids.map((x) => x.toLowerCase()));
-        membership[key] = { hasCommit: set.has(commit), hasTree: false };
-      } catch {}
-    }
-
-    // Try to read commit to discover its tree; ok if it fails
-    let tree: string | undefined = undefined;
-    let parents: string[] = [];
-    try {
-      const info = await this.readCommitFromStore(commit);
-      if (info) {
-        tree = info.tree.toLowerCase();
-        parents = info.parents;
-      }
-    } catch {}
-
-    // Presence checks for loose objects
-    const hasLooseCommit = !!(await this.state.storage.get(objKey(commit)));
-    let hasLooseTree = false;
-    let hasR2LooseTree = false;
-    if (tree) {
-      hasLooseTree = !!(await this.state.storage.get(objKey(tree)));
-      try {
-        const head = await this.env.REPO_BUCKET.head(r2LooseKey(this.prefix(), tree));
-        hasR2LooseTree = !!head;
-      } catch {}
-      // Update membership.hasTree using discovered tree
-      for (const key of Object.keys(membership)) {
-        try {
-          const oids = (await store.get(packOidsKey(key))) ?? [];
-          const set = new Set(oids.map((x) => x.toLowerCase()));
-          membership[key].hasTree = !!tree && set.has(tree);
-        } catch {}
-      }
-    }
-
-    return json({
-      commit: { oid: commit, parents, tree },
-      presence: { hasLooseCommit, hasLooseTree, hasR2LooseTree },
-      membership,
-    });
-  }
-
-  private async handleObjGet(oid: string, method: string): Promise<Response> {
-    // Validate OID format
-    if (!this.isValidOid(oid)) {
-      return badRequest("Bad oid\n");
-    }
-
-    if (method === "HEAD") {
-      return this.handleObjHead(oid);
-    }
-
-    return this.handleObjGetContent(oid);
   }
 
   private isValidOid(oid: string): boolean {
     return /^[0-9a-f]{40}$/i.test(oid);
   }
 
-  private async handleObjHead(oid: string): Promise<Response> {
-    const size = await this.getObjectSize(oid);
-
-    if (size === null) {
-      return new Response("Not found\n", { status: 404 });
-    }
-
-    return new Response(null, {
-      status: 200,
-      headers: {
-        "Content-Type": "application/octet-stream",
-        "Content-Length": String(size),
-      },
-    });
-  }
-
-  private async handleObjGetContent(oid: string): Promise<Response> {
-    const content = await this.getObjectContent(oid);
-
-    if (!content) {
-      return new Response("Not found\n", { status: 404 });
-    }
-
-    return new Response(content, {
-      status: 200,
-      headers: { "Content-Type": "application/octet-stream" },
-    });
-  }
-
-  private async getObjectSize(oid: string): Promise<number | null> {
+  public async getObjectSize(oid: string): Promise<number | null> {
+    await this.ensureAccessAndAlarm();
     const prefix = this.prefix();
     const r2key = r2LooseKey(prefix, oid);
 
@@ -846,14 +764,15 @@ export class RepoDurableObject implements DurableObject {
     } catch {}
 
     // Fallback to DO storage
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     const data = await store.get(objKey(oid));
 
     if (!data) return null;
-    return data instanceof ArrayBuffer ? data.byteLength : data.byteLength;
+    return data.byteLength;
   }
 
-  private async getObjectContent(oid: string): Promise<BodyInit | null> {
+  public async getObjectContent(oid: string): Promise<BodyInit | null> {
+    await this.ensureAccessAndAlarm();
     const prefix = this.prefix();
     const r2key = r2LooseKey(prefix, oid);
 
@@ -864,26 +783,14 @@ export class RepoDurableObject implements DurableObject {
     } catch {}
 
     // Fallback to DO storage
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     const data = await store.get(objKey(oid));
 
     return data || null;
   }
 
-  private async handleObjPut(oid: string, request: Request): Promise<Response> {
-    // Validate OID format
-    if (!this.isValidOid(oid)) {
-      return badRequest("Bad oid\n");
-    }
-
-    const bytes = new Uint8Array(await request.arrayBuffer());
-    await this.storeObject(oid, bytes);
-
-    return text("OK\n");
-  }
-
   private async storeObject(oid: string, bytes: Uint8Array): Promise<void> {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
 
     // Store in DO storage
     await store.put(objKey(oid), bytes);
@@ -895,6 +802,9 @@ export class RepoDurableObject implements DurableObject {
   private async mirrorObjectToR2(oid: string, bytes: Uint8Array): Promise<void> {
     const r2key = r2LooseKey(this.prefix(), oid);
     try {
+      // Mirrors the compressed loose object to R2 for low-latency reads.
+      // We do not fail the write if mirroring fails; DO storage remains the
+      // source of truth and R2 will be filled by subsequent writes.
       await this.env.REPO_BUCKET.put(r2key, bytes);
     } catch {}
   }
@@ -904,7 +814,7 @@ export class RepoDurableObject implements DurableObject {
     this.logger.info("receive:start", {});
     // Pre-body guard: block when current unpack is running and a next pack is already queued
     try {
-      const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+      const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
       const work = await store.get("unpackWork");
       const next = await store.get("unpackNext");
       if (work && next) {
@@ -918,25 +828,26 @@ export class RepoDurableObject implements DurableObject {
         });
       }
     } catch {}
-    const res = await receivePack(this.state, this.env, this.prefix(), request);
+    const res = await receivePack(this.ctx, this.env, this.prefix(), request);
     this.logger.info("receive:end", { status: res.status });
     return res;
   }
 
   private prefix() {
     // Tests and R2 layout expect Durable Object data under the 'do/<id>' prefix
-    return doPrefix(this.state.id.toString());
+    return doPrefix(this.ctx.id.toString());
   }
 
   private get logger() {
     return createLogger(this.env.LOG_LEVEL, {
       service: "RepoDO",
-      doId: this.state.id.toString(),
+      doId: this.ctx.id.toString(),
     });
   }
 
   private getConfig() {
-    // Parse configuration from env vars with sensible defaults
+    // Parse configuration from env vars with sensible defaults.
+    // All values are validated and clamped to safe ranges.
     const idleMins = Number(this.env.REPO_DO_IDLE_MINUTES ?? 30);
     const maintMins = Number(this.env.REPO_DO_MAINT_MINUTES ?? 60 * 24);
     const keepPacks = Number(this.env.REPO_KEEP_PACKS ?? 3);
@@ -962,7 +873,7 @@ export class RepoDurableObject implements DurableObject {
   }
 
   private async runMaintenance(keepPacks: number) {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     // Ensure packList exists
     const packList = (await store.get("packList")) ?? [];
     if (packList.length === 0) return;
@@ -994,7 +905,7 @@ export class RepoDurableObject implements DurableObject {
     // Delete packOids entries for removed packs
     for (const k of removed) {
       try {
-        await this.state.storage.delete(packOidsKey(k));
+        await this.ctx.storage.delete(packOidsKey(k));
       } catch (e) {
         this.logger.warn("maintenance:delete-packOids-failed", { key: k, error: String(e) });
       }
@@ -1043,7 +954,7 @@ export class RepoDurableObject implements DurableObject {
   }
 
   private async abortUnpackWork(packKey: string): Promise<void> {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     await store.delete("unpackWork");
   }
 
@@ -1118,7 +1029,7 @@ export class RepoDurableObject implements DurableObject {
     try {
       return await unpackOidsChunkFromPackBytes(
         packBytes,
-        this.state,
+        this.ctx,
         this.env,
         this.prefix(),
         packKey,
@@ -1134,7 +1045,7 @@ export class RepoDurableObject implements DurableObject {
     work: UnpackWork,
     result: { processed: number; processedInRun: number; exceededBudget: boolean }
   ): Promise<void> {
-    const store = asTypedStorage<RepoStateSchema>(this.state.storage);
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     const cfg = this.getConfig();
 
     if (result.processed >= work.oids.length) {
@@ -1155,9 +1066,9 @@ export class RepoDurableObject implements DurableObject {
           });
           await store.delete("unpackNext");
           // Keep unpacking status set to true in KV
-          await setUnpackStatus(this.env.PACK_METADATA_CACHE, this.state.id.toString(), true);
+          await setUnpackStatus(this.env.PACK_METADATA_CACHE, this.ctx.id.toString(), true);
           // Schedule next alarm soon to continue unpacking
-          await this.state.storage.setAlarm(Date.now() + cfg.unpackDelayMs);
+          await this.ctx.storage.setAlarm(Date.now() + cfg.unpackDelayMs);
           this.logger.info("queue:promote-next", { packKey: nextKey, total: nextOids.length });
           return;
         } else {
@@ -1168,7 +1079,7 @@ export class RepoDurableObject implements DurableObject {
       }
 
       // No queued work remains; clear unpacking status
-      await setUnpackStatus(this.env.PACK_METADATA_CACHE, this.state.id.toString(), false);
+      await setUnpackStatus(this.env.PACK_METADATA_CACHE, this.ctx.id.toString(), false);
     } else {
       // Update progress and reschedule
       await store.put("unpackWork", {
@@ -1177,7 +1088,7 @@ export class RepoDurableObject implements DurableObject {
       });
 
       const delay = result.processedInRun === 0 ? cfg.unpackBackoffMs : cfg.unpackDelayMs;
-      await this.state.storage.setAlarm(Date.now() + delay);
+      await this.ctx.storage.setAlarm(Date.now() + delay);
 
       const percent = Math.round((result.processed / work.oids.length) * 100);
       this.logger.debug("unpack:progress", {

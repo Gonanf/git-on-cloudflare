@@ -30,8 +30,7 @@ it("upload-pack fetch returns acknowledgments and packfile", async () => {
   const id = env.REPO_DO.idFromName(repoId);
   const stub = env.REPO_DO.get(id);
   const { commitOid } = await runInDurableObject(stub, async (instance: RepoDurableObject) => {
-    const res = await instance.fetch(new Request("https://do/seed", { method: "POST" }));
-    return res.json<any>();
+    return instance.seedMinimalRepo();
   });
 
   const body = buildFetchBody({ wants: [commitOid] });

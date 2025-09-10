@@ -1,5 +1,6 @@
 import { it, expect } from "vitest";
 import { SELF, env, runInDurableObject } from "cloudflare:test";
+import type { RepoDurableObject } from "@/index";
 import { decodePktLines } from "@/git";
 
 function pktLine(s: string | Uint8Array): Uint8Array {
@@ -66,9 +67,8 @@ it("ls-refs: resolved HEAD and refs are listed after seeding", async () => {
   const repoId = `${owner}/${repo}`;
   const id = env.REPO_DO.idFromName(repoId);
   const stub = env.REPO_DO.get(id);
-  const { commitOid } = await runInDurableObject(stub, async (instance) => {
-    const res = await instance.fetch(new Request("https://do/seed", { method: "POST" }));
-    return res.json<any>();
+  const { commitOid } = await runInDurableObject(stub, async (instance: RepoDurableObject) => {
+    return instance.seedMinimalRepo();
   });
 
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
