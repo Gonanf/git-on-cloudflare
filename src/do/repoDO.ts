@@ -197,11 +197,31 @@ export class RepoDurableObject extends DurableObject {
     const prefix = this.prefix();
     const env = this.env;
 
+    // Short-circuit using recent pack membership to avoid R2 HEADs
+    // Build a small set of OIDs from the newest packs we know about.
+    const packSet = new Set<string>();
+    try {
+      const last = ((await store.get("lastPackOids")) || []) as string[];
+      for (const x of last) packSet.add(x.toLowerCase());
+      // Include a couple more recent packs if available
+      const list = (((await store.get("packList")) || []) as string[]).slice(0, 2);
+      for (const k of list) {
+        try {
+          const arr = ((await store.get(packOidsKey(k))) || []) as string[];
+          for (const x of arr) packSet.add(x.toLowerCase());
+        } catch {}
+      }
+    } catch {}
+
     const checkOne = async (oid: string): Promise<boolean> => {
       if (!/^[0-9a-f]{40}$/i.test(oid)) return false;
+      // 1) Fast-path: known to be present in a recent pack
+      if (packSet.size > 0 && packSet.has(oid.toLowerCase())) return true;
+      // 2) DO state (loose) lookup
       const data = await store.get(objKey(oid));
       if (data) return true;
       try {
+        // 3) R2 loose HEAD fallback
         const head = await env.REPO_BUCKET.head(r2LooseKey(prefix, oid));
         return !!head;
       } catch {

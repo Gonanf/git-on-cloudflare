@@ -1,14 +1,16 @@
-import { pktLine, flushPkt, delimPkt, concatChunks, decodePktLines } from "@/git/core/pktline.ts";
-import { getRepoStub } from "@/common/stub.ts";
-import { readLooseObjectRaw } from "./read.ts";
 import {
-  assemblePackFromR2,
-  assemblePackFromMultiplePacks,
-  encodeOfsDeltaDistance,
-} from "@/git/pack/assembler.ts";
-export { encodeOfsDeltaDistance };
-import { objTypeCode, encodeObjHeader, type GitObjectType } from "@/git/core/objects.ts";
-import { deflate } from "@/common/compression.ts";
+  pktLine,
+  flushPkt,
+  delimPkt,
+  concatChunks,
+  decodePktLines,
+  objTypeCode,
+  encodeObjHeader,
+  type GitObjectType,
+} from "@/git/core/index.ts";
+import { getRepoStub, createLogger, deflate } from "@/common/index.ts";
+import { readLooseObjectRaw } from "./read.ts";
+import { assemblePackFromR2, assemblePackFromMultiplePacks } from "@/git/pack/assembler.ts";
 
 export function parseFetchArgs(body: Uint8Array) {
   const items = decodePktLines(body);
@@ -51,6 +53,7 @@ export async function handleFetchV2(
   signal?: AbortSignal
 ) {
   const { wants, haves, done } = parseFetchArgs(body);
+  const log = createLogger(env.LOG_LEVEL, { service: "FetchV2", repoId });
   if (signal?.aborted) return new Response("client aborted\n", { status: 499 });
   if (wants.length === 0) {
     // No wants: respond with ack-only
@@ -66,27 +69,9 @@ export async function handleFetchV2(
 
   const stub = getRepoStub(env, repoId);
 
-  // Fast path: initial clone (no haves). Assemble from R2 using ALL objects from the latest pack
-  // when it contains all wanted tips. This avoids expensive loose object closure traversal and
-  // produces a valid, non-thin pack.
-  if (haves.length === 0) {
-    try {
-      const meta = await stub.getPackLatest();
-      if (meta) {
-        const { key, oids } = meta;
-        if (key && Array.isArray(oids) && wants.every((w: string) => oids.includes(w))) {
-          if (signal?.aborted) return new Response("client aborted\n", { status: 499 });
-          const assembled = await assemblePackFromR2(env, key, oids, signal);
-          if (assembled) return respondWithPackfile(assembled, done, [], signal);
-        }
-      }
-    } catch {
-      // ignore and fall through to normal path
-    }
-  }
-
-  // Compute minimal closure of objects needed
+  // Standard path: compute needed objects
   const needed = await computeNeeded(env, repoId, wants, haves);
+  log.debug("fetch:incremental", { closure: needed.length, haves: haves.length });
   // Compute set of common haves we can ACK (limit for perf)
   const ackOids = await findCommonHaves(env, repoId, haves);
   if (signal?.aborted) return new Response("client aborted\n", { status: 499 });
@@ -113,23 +98,52 @@ export async function handleFetchV2(
         }
       }
       // Multi-pack union: try assembling from multiple recent packs
+      log.debug("fetch:trying-multi-pack", { count: keys.slice(0, 10).length });
       const mpAssembled = await assemblePackFromMultiplePacks(env, keys.slice(0, 10), needed);
-      if (mpAssembled) return respondWithPackfile(mpAssembled, done, ackOids);
+      if (mpAssembled) {
+        log.info("fetch:multi-pack-success", { bytes: mpAssembled.byteLength });
+        return respondWithPackfile(mpAssembled, done, ackOids);
+      }
     }
   } catch {
     // ignore and fallback to loose objects
   }
 
-  // Fallback: build a minimal pack from loose objects (allow empty pack when no objects needed)
+  // Fallback: build a minimal pack from loose objects
+  // For initial clones, this is a last resort and likely incomplete
+  if (haves.length === 0 && needed.length === wants.length) {
+    log.warn("fetch:initial-clone-incomplete", {
+      msg: "Unable to serve complete clone, repository may need repacking",
+      wants,
+    });
+    // Return empty pack to avoid timeout
+    const packfile = await buildPackV2([]);
+    return respondWithPackfile(packfile, done, [], signal);
+  }
+
+  log.debug("fetch:fallback-loose-objects", { count: needed.length });
   const oids = needed;
   const objs: { type: GitObjectType; payload: Uint8Array }[] = [];
+  const timeout = Date.now() + 10000; // 10 second timeout for loose object collection
+
   for (const oid of oids) {
+    if (Date.now() > timeout) {
+      log.warn("fetch:loose-timeout", {
+        collected: objs.length,
+        remaining: oids.length - objs.length,
+      });
+      break;
+    }
     const o = await readLooseObjectRaw(env, repoId, oid);
-    if (!o) continue;
+    if (!o) {
+      log.warn("fetch:missing-object", { oid });
+      continue;
+    }
     // readLooseObjectRaw returns type as string, but we know it's a valid GitObjectType
     objs.push({ type: o.type as GitObjectType, payload: o.payload });
   }
   const packfile = await buildPackV2(objs);
+  log.info("fetch:loose-pack-success", { bytes: packfile.byteLength, objects: objs.length });
   return respondWithPackfile(packfile, done, ackOids, signal);
 }
 
@@ -194,40 +208,83 @@ async function collectClosure(env: Env, repoId: string, roots: string[]): Promis
   const stub = getRepoStub(env, repoId);
   const seen = new Set<string>();
   const queue = [...roots];
-  while (queue.length) {
-    const oid = queue.shift()!;
-    if (seen.has(oid)) continue;
-    seen.add(oid);
-    const obj = await readLooseObjectRaw(env, repoId, oid);
-    if (!obj) continue;
-    if (obj.type === "commit") {
-      const text = new TextDecoder().decode(obj.payload);
-      const m = text.match(/^tree ([0-9a-f]{40})/m);
-      if (m) queue.push(m[1]);
-      // include parents if present (helps incremental fetch later)
-      for (const pm of text.matchAll(/^parent ([0-9a-f]{40})/gm)) {
-        queue.push(pm[1]);
+  const log = createLogger(env.LOG_LEVEL, { service: "CollectClosure", repoId });
+  const startTime = Date.now();
+  const timeout = 25000; // 25 seconds max
+
+  // Process objects breadth-first, in batches
+  while (queue.length > 0) {
+    if (Date.now() - startTime > timeout) {
+      log.warn("collectClosure:timeout", { seen: seen.size, queued: queue.length });
+      break;
+    }
+
+    // Process up to 50 objects at once
+    const batch = queue.splice(0, Math.min(50, queue.length));
+    const promises = batch.map(async (oid) => {
+      if (seen.has(oid)) return [];
+      seen.add(oid);
+
+      try {
+        const obj = await readLooseObjectRaw(env, repoId, oid);
+        if (!obj) {
+          log.debug("collectClosure:missing", { oid });
+          return [];
+        }
+
+        const refs: string[] = [];
+        if (obj.type === "commit") {
+          const text = new TextDecoder().decode(obj.payload);
+          const m = text.match(/^tree ([0-9a-f]{40})/m);
+          if (m) refs.push(m[1]);
+          // Also follow parent commits
+          for (const pm of text.matchAll(/^parent ([0-9a-f]{40})/gm)) {
+            refs.push(pm[1]);
+          }
+        } else if (obj.type === "tree") {
+          // Parse tree entries to find subtrees and blobs
+          let i = 0;
+          const buf = obj.payload;
+          while (i < buf.length) {
+            // Parse mode
+            let sp = i;
+            while (sp < buf.length && buf[sp] !== 0x20) sp++;
+            if (sp >= buf.length) break;
+            const mode = new TextDecoder().decode(buf.subarray(i, sp));
+
+            // Parse name
+            let nul = sp + 1;
+            while (nul < buf.length && buf[nul] !== 0x00) nul++;
+            if (nul + 20 > buf.length) break;
+
+            // Get OID
+            const oidBytes = buf.subarray(nul + 1, nul + 21);
+            const oidHex = [...oidBytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+            // Add all entries (both trees and blobs)
+            refs.push(oidHex);
+            i = nul + 21;
+          }
+        }
+        return refs;
+      } catch (e) {
+        log.debug("collectClosure:error", { oid, error: String(e) });
+        return [];
       }
-    } else if (obj.type === "tree") {
-      // Parse tree entries: [mode ascii] SP [name] NUL [20-byte oid]
-      let i = 0;
-      const buf = obj.payload;
-      while (i < buf.length) {
-        // read until space
-        let sp = i;
-        while (sp < buf.length && buf[sp] !== 0x20) sp++;
-        if (sp >= buf.length) break;
-        // read until NUL
-        let nul = sp + 1;
-        while (nul < buf.length && buf[nul] !== 0x00) nul++;
-        if (nul + 20 > buf.length) break;
-        const oidBytes = buf.subarray(nul + 1, nul + 21);
-        const oidHex = [...oidBytes].map((b) => b.toString(16).padStart(2, "0")).join("");
-        queue.push(oidHex);
-        i = nul + 21;
+    });
+
+    const results = await Promise.all(promises);
+    for (const refs of results) {
+      for (const ref of refs) {
+        if (!seen.has(ref)) queue.push(ref);
       }
     }
   }
+
+  log.info("collectClosure:complete", {
+    objects: seen.size,
+    timeMs: Date.now() - startTime,
+  });
   return Array.from(seen);
 }
 

@@ -1,6 +1,56 @@
 import { packIndexKey } from "@/keys.ts";
 import { createLogger } from "@/common/logger.ts";
 
+// --- In-process LRU cache for parsed .idx files (ephemeral per isolate) ---
+type IdxParsed = { oids: string[]; offsets: number[] };
+const IDX_CACHE_MAX = 64;
+const idxCache = new Map<string, IdxParsed>(); // key: packKey
+
+function touchIdxCache(key: string, value: IdxParsed) {
+  if (idxCache.has(key)) idxCache.delete(key);
+  idxCache.set(key, value);
+  if (idxCache.size > IDX_CACHE_MAX) {
+    const first = idxCache.keys().next().value;
+    if (first) idxCache.delete(first);
+  }
+}
+
+async function loadIdxParsed(env: Env, packKey: string): Promise<IdxParsed | undefined> {
+  const cached = idxCache.get(packKey);
+  if (cached) {
+    // Touch for LRU
+    touchIdxCache(packKey, cached);
+    return cached;
+  }
+  const idxKey = packIndexKey(packKey);
+  const idxObj = await env.REPO_BUCKET.get(idxKey);
+  if (!idxObj) return undefined;
+  const idxBuf = new Uint8Array(await idxObj.arrayBuffer());
+  const parsed = parseIdxV2(idxBuf);
+  if (!parsed) return undefined;
+  touchIdxCache(packKey, parsed);
+  return parsed;
+}
+
+// Utility: simple concurrency-limited mapper
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const out: R[] = new Array(items.length) as R[];
+  let i = 0;
+  const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
+    while (true) {
+      const idx = i++;
+      if (idx >= items.length) break;
+      out[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 /**
  * Assemble a minimal PACK from a single R2 pack+idx that covers all needed OIDs.
  * Uses idx to locate object offsets and range-reads payloads from the pack.
@@ -17,19 +67,15 @@ export async function assemblePackFromR2(
   signal?: AbortSignal
 ): Promise<Uint8Array | undefined> {
   const log = createLogger(env.LOG_LEVEL, { service: "PackAssembler", repoId: packKey });
+  const started = Date.now();
+  let r2Gets = 0;
   log.debug("single:start", { needed: neededOids.length, packKey });
   if (signal?.aborted) return undefined;
   // Fetch and parse .idx for this pack
-  const idxKey = packIndexKey(packKey);
-  const idxObj = await env.REPO_BUCKET.get(idxKey);
-  if (!idxObj) {
-    log.debug("single:no-idx", { idxKey });
-    return undefined;
-  }
-  const idxBuf = new Uint8Array(await idxObj.arrayBuffer());
-  const parsed = parseIdxV2(idxBuf);
+  const parsed = await loadIdxParsed(env, packKey);
   if (!parsed) {
-    log.warn("single:idx-parse-failed", { idxKey });
+    const idxKey = packIndexKey(packKey);
+    log.debug("single:no-idx", { idxKey });
     return undefined;
   }
   const { oids, offsets } = parsed;
@@ -56,7 +102,7 @@ export async function assemblePackFromR2(
   const shouldLoadWholePack =
     packSize <= 16 * 1024 * 1024 || neededOids.length >= oids.length * 0.25;
   const wholePack: Uint8Array | undefined = shouldLoadWholePack
-    ? new Uint8Array(await (await env.REPO_BUCKET.get(packKey))!.arrayBuffer())
+    ? (r2Gets++, new Uint8Array(await (await env.REPO_BUCKET.get(packKey))!.arrayBuffer()))
     : undefined;
   if (wholePack) log.debug("single:fast-path:whole-pack-loaded", { bytes: wholePack.byteLength });
   const sortedOffs = offsets.slice().sort((a, b) => a - b);
@@ -86,6 +132,7 @@ export async function assemblePackFromR2(
   // Read headers and include delta bases
   const pending: number[] = Array.from(selected);
   const entries = new Map<number, Entry>();
+  let externalRefDelta = false; // REF_DELTA base outside this pack -> would produce a thin pack
   while (pending.length) {
     if (signal?.aborted) return undefined;
     const idx = pending.pop()!;
@@ -127,8 +174,16 @@ export async function assemblePackFromR2(
       if (ent.baseIndex !== undefined && !selected.has(ent.baseIndex)) {
         selected.add(ent.baseIndex);
         pending.push(ent.baseIndex);
+      } else if (ent.baseIndex === undefined) {
+        // Base oid is not in this pack -> thin source pack
+        externalRefDelta = true;
       }
     }
+  }
+
+  if (externalRefDelta) {
+    log.debug("single:thin-pack-detected", { packKey });
+    return undefined; // signal caller to use multi-pack assembly
   }
 
   // Determine order by original offsets
@@ -190,36 +245,92 @@ export async function assemblePackFromR2(
   dv.setUint32(8, order.length);
 
   // Fill entries
-  for (const i of order) {
-    const e = entries.get(i)!;
-    let p = newOffsets.get(i)!;
-    // size varint (includes type bits)
-    body.set(e.sizeVarBytes, p);
-    p += e.sizeVarBytes.length;
-    if (e.type === 6) {
-      // OFS_DELTA: write new relative offset to base in new pack
-      const rel = newOffsets.get(i)! - newOffsets.get(e.baseIndex!)!;
-      const ofsBytes = encodeOfsDeltaDistance(rel);
-      body.set(ofsBytes, p);
-      p += ofsBytes.length;
-    } else if (e.type === 7) {
-      // REF_DELTA: write 20-byte base oid
-      body.set(hexToBytes(e.baseOid!), p);
-      p += 20;
-    }
-    // Copy compressed payload from original pack
-    const payloadStart = offsets[i] + e.origHeaderLen;
-    if (wholePack) {
+  if (wholePack) {
+    for (const i of order) {
+      const e = entries.get(i)!;
+      let p = newOffsets.get(i)!;
+      // size varint (includes type bits)
+      body.set(e.sizeVarBytes, p);
+      p += e.sizeVarBytes.length;
+      if (e.type === 6) {
+        const rel = newOffsets.get(i)! - newOffsets.get(e.baseIndex!)!;
+        const ofsBytes = encodeOfsDeltaDistance(rel);
+        body.set(ofsBytes, p);
+        p += ofsBytes.length;
+      } else if (e.type === 7) {
+        body.set(hexToBytes(e.baseOid!), p);
+        p += 20;
+      }
+      const payloadStart = offsets[i] + e.origHeaderLen;
       const payload = wholePack.subarray(payloadStart, payloadStart + e.payloadLen);
       body.set(payload, p);
-    } else {
-      const payload = await readPackRange(env, packKey, payloadStart, e.payloadLen);
+    }
+  } else {
+    // Coalesce adjacent ranges to reduce number of R2 GET requests
+    type Range = { entryIndex: number; start: number; len: number };
+    const ranges: Range[] = order.map((i) => {
+      const e = entries.get(i)!;
+      return { entryIndex: i, start: offsets[i] + e.origHeaderLen, len: e.payloadLen };
+    });
+    const GAP = 8 * 1024; // max gap to coalesce
+    const MAX_GROUP = 512 * 1024; // max bytes per coalesced request
+    type Group = { start: number; end: number; items: Range[] };
+    const groups: Group[] = [];
+    let current: Group | null = null;
+    for (const r of ranges) {
+      if (!current) {
+        current = { start: r.start, end: r.start + r.len, items: [r] };
+        groups.push(current);
+      } else {
+        const gap = r.start - current.end;
+        const newSize = r.start + r.len - current.start;
+        if (gap <= GAP && newSize <= MAX_GROUP) {
+          current.items.push(r);
+          current.end = r.start + r.len;
+        } else {
+          current = { start: r.start, end: r.start + r.len, items: [r] };
+          groups.push(current);
+        }
+      }
+    }
+
+    // Fetch coalesced groups
+    const blobs: Uint8Array[] = [];
+    for (const g of groups) {
+      r2Gets++;
+      const payload = await readPackRange(env, packKey, g.start, g.end - g.start);
       if (!payload) {
-        log.warn("single:read-range-failed", { offset: payloadStart, length: e.payloadLen });
+        log.warn("single:read-range-failed", { offset: g.start, length: g.end - g.start });
         return undefined;
       }
-      body.set(payload, p);
+      blobs.push(payload);
     }
+
+    // Write entries using slices from coalesced blobs
+    let groupIdx = 0;
+    for (const i of order) {
+      const e = entries.get(i)!;
+      let p = newOffsets.get(i)!;
+      body.set(e.sizeVarBytes, p);
+      p += e.sizeVarBytes.length;
+      if (e.type === 6) {
+        const rel = newOffsets.get(i)! - newOffsets.get(e.baseIndex!)!;
+        const ofsBytes = encodeOfsDeltaDistance(rel);
+        body.set(ofsBytes, p);
+        p += ofsBytes.length;
+      } else if (e.type === 7) {
+        body.set(hexToBytes(e.baseOid!), p);
+        p += 20;
+      }
+      const startAbs = offsets[i] + e.origHeaderLen;
+      // Advance to the group that contains this entry
+      while (groupIdx < groups.length && groups[groupIdx].end <= startAbs) groupIdx++;
+      const g = groups[groupIdx];
+      const buf = blobs[groupIdx];
+      const rel = startAbs - g.start;
+      body.set(buf.subarray(rel, rel + e.payloadLen), p);
+    }
+    log.debug("single:coalesce", { groups: groups.length });
   }
 
   // Append SHA-1 trailer
@@ -227,7 +338,12 @@ export async function assemblePackFromR2(
   const out = new Uint8Array(body.byteLength + 20);
   out.set(body, 0);
   out.set(sha, body.byteLength);
-  log.info("single:assembled", { objects: order.length, bytes: out.byteLength });
+  log.info("single:assembled", {
+    objects: order.length,
+    bytes: out.byteLength,
+    r2Gets,
+    timeMs: Date.now() - started,
+  });
   return out;
 }
 
@@ -248,6 +364,8 @@ export async function assemblePackFromMultiplePacks(
   signal?: AbortSignal
 ): Promise<Uint8Array | undefined> {
   const log = createLogger(env.LOG_LEVEL, { service: "PackAssemblerMulti" });
+  const started = Date.now();
+  let r2PayloadGets = 0;
   log.debug("multi:start", { packs: packKeys.length, needed: neededOids.length });
   if (signal?.aborted) return undefined;
   type Meta = {
@@ -259,35 +377,28 @@ export async function assemblePackFromMultiplePacks(
     packSize: number;
   };
   const metas: Meta[] = [];
-  for (const key of packKeys) {
-    const idxKey = packIndexKey(key);
-    const [idxObj, head] = await Promise.all([
-      env.REPO_BUCKET.get(idxKey),
-      env.REPO_BUCKET.head(key),
-    ]);
-    if (!idxObj || !head) {
-      log.debug("multi:missing-pack-or-idx", { key, idx: !!idxObj, head: !!head });
-      continue;
-    }
-    const idxBuf = new Uint8Array(await idxObj.arrayBuffer());
-    const parsed = parseIdxV2(idxBuf);
-    if (!parsed) {
-      log.warn("multi:idx-parse-failed", { key });
-      continue;
+  const CONC = 8;
+  const metaResults = await mapWithConcurrency(packKeys, CONC, async (key) => {
+    const [parsed, head] = await Promise.all([loadIdxParsed(env, key), env.REPO_BUCKET.head(key)]);
+    if (!parsed || !head) {
+      log.debug("multi:missing-pack-or-idx", { key, idx: !!parsed, head: !!head });
+      return undefined;
     }
     const oidToIndex = new Map<string, number>();
     for (let i = 0; i < parsed.oids.length; i++) oidToIndex.set(parsed.oids[i], i);
     const offsetToIndex = new Map<number, number>();
     for (let i = 0; i < parsed.offsets.length; i++) offsetToIndex.set(parsed.offsets[i], i);
-    metas.push({
+    const meta: Meta = {
       key,
       oids: parsed.oids,
       offsets: parsed.offsets,
       oidToIndex,
       offsetToIndex,
       packSize: head.size,
-    });
-  }
+    };
+    return meta;
+  });
+  for (const m of metaResults) if (m) metas.push(m);
   if (metas.length === 0) {
     log.debug("multi:no-metas", {});
     return undefined;
@@ -428,6 +539,21 @@ export async function assemblePackFromMultiplePacks(
     order.push(...arr);
   }
 
+  // Sanity: ensure all delta entries have their bases included
+  for (const n of order) {
+    if (n.type === 6 || n.type === 7) {
+      if (!n.base) {
+        log.warn("multi:delta-missing-base", { key: n.m.key, oid: n.m.oids[n.i], type: n.type });
+        return undefined;
+      }
+      const bk = nodeKey(n.base);
+      if (!nodeMap.has(bk)) {
+        log.warn("multi:base-not-included", { key: n.m.key, oid: n.m.oids[n.i], baseKey: bk });
+        return undefined;
+      }
+    }
+  }
+
   // Two-pass header length and offsets
   const newHeaderLen = new Map<string, number>();
   for (const n of order) {
@@ -514,12 +640,18 @@ export async function assemblePackFromMultiplePacks(
       return undefined;
     }
     body.set(payload, p);
+    r2PayloadGets++;
   }
   const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", body));
   const out = new Uint8Array(body.byteLength + 20);
   out.set(body, 0);
   out.set(sha, body.byteLength);
-  log.info("multi:assembled", { objects: order.length, bytes: out.byteLength });
+  log.info("multi:assembled", {
+    objects: order.length,
+    bytes: out.byteLength,
+    payloadGets: r2PayloadGets,
+    timeMs: Date.now() - started,
+  });
   return out;
 }
 
