@@ -7,15 +7,7 @@ import {
   Head,
   UnpackWork,
 } from "./repoState.ts";
-import {
-  doPrefix,
-  r2LooseKey,
-  r2PackDirPrefix,
-  isPackKey,
-  isIdxKey,
-  packKeyFromIndexKey,
-  packIndexKey,
-} from "@/keys.ts";
+import { doPrefix, r2LooseKey, r2PackDirPrefix, isPackKey, packIndexKey } from "@/keys.ts";
 import {
   encodeGitObjectAndDeflate,
   unpackPackToLoose,
@@ -79,14 +71,6 @@ export class RepoDurableObject extends DurableObject {
       this.lastAccessMemMs = await ctx.storage.get("lastAccessMs");
       await this.ensureAccessAndAlarm();
     });
-  }
-
-  /**
-   * Test helper: invoke maintenance deterministically with a specified keep window.
-   * Not used in production paths; exposed for worker tests.
-   */
-  public async debugRunMaintenance(keepPacks: number): Promise<void> {
-    await this.runMaintenance(keepPacks);
   }
 
   // Thin request router: delegates to focused handlers below.

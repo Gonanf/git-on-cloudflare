@@ -9,6 +9,8 @@ import {
   getHeadAndRefs,
   HeadInfo,
   Ref,
+  inflateAndParseHeader,
+  parseTagTarget,
 } from "@/git";
 import { getRepoStub } from "@/common";
 import { repoKey } from "@/keys";
@@ -59,20 +61,78 @@ async function handleUploadPackPOST(
       ctx
     );
     const { head, refs } = refsData || { refs: [] };
+
+    // Parse ls-refs arguments (reuse already-read body to avoid double-read of the stream)
+    const { args } = parseV2Command(body);
+    const refPrefixes: string[] = [];
+    let wantPeel = false;
+    let wantSymrefs = false;
+    for (const a of args) {
+      if (a === "peel") wantPeel = true;
+      else if (a === "symrefs") wantSymrefs = true;
+      else if (a.startsWith("ref-prefix ")) refPrefixes.push(a.slice("ref-prefix ".length));
+    }
+
+    // Filter refs by ref-prefix when provided
+    let filteredRefs = refs;
+    if (refPrefixes.length > 0) {
+      filteredRefs = refs.filter((r) => refPrefixes.some((p) => r.name.startsWith(p)));
+    }
+
+    // Optional peel of annotated tags
+    let peeledByRef = new Map<string, string>();
+    if (wantPeel) {
+      try {
+        const tagRefs = filteredRefs.filter((r) => r.name.startsWith("refs/tags/"));
+        if (tagRefs.length > 0) {
+          const stub = getRepoStub(env, repoId);
+          const oids = tagRefs.map((r) => r.oid);
+          const objMap = (await stub.getObjectsBatch(oids)) as Map<string, Uint8Array | null>;
+          for (const r of tagRefs) {
+            const z = objMap.get(r.oid);
+            if (!z) continue;
+            const parsed = await inflateAndParseHeader(
+              z instanceof Uint8Array ? z : new Uint8Array(z)
+            );
+            if (!parsed) continue;
+            if (parsed.type === "tag") {
+              const peeled = parseTagTarget(parsed.payload);
+              if (peeled?.targetOid) peeledByRef.set(r.name, peeled.targetOid);
+            }
+          }
+        }
+      } catch {}
+    }
+
     const chunks: Uint8Array[] = [];
-    // Per spec, HEAD should be first when available
+    // Place HEAD first if available; include symref-target attribute (kept for compatibility)
     if (head && head.target) {
-      const t = refs.find((r) => r.name === head.target);
+      const t =
+        filteredRefs.find((r) => r.name === head.target) ||
+        refs.find((r) => r.name === head.target);
       const headOid = head.oid ?? t?.oid;
-      // Treat HEAD as unborn only if the target ref doesn't exist
+      const headLineAttrs: string[] = [];
+      // Historically we emitted symref-target unconditionally; retain for compatibility
+      headLineAttrs.push(`symref-target:${head.target}`);
       if (headOid) {
-        chunks.push(pktLine(`${headOid} HEAD symref-target:${head.target}\n`));
+        const base = [`${headOid} HEAD`, ...headLineAttrs].join(" ");
+        chunks.push(pktLine(base + "\n"));
       } else {
-        chunks.push(pktLine(`unborn HEAD symref-target:${head.target}\n`));
+        const base = ["unborn HEAD", ...headLineAttrs].join(" ");
+        chunks.push(pktLine(base + "\n"));
       }
     }
-    for (const r of refs) {
-      chunks.push(pktLine(`${r.oid} ${r.name}\n`));
+
+    for (const r of filteredRefs) {
+      const attrs: string[] = [];
+      // Only include peeled attribute when requested and available
+      if (wantPeel) {
+        const peeled = peeledByRef.get(r.name);
+        if (peeled) attrs.push(`peeled:${peeled}`);
+      }
+      const line =
+        attrs.length > 0 ? `${r.oid} ${r.name} ${attrs.join(" ")}` : `${r.oid} ${r.name}`;
+      chunks.push(pktLine(line + "\n"));
     }
     chunks.push(flushPkt());
     return new Response(concatChunks(chunks), {

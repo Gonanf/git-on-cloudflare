@@ -188,14 +188,13 @@ export async function assemblePackFromR2(
 
   // Determine order by original offsets
   const order = Array.from(selected.values()).sort((a, b) => offsets[a] - offsets[b]);
-
-  // First pass: assume OFS varint length stable; compute new offsets
+  // Iteratively recompute OFS varint lengths and offsets until stable (like multi-pack path)
   const newHeaderLen = new Map<number, number>();
   for (const i of order) {
     if (signal?.aborted) return undefined;
     const e = entries.get(i)!;
     if (e.type === 6) {
-      // provisional: guess varint length for ofs using original distance
+      // Initial guess using original distance
       const origBaseOff = e.baseIndex !== undefined ? offsets[e.baseIndex] : 0;
       const guessRel = offsets[i] - origBaseOff;
       newHeaderLen.set(i, e.sizeVarBytes.length + encodeOfsDeltaDistance(guessRel).length);
@@ -206,38 +205,59 @@ export async function assemblePackFromR2(
     }
   }
 
-  const newOffsets = new Map<number, number>();
+  let newOffsets = new Map<number, number>();
   let cur = 12; // after PACK header
-  for (const i of order) {
-    newOffsets.set(i, cur);
-    cur += newHeaderLen.get(i)! + entries.get(i)!.payloadLen;
-  }
-
-  // Second pass: re-evaluate OFS varints with accurate new distances and recompute if length changed
-  let changed = false;
-  for (const i of order) {
-    const e = entries.get(i)!;
-    if (e.type !== 6) continue;
-    const baseIdx = e.baseIndex!;
-    const rel = newOffsets.get(i)! - newOffsets.get(baseIdx)!;
-    const newOfsBytes = encodeOfsDeltaDistance(rel);
-    const desired = e.sizeVarBytes.length + newOfsBytes.length;
-    if (desired !== newHeaderLen.get(i)) {
-      newHeaderLen.set(i, desired);
-      changed = true;
-    }
-  }
-  if (changed) {
+  let iter = 0;
+  while (true) {
+    if (signal?.aborted) return undefined;
+    // Compute offsets based on current header lengths
+    newOffsets = new Map<number, number>();
     cur = 12;
     for (const i of order) {
       newOffsets.set(i, cur);
       cur += newHeaderLen.get(i)! + entries.get(i)!.payloadLen;
     }
+    // Re-evaluate OFS varints with accurate distances
+    let changed = false;
+    for (const i of order) {
+      const e = entries.get(i)!;
+      if (e.type !== 6 || e.baseIndex === undefined) continue;
+      const rel = newOffsets.get(i)! - newOffsets.get(e.baseIndex)!;
+      const desired = e.sizeVarBytes.length + encodeOfsDeltaDistance(rel).length;
+      if (desired !== newHeaderLen.get(i)) {
+        newHeaderLen.set(i, desired);
+        changed = true;
+      }
+    }
+    if (!changed || ++iter >= 16) break; // converge or cap iterations
   }
 
-  // Write output
-  const totalLen = cur;
-  const body = new Uint8Array(totalLen);
+  // Recompute exact header lengths using final offsets for consistency and exact allocation
+  const finalHeaderLen = new Map<number, number>();
+  for (const i of order) {
+    const e = entries.get(i)!;
+    if (e.type === 6 && e.baseIndex !== undefined) {
+      const rel = newOffsets.get(i)! - newOffsets.get(e.baseIndex)!;
+      finalHeaderLen.set(i, e.sizeVarBytes.length + encodeOfsDeltaDistance(rel).length);
+    } else if (e.type === 7) {
+      finalHeaderLen.set(i, e.sizeVarBytes.length + 20);
+    } else {
+      finalHeaderLen.set(i, e.sizeVarBytes.length);
+    }
+  }
+  // Recompute final offsets using the final header lengths
+  newOffsets = new Map<number, number>();
+  let acc = 12;
+  for (const i of order) {
+    newOffsets.set(i, acc);
+    acc += (finalHeaderLen.get(i) || 0) + entries.get(i)!.payloadLen;
+  }
+  const finalSize = acc;
+  // Update header lengths map to the final values
+  for (const [k, v] of finalHeaderLen) newHeaderLen.set(k, v);
+
+  // Write output using exact final size
+  const body = new Uint8Array(finalSize);
   // PACK header
   body.set(new TextEncoder().encode("PACK"), 0);
   const dv = new DataView(body.buffer);

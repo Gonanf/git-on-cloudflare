@@ -225,8 +225,8 @@ async function runConnectivityCheck(args: {
 
         switch (kind.type) {
           case "commit": {
-            const ok = await ensureTreePresent(kind.tree);
-            if (!ok) {
+            const okTree = await ensureTreePresent(kind.tree);
+            if (!okTree) {
               log.warn("connectivity:missing-tree", {
                 ref: c.ref,
                 tree: kind.tree,
@@ -234,7 +234,23 @@ async function runConnectivityCheck(args: {
                 inStorage: await hasObject(kind.tree.toLowerCase()),
               });
               statuses[i] = { ref: c.ref, ok: false, msg: "missing-objects" };
+              break;
             }
+            // Phase 2: also ensure all parents exist (basic connectivity)
+            try {
+              const info = await git.readCommit({ fs, dir, oid: newOidLc });
+              const parents: string[] = Array.isArray(info?.commit?.parent)
+                ? (info.commit.parent as string[])
+                : [];
+              for (const p of parents) {
+                const exists = await hasObject(String(p).toLowerCase());
+                if (!exists) {
+                  log.warn("connectivity:missing-parent", { ref: c.ref, parent: String(p) });
+                  statuses[i] = { ref: c.ref, ok: false, msg: "missing-objects" };
+                  break;
+                }
+              }
+            } catch {}
             break;
           }
           case "tree": {
@@ -316,6 +332,46 @@ export async function receivePack(
       if (parts.length >= 3) {
         cmds.push({ oldOid: parts[0], newOid: parts[1], ref: parts.slice(2).join(" ") });
       }
+    }
+
+    // Validate ref names and reject HEAD updates
+    function isValidRefName(name: string): boolean {
+      // Disallow direct HEAD and empty
+      if (!name || name === "HEAD") return false;
+      // Must start with refs/
+      if (!name.startsWith("refs/")) return false;
+      // Disallow forbidden characters and sequences per Git rules
+      // No control chars, no space, no tilde, caret, colon, question, asterisk, open bracket
+      if (/[\x00-\x20~^:?*\[]/.test(name)) return false;
+      // No consecutive slashes, no leading or trailing slash
+      if (name.includes("//") || name.startsWith("/") || name.endsWith("/")) return false;
+      // No components of "." or ".."
+      if (name.split("/").some((c) => c === "." || c === "..")) return false;
+      // Cannot end with a dot or .lock
+      if (name.endsWith(".") || name.endsWith(".lock")) return false;
+      // No "@{" sequence
+      if (name.includes("@{")) return false;
+      // No backslash
+      if (name.includes("\\")) return false;
+      return true;
+    }
+    const invalids = cmds.filter((c) => !isValidRefName(c.ref));
+    if (invalids.length > 0) {
+      log.warn("receive:invalid-ref", { count: invalids.length, sample: invalids[0]?.ref });
+      const chunks: Uint8Array[] = [];
+      chunks.push(pktLine("unpack error invalid-ref\n"));
+      for (const c of cmds) {
+        const ok = !invalids.some((x) => x.ref === c.ref);
+        chunks.push(pktLine(`ng ${c.ref} ${ok ? "ok" : "invalid"}\n`));
+      }
+      chunks.push(flushPkt());
+      return new Response(concatChunks(chunks), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/x-git-receive-pack-result",
+          "Cache-Control": "no-cache",
+        },
+      });
     }
 
     const pack = body.subarray(offset);
