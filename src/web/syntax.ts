@@ -105,14 +105,6 @@ export function inferHljsLang(fileName: string): string | null {
 }
 
 /**
- * Build the code class (e.g. "language-typescript") for a given language.
- * Falls back to "language-plaintext" when null/unknown.
- */
-export function buildHljsCodeClass(lang: string | null): string {
-  return lang ? `language-${lang}` : "language-plaintext";
-}
-
-/**
  * Default small set of languages useful for README/markdown pages.
  * Keep this list short to honor "load only when needed" while covering common fences.
  */
@@ -153,15 +145,6 @@ export function inferHljsLangSmart(fileName: string, text?: string): string | nu
  */
 export function getHighlightLangsForBlobSmart(fileName: string, text?: string): string[] {
   const lang = inferHljsLangSmart(fileName, text);
-  const normalized = normalizeLangForCdn(lang);
-  return normalized ? [normalized] : [];
-}
-
-/**
- * Languages to load for a blob using simple inference.
- */
-export function getHighlightLangsForBlob(fileName: string): string[] {
-  const lang = inferHljsLang(fileName);
   const normalized = normalizeLangForCdn(lang);
   return normalized ? [normalized] : [];
 }

@@ -15,18 +15,6 @@ export function text(body: string, status = 200, headers: HeadersInit = {}) {
   return new Response(body, { status, headers: h });
 }
 
-export function badRequest(message = "Bad request\n", headers: HeadersInit = {}) {
-  return text(message, 400, headers);
-}
-
-export function notFound(message = "Not found\n", headers: HeadersInit = {}) {
-  return text(message, 404, headers);
-}
-
-export function serverError(message = "Internal error\n", headers: HeadersInit = {}) {
-  return text(message, 500, headers);
-}
-
 /**
  * Extract a Bearer token from the Authorization header.
  * Returns an empty string when missing or malformed.

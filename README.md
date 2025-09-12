@@ -55,8 +55,8 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 - **Clone speeds**: 10-50 MB/s from any edge location
 - **Push processing**: <5s for typical commits, large pushes handled incrementally
 - **Response times**: <50ms for cached paths, <100ms globally for cold requests
-- **Pack assembly**: Streaming from R2 using `.idx` range reads, no full pack loads
-- **KV pack metadata cache**: OID→pack mapping and recent pack lists reduce DO roundtrips
+- **Pack assembly**: Streaming from R2 using `.idx` range reads, with heuristics to load whole packs when beneficial
+- **Centralized pack discovery**: Per-request coalesced discovery (DO metadata + best-effort R2 listing) reduces upstream calls
 - **Memory efficiency**: Multi-pack-index support avoids expensive repack operations
 
 ### Implementation Details
@@ -112,8 +112,8 @@ Environment variables control pack management and unpacking behavior:
 ```bash
 REPO_DO_IDLE_MINUTES=30      # Cleanup idle repos after 30 min
 REPO_DO_MAINT_MINUTES=1440   # Run maintenance daily
-REPO_KEEP_PACKS=3            # Long-term pack retention
-REPO_UNPACK_CHUNK_SIZE=25    # Objects per chunk
+REPO_KEEP_PACKS=10           # Long-term pack retention
+REPO_UNPACK_CHUNK_SIZE=50    # Objects per chunk
 REPO_UNPACK_MAX_MS=1000      # Max time per unpack operation
 ```
 

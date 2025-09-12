@@ -7,10 +7,11 @@ This project implements a Git Smart HTTP v2 server on Cloudflare Workers using a
 The codebase is organized into focused modules with `index.ts` export files:
 
 - **`/git`** - Core Git functionality
-  - `repoDO.ts` - Repository Durable Object
   - `operations/` - Git operations (upload-pack, receive-pack)
   - `core/` - Protocol handling, pkt-line, readers
   - `pack/` - Pack assembly, unpacking, indexing
+- **`/do`** - Durable Objects
+  - `repoDO.ts` - Repository Durable Object (per-repo authority)
 - **`/auth`** - Authentication module
   - `authDO.ts` - Auth Durable Object
   - `verify.ts` - Token verification
@@ -47,7 +48,7 @@ The codebase is organized into focused modules with `index.ts` export files:
   - `listRefs()`, `setRefs()`, `getHead()`, `setHead()`, `getHeadAndRefs()`
   - `getObjectStream()`, `getObject()`, `getObjectSize()`
   - `getPackLatest()`, `getPacks()`, `getPackOids()`
-  - `getUnpackProgress()` — unpacking status/progress for gating KV writes and UI (includes `queuedCount` and `currentPackKey`)
+  - `getUnpackProgress()` — unpacking status/progress for UI gating (includes `queuedCount` and `currentPackKey`)
 - Push flow: raw `.pack` is written to R2, a fast index-only step writes `.idx`, and unpack is queued for background processing on the DO alarm in small time-budgeted chunks.
 - Maintains pack metadata (`lastPackKey`, `lastPackOids`, `packList`, `packOids:<key>`) used by fetch assembly.
 
@@ -69,8 +70,8 @@ The codebase is organized into focused modules with `index.ts` export files:
 
 - **UI Cache**: 60s for HEAD/refs, 5min for README, 1hr for tag commits
 - **Object Cache**: Immutable Git objects cached for 1 year
-- **KV-backed pack metadata hints**: recent pack list and OID→pack mapping to reduce DO calls during reads; writes are gated by `shouldSkipKVCache()` and DO `/unpack-progress` to avoid staleness during churn
-- Reduces DO/R2 calls significantly, improves response times to <50ms
+- **Pack discovery and memoization**: `src/git/operations/packDiscovery.ts#getPackCandidates()` coalesces per-request discovery using DO metadata (latest + list) with a best‑effort R2 listing fallback. Results are memoized in `RequestMemo`.
+- **Per-request limiter and soft budget**: All DO/R2 calls in read and upload paths use a concurrency limiter and a soft subrequest budget to avoid hitting platform limits.
 
 ## Background processing and alarms
 

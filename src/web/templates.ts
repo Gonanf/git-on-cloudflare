@@ -121,7 +121,7 @@ export async function renderView(
   data: Record<string, unknown>
 ): Promise<string | null> {
   const engine = getEngine(env);
-  // We expect templates under src/assets/templates/<name>.html
+  // We expect templates under src/assets/templates/<name>.liquid
   return await engine.renderFile(name, data);
 }
 

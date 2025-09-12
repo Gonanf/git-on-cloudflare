@@ -3,15 +3,18 @@ import {
   capabilityAdvertisement,
   parseV2Command,
   handleFetchV2,
-  JsRepoEngine,
   pktLine,
   flushPkt,
   concatChunks,
+  getHeadAndRefs,
+  HeadInfo,
+  Ref,
 } from "@/git";
 import { getRepoStub } from "@/common";
 import { repoKey } from "@/keys";
 import { verifyAuth } from "@/auth";
 import { addRepoToOwner, removeRepoFromOwner } from "@/registry";
+import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/cache";
 
 /**
  * Handles Git upload-pack (fetch) POST requests.
@@ -21,7 +24,12 @@ import { addRepoToOwner, removeRepoFromOwner } from "@/registry";
  * @param request - Incoming HTTP request
  * @returns Response with pack data or error
  */
-async function handleUploadPackPOST(env: Env, repoId: string, request: Request) {
+async function handleUploadPackPOST(
+  env: Env,
+  repoId: string,
+  request: Request,
+  ctx: ExecutionContext
+) {
   const body = new Uint8Array(await request.arrayBuffer());
   const gitProto = request.headers.get("Git-Protocol") || "";
   const { command } = parseV2Command(body);
@@ -32,17 +40,29 @@ async function handleUploadPackPOST(env: Env, repoId: string, request: Request) 
     });
   }
 
-  const engine = new JsRepoEngine(env, repoId);
-
   if (command === "ls-refs") {
-    const [head, refs] = await Promise.all([
-      engine.getHead().catch(() => undefined),
-      engine.listRefs().catch(() => []),
-    ]);
+    const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", {
+      repo: repoId,
+    });
+
+    const refsData = await cacheOrLoadJSON<{ head: HeadInfo | undefined; refs: Ref[] }>(
+      cacheKeyRefs,
+      async () => {
+        try {
+          const result = await getHeadAndRefs(env, repoId);
+          return { head: result.head, refs: result.refs };
+        } catch {
+          return null;
+        }
+      },
+      60,
+      ctx
+    );
+    const { head, refs } = refsData || { refs: [] };
     const chunks: Uint8Array[] = [];
     // Per spec, HEAD should be first when available
     if (head && head.target) {
-      const t = (refs as { name: string; oid: string }[]).find((r) => r.name === head.target);
+      const t = refs.find((r) => r.name === head.target);
       const headOid = head.oid ?? t?.oid;
       // Treat HEAD as unborn only if the target ref doesn't exist
       if (headOid) {
@@ -65,7 +85,7 @@ async function handleUploadPackPOST(env: Env, repoId: string, request: Request) 
   }
 
   if (command === "fetch") {
-    return handleFetchV2(env, repoId, body, request.signal);
+    return handleFetchV2(env, repoId, body, request.signal, { req: request, ctx });
   }
 
   return new Response("Unsupported command or malformed request\n", { status: 400 });
@@ -142,9 +162,9 @@ export function registerGitRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // git-upload-pack (POST)
-  router.post(`/:owner/:repo/git-upload-pack`, async (request, env: Env) => {
+  router.post(`/:owner/:repo/git-upload-pack`, async (request, env: Env, ctx: ExecutionContext) => {
     const { owner, repo } = request.params;
-    return handleUploadPackPOST(env, repoKey(owner, repo), request);
+    return handleUploadPackPOST(env, repoKey(owner, repo), request, ctx);
   });
 
   // git-receive-pack (POST)

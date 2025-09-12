@@ -19,8 +19,9 @@ export async function capabilityAdvertisement(
     chunks.push(pktLine("version 2\n"));
     chunks.push(pktLine(`agent=git-on-cloudflare/0.1\n`));
     chunks.push(pktLine("ls-refs\n"));
-    // Keep fetch line minimal to only what we implement; no shallow/filter/thin/ofs/include-tag yet
+    // Advertise fetch and supported features
     chunks.push(pktLine("fetch\n"));
+    chunks.push(pktLine("ofs-delta\n"));
     chunks.push(pktLine(`object-format=sha1\n`));
     chunks.push(flushPkt());
     return new Response(concatChunks(chunks), {

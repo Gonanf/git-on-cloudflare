@@ -15,6 +15,14 @@ git pull https://your-domain.com/owner/repo
 - **`GET /:owner/:repo/info/refs?service=git-upload-pack`**  
   Capability advertisement for fetch operations. Returns refs and capabilities.
 
+  Advertised capabilities (protocol v2):
+  - `version 2`
+  - `agent=git-on-cloudflare/0.1`
+  - `ls-refs`
+  - `fetch`
+  - `ofs-delta`
+  - `object-format=sha1`
+
 - **`POST /:owner/:repo/git-upload-pack`**  
   Fetch objects (clone/pull). Handles pack negotiation and object transfer.
 

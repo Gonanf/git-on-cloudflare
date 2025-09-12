@@ -29,12 +29,13 @@ The DO also records metadata to help fetch:
 2. For `POST /:owner/:repo/git-upload-pack` with a v2 body:
    - `ls-refs` command: reads the DO via RPC (`getHead()` and `listRefs()`) and responds with HEAD + refs
    - `fetch` command:
-     - Parses wants/haves and computes a minimal closure of needed oids
-     - Tries to assemble a minimal pack from R2 using `.idx` range reads
-       - Single-pack: `assemblePackFromR2()`
+     - Parses wants/haves and computes a minimal closure of needed OIDs
+     - Discovers candidate packs via `src/git/operations/packDiscovery.ts#getPackCandidates()` (DO metadata first, then best‑effort R2 listing), memoized per request with limiter + soft budget
+     - Attempts to assemble from R2 using `.idx` range reads:
+       - Single-pack: `assemblePackFromR2()` (skipped for initial clones when coverage guard detects missing root trees)
        - Multi-pack union: `assemblePackFromMultiplePacks()`
-     - Uses KV-backed pack metadata hints (OID→pack, recent pack list) to avoid extra DO metadata calls when safe (see Caching Strategy)
-     - If packs can’t fully cover, falls back to DO loose objects and builds a minimal pack on the fly
+     - If the closure traversal times out, tries a safe multi-pack union based on recent packs; otherwise returns `503` with `Retry-After` rather than sending a partial/thin pack
+     - As a last resort for non-initial clones, reads loose objects and builds a thick pack; if any needed object is unavailable in loose mode, returns `503` to avoid partial packs
      - Responds with sidebanded `packfile` chunks
 
 ## Web UI blob views

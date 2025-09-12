@@ -49,10 +49,6 @@
     {
       "binding": "OWNER_REGISTRY",
       "id": "2e6769b1e1cf488d8055a7fb4ecbd0f3"
-    },
-    {
-      "binding": "PACK_METADATA_CACHE",
-      "id": "6c004d9b2bc040bca001795527516b30"
     }
   ],
   "r2_buckets": [
@@ -77,10 +73,10 @@
     "REPO_DO_IDLE_MINUTES": "30",
     "REPO_DO_MAINT_MINUTES": "1440",
     // Pack retention
-    "REPO_KEEP_PACKS": "3",
+    "REPO_KEEP_PACKS": "10",
     // Max number of recent pack entries to retain immediately after pushes
     // (long-term retention will further trim to REPO_KEEP_PACKS during maintenance)
-    "REPO_PACKLIST_MAX": "20",
+    "REPO_PACKLIST_MAX": "50",
     // Background unpack chunking
     "REPO_UNPACK_CHUNK_SIZE": "25",
     "REPO_UNPACK_MAX_MS": "1000",

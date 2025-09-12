@@ -1,42 +1,11 @@
 import { it, expect } from "vitest";
-import { env, SELF, runInDurableObject } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import * as git from "isomorphic-git";
 import { asTypedStorage, RepoStateSchema } from "@/do/repoState.ts";
-import { createMemPackFs } from "@/git";
+import { concatChunks, createMemPackFs, delimPkt, encodeObjHeader, flushPkt, pktLine } from "@/git";
 import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
-
-function pktLine(s: string | Uint8Array): Uint8Array {
-  const enc = typeof s === "string" ? new TextEncoder().encode(s) : s;
-  const len = enc.byteLength + 4;
-  const hdr = new TextEncoder().encode(len.toString(16).padStart(4, "0"));
-  const out = new Uint8Array(hdr.byteLength + enc.byteLength);
-  out.set(hdr, 0);
-  out.set(enc, hdr.byteLength);
-  return out;
-}
-function delimPkt() {
-  return new TextEncoder().encode("0001");
-}
-function flushPkt() {
-  return new TextEncoder().encode("0000");
-}
-function concatChunks(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((a, c) => a + c.byteLength, 0);
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.byteLength;
-  }
-  return out;
-}
-
-async function inflateZlib(z: Uint8Array): Promise<Uint8Array> {
-  const ds: any = new (globalThis as any).DecompressionStream("deflate");
-  const stream = new Blob([z]).stream().pipeThrough(ds);
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
+import { deflate, inflate } from "@/common/index.ts";
 
 async function readLoose(
   getStub: () => DurableObjectStub<RepoDurableObject>,
@@ -45,7 +14,7 @@ async function readLoose(
   const obj = await callStubWithRetry(getStub, (s) => s.getObject(oid));
   if (!obj) throw new Error("missing loose " + oid);
   const z = new Uint8Array(obj);
-  const raw = await inflateZlib(z);
+  const raw = await inflate(z);
   // parse header: "type size\0"
   let p = 0;
   while (p < raw.length && raw[p] !== 0x20) p++;
@@ -56,26 +25,6 @@ async function readLoose(
   return { type, payload };
 }
 
-function encodeObjHeader(type: number, size: number): Uint8Array {
-  let first = (type << 4) | (size & 0x0f);
-  size >>= 4;
-  const bytes: number[] = [];
-  if (size > 0) first |= 0x80;
-  bytes.push(first);
-  while (size > 0) {
-    let b = size & 0x7f;
-    size >>= 7;
-    if (size > 0) b |= 0x80;
-    bytes.push(b);
-  }
-  return new Uint8Array(bytes);
-}
-async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
-  const cs: any = new (globalThis as any).CompressionStream("deflate");
-  const stream = new Blob([data]).stream().pipeThrough(cs);
-  const buf = await new Response(stream).arrayBuffer();
-  return new Uint8Array(buf);
-}
 async function buildPack(objs: { type: string; payload: Uint8Array }[]): Promise<Uint8Array> {
   // PACK header
   const hdr = new Uint8Array(12);
@@ -87,7 +36,7 @@ async function buildPack(objs: { type: string; payload: Uint8Array }[]): Promise
   for (const o of objs) {
     const typeCode = o.type === "commit" ? 1 : o.type === "tree" ? 2 : o.type === "blob" ? 3 : 4;
     parts.push(encodeObjHeader(typeCode, o.payload.byteLength));
-    parts.push(await deflateRaw(o.payload));
+    parts.push(await deflate(o.payload));
   }
   const body = concatChunks(parts);
   const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", body));

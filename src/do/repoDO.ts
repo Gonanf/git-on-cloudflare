@@ -14,6 +14,7 @@ import {
   isPackKey,
   isIdxKey,
   packKeyFromIndexKey,
+  packIndexKey,
 } from "@/keys.ts";
 import {
   encodeGitObjectAndDeflate,
@@ -21,16 +22,17 @@ import {
   unpackOidsChunkFromPackBytes,
   receivePack,
   parseCommitText,
+  inflateAndParseHeader,
+  parseCommitRefs,
+  parseTreeChildOids,
 } from "@/git/index.ts";
 import {
-  json,
   text,
-  badRequest,
   createLogger,
   createInflateStream,
   UnpackProgress,
+  isValidOid,
 } from "@/common/index.ts";
-import { setUnpackStatus } from "@/cache/index.ts";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -42,8 +44,8 @@ import { setUnpackStatus } from "@/cache/index.ts";
  * - Mirrors loose objects to R2 under `do/<id>/objects/loose/<oid>` for cheap reads
  * - Writes received packfiles to R2 under `do/<id>/objects/pack/*.pack` (and .idx)
  * - Exposes focused internal HTTP endpoints:
- *   - `POST /receive` — receive-pack implementation (delegates to do/receivePack.ts)
- *   - `POST /reindex` — reindex latest pack (diagnostic)
+ *   - `POST /receive` — receive-pack implementation (delegates to git/operations/receive.ts)
+ *   - `POST /reindex` — reindex latest pack (dev/diagnostic)
  * - All other operations are provided as typed RPC methods on the class.
  *
  * Read Path (RPC)
@@ -77,6 +79,14 @@ export class RepoDurableObject extends DurableObject {
       this.lastAccessMemMs = await ctx.storage.get("lastAccessMs");
       await this.ensureAccessAndAlarm();
     });
+  }
+
+  /**
+   * Test helper: invoke maintenance deterministically with a specified keep window.
+   * Not used in production paths; exposed for worker tests.
+   */
+  public async debugRunMaintenance(keepPacks: number): Promise<void> {
+    await this.runMaintenance(keepPacks);
   }
 
   // Thin request router: delegates to focused handlers below.
@@ -139,7 +149,7 @@ export class RepoDurableObject extends DurableObject {
 
   public async getObjectStream(oid: string): Promise<ReadableStream | null> {
     await this.ensureAccessAndAlarm();
-    if (!this.isValidOid(oid)) return null;
+    if (!isValidOid(oid)) return null;
     // Try R2 first
     try {
       const obj = await this.env.REPO_BUCKET.get(r2LooseKey(this.prefix(), oid));
@@ -162,7 +172,7 @@ export class RepoDurableObject extends DurableObject {
 
   public async getObject(oid: string): Promise<ArrayBuffer | Uint8Array | null> {
     await this.ensureAccessAndAlarm();
-    if (!this.isValidOid(oid)) return null;
+    if (!isValidOid(oid)) return null;
     // Try R2 first
     try {
       const obj = await this.env.REPO_BUCKET.get(r2LooseKey(this.prefix(), oid));
@@ -176,7 +186,7 @@ export class RepoDurableObject extends DurableObject {
 
   public async hasLoose(oid: string): Promise<boolean> {
     await this.ensureAccessAndAlarm();
-    if (!this.isValidOid(oid)) return false;
+    if (!isValidOid(oid)) return false;
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     const data = await store.get(objKey(oid));
     if (data) return true;
@@ -214,7 +224,7 @@ export class RepoDurableObject extends DurableObject {
     } catch {}
 
     const checkOne = async (oid: string): Promise<boolean> => {
-      if (!/^[0-9a-f]{40}$/i.test(oid)) return false;
+      if (!isValidOid(oid)) return false;
       // 1) Fast-path: known to be present in a recent pack
       if (packSet.size > 0 && packSet.has(oid.toLowerCase())) return true;
       // 2) DO state (loose) lookup
@@ -261,6 +271,42 @@ export class RepoDurableObject extends DurableObject {
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     const oids = (await store.get(packOidsKey(key))) || [];
     return oids;
+  }
+
+  /**
+   * Batch API: Retrieve OID membership arrays for multiple pack keys in one call.
+   * Uses DurableObjectStorage.get([...]) to reduce roundtrips and total subrequests.
+   * @param keys - Pack keys to fetch membership for
+   * @returns Map of pack key -> string[] of OIDs (empty array if missing)
+   */
+  public async getPackOidsBatch(keys: string[]): Promise<Map<string, string[]>> {
+    await this.ensureAccessAndAlarm();
+    const out = new Map<string, string[]>();
+    try {
+      if (!Array.isArray(keys) || keys.length === 0) return out;
+      // Clamp batch size to a reasonable number to avoid large payloads
+      const BATCH = 128;
+      for (let i = 0; i < keys.length; i += BATCH) {
+        const part = keys.slice(i, i + BATCH);
+        const storageKeys = part.map((k) => packOidsKey(k) as unknown as string);
+        const fetched = (await this.ctx.storage.get(storageKeys)) as Map<string, unknown>;
+        for (let j = 0; j < part.length; j++) {
+          const packKey = part[j];
+          const skey = storageKeys[j];
+          const val = fetched.get(skey);
+          if (Array.isArray(val)) {
+            out.set(packKey, val as string[]);
+          } else {
+            out.set(packKey, []);
+          }
+        }
+      }
+    } catch (e) {
+      try {
+        this.logger.debug("getPackOidsBatch:error", { error: String(e), count: keys?.length || 0 });
+      } catch {}
+    }
+    return out;
   }
 
   public async getUnpackProgress(): Promise<UnpackProgress> {
@@ -330,7 +376,7 @@ export class RepoDurableObject extends DurableObject {
   }> {
     await this.ensureAccessAndAlarm();
     const q = (commit || "").toLowerCase();
-    if (!/^[0-9a-f]{40}$/.test(q)) {
+    if (!isValidOid(q)) {
       throw new Error("Invalid commit");
     }
 
@@ -381,6 +427,86 @@ export class RepoDurableObject extends DurableObject {
   }
 
   /**
+   * Batch API: Get multiple objects at once to reduce subrequest count.
+   * Returns a Map of OID to compressed data (with Git header).
+   * @param oids - Array of object IDs to fetch
+   * @returns Map of OID to data, with null for missing objects
+   */
+  public async getObjectsBatch(oids: string[]): Promise<Map<string, Uint8Array | null>> {
+    await this.ensureAccessAndAlarm();
+    const result = new Map<string, Uint8Array | null>();
+
+    // Batch size to avoid memory issues while maximizing throughput
+    const BATCH_SIZE = 256;
+
+    for (let i = 0; i < oids.length; i += BATCH_SIZE) {
+      const batch = oids.slice(i, i + BATCH_SIZE);
+      // Use Durable Object storage.get(array) to fetch many keys at once
+      const keys = batch.map((oid) => objKey(oid) as unknown as string);
+      const fetched = (await this.ctx.storage.get(keys)) as Map<
+        string,
+        Uint8Array | ArrayBuffer | undefined
+      >;
+      for (const oid of batch) {
+        const key = objKey(oid) as unknown as string;
+        const data = fetched.get(key);
+        if (data) {
+          const uint8Data = data instanceof Uint8Array ? data : new Uint8Array(data);
+          result.set(oid, uint8Data);
+        } else {
+          // Do NOT fetch from R2 here to avoid subrequest bursts inside the DO invocation.
+          // Return null for DO-missing objects; the Worker will perform pack-based retrieval
+          // with better reuse and per-request memoization.
+          result.set(oid, null);
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Batch API: Extract object references (for commits and trees) without full parsing.
+   * @param oids - Array of object IDs to get references for
+   * @returns Map of OID to array of referenced OIDs
+   */
+  public async getObjectRefsBatch(oids: string[]): Promise<Map<string, string[]>> {
+    await this.ensureAccessAndAlarm();
+    const result = new Map<string, string[]>();
+
+    const objects = await this.getObjectsBatch(oids);
+
+    for (const [oid, data] of objects) {
+      if (!data) {
+        result.set(oid, []);
+        continue;
+      }
+
+      try {
+        const parsed = await inflateAndParseHeader(data);
+        if (!parsed) {
+          result.set(oid, []);
+          continue;
+        }
+        const { type, payload } = parsed;
+        const refs: string[] = [];
+        if (type === "commit") {
+          const { tree, parents } = parseCommitRefs(payload);
+          if (tree) refs.push(tree);
+          for (const p of parents) refs.push(p);
+        } else if (type === "tree") {
+          for (const child of parseTreeChildOids(payload)) refs.push(child);
+        }
+        result.set(oid, refs);
+      } catch (e) {
+        this.logger.debug("getObjectRefsBatch:parse-error", { oid, error: String(e) });
+        result.set(oid, []);
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * RPC: Seed a minimal repository with an empty tree and a single commit pointing to it.
    * Used by tests to initialize a valid repo state without using HTTP fetch routes.
    */
@@ -417,7 +543,7 @@ export class RepoDurableObject extends DurableObject {
    */
   public async putLooseObject(oid: string, zdata: Uint8Array): Promise<void> {
     await this.ensureAccessAndAlarm();
-    if (!this.isValidOid(oid)) throw new Error("Bad oid");
+    if (!isValidOid(oid)) throw new Error("Bad oid");
     await this.storeObject(oid, zdata);
   }
 
@@ -809,10 +935,6 @@ export class RepoDurableObject extends DurableObject {
     return text("OK\n");
   }
 
-  private isValidOid(oid: string): boolean {
-    return /^[0-9a-f]{40}$/i.test(oid);
-  }
-
   public async getObjectSize(oid: string): Promise<number | null> {
     await this.ensureAccessAndAlarm();
     const prefix = this.prefix();
@@ -830,24 +952,6 @@ export class RepoDurableObject extends DurableObject {
 
     if (!data) return null;
     return data.byteLength;
-  }
-
-  public async getObjectContent(oid: string): Promise<BodyInit | null> {
-    await this.ensureAccessAndAlarm();
-    const prefix = this.prefix();
-    const r2key = r2LooseKey(prefix, oid);
-
-    // Try R2 first
-    try {
-      const obj = await this.env.REPO_BUCKET.get(r2key);
-      if (obj) return obj.body;
-    } catch {}
-
-    // Fallback to DO storage
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const data = await store.get(objKey(oid));
-
-    return data || null;
   }
 
   private async storeObject(oid: string, bytes: Uint8Array): Promise<void> {
@@ -971,26 +1075,40 @@ export class RepoDurableObject extends DurableObject {
         this.logger.warn("maintenance:delete-packOids-failed", { key: k, error: String(e) });
       }
     }
+    // Proactively delete removed packs (.pack and .idx) by base key
+    for (const base of removed) {
+      try {
+        await this.env.REPO_BUCKET.delete(base);
+      } catch {}
+      try {
+        await this.env.REPO_BUCKET.delete(packIndexKey(base));
+      } catch {}
+    }
     // Sweep R2 pack files not in keep set
     try {
       const prefix = this.prefix();
       const pfx = r2PackDirPrefix(prefix);
       let cursor: string | undefined = undefined;
+      const packKeys: string[] = [];
       do {
         const res: any = await this.env.REPO_BUCKET.list({ prefix: pfx, cursor });
         const objects: any[] = (res && res.objects) || [];
         for (const obj of objects) {
           const key: string = obj.key;
-          if (!(isPackKey(key) || isIdxKey(key))) continue;
-          const base = isIdxKey(key) ? packKeyFromIndexKey(key) : key;
-          if (!keepSet.has(base)) {
-            try {
-              await this.env.REPO_BUCKET.delete(key);
-            } catch {}
-          }
+          if (isPackKey(key)) packKeys.push(key);
         }
         cursor = res && res.truncated ? res.cursor : undefined;
       } while (cursor);
+      for (const packKey of packKeys) {
+        if (!keepSet.has(packKey)) {
+          try {
+            await this.env.REPO_BUCKET.delete(packKey);
+          } catch {}
+          try {
+            await this.env.REPO_BUCKET.delete(packIndexKey(packKey));
+          } catch {}
+        }
+      }
     } catch {}
   }
 
@@ -1126,8 +1244,6 @@ export class RepoDurableObject extends DurableObject {
             startedAt: Date.now(),
           });
           await store.delete("unpackNext");
-          // Keep unpacking status set to true in KV
-          await setUnpackStatus(this.env.PACK_METADATA_CACHE, this.ctx.id.toString(), true);
           // Schedule next alarm soon to continue unpacking
           await this.ctx.storage.setAlarm(Date.now() + cfg.unpackDelayMs);
           this.logger.info("queue:promote-next", { packKey: nextKey, total: nextOids.length });
@@ -1139,8 +1255,7 @@ export class RepoDurableObject extends DurableObject {
         }
       }
 
-      // No queued work remains; clear unpacking status
-      await setUnpackStatus(this.env.PACK_METADATA_CACHE, this.ctx.id.toString(), false);
+      // No queued work remains
     } else {
       // Update progress and reschedule
       await store.put("unpackWork", {

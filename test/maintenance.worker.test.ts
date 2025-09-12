@@ -1,13 +1,13 @@
 import { it, expect } from "vitest";
 import { env, runDurableObjectAlarm } from "cloudflare:test";
 import { asTypedStorage, RepoStateSchema, packOidsKey } from "@/do/repoState.ts";
-import { runDOWithRetry } from "./util/test-helpers.ts";
+import { runDOWithRetry, withEnvOverrides } from "./util/test-helpers.ts";
 
 function makeRepoId(suffix: string) {
   return `maint/${suffix}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS (default 3)", async () => {
+it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS", async () => {
   const repoId = makeRepoId("packs");
   const id = env.REPO_DO.idFromName(repoId);
   const getStub = () => env.REPO_DO.get(id);
@@ -20,9 +20,10 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS (default 
     }
   );
 
-  // Create 5 synthetic pack+idx files in R2 under this DO prefix
+  // Create 13 synthetic pack+idx files in R2 under this DO prefix
+  // (REPO_KEEP_PACKS=10 in wrangler.jsonc, so 3 oldest will be deleted)
   const keys: string[] = [];
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= 13; i++) {
     const key = `${prefix}/objects/pack/pack-${i}.pack`;
     keys.push(key);
     await env.REPO_BUCKET.put(key, new Uint8Array([i]));
@@ -57,17 +58,17 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS (default 
   })();
   expect(ran, "alarm should run").toBe(true);
 
-  // Expect only the first 3 packs (newest) to remain in R2
+  // Expect only the first 10 packs (newest) to remain in R2 (REPO_KEEP_PACKS=10)
   const listed = await env.REPO_BUCKET.list({ prefix: `${prefix}/objects/pack/` });
   const r2Keys = new Set((listed.objects || []).map((o: any) => o.key));
-  const keep = keys.slice(0, 3); // Keep the first 3 (newest)
+  const keep = keys.slice(0, 10); // Keep the first 10 (newest)
   for (const k of keep) {
     expect(r2Keys.has(k), "key " + k + " should be kept").toBe(true);
     expect(r2Keys.has(k.replace(/\.pack$/, ".idx")), "key " + k + ".idx should be kept").toBe(true);
   }
   // Older ones should be gone
-  for (const k of keys.slice(3)) {
-    // Everything after the first 3
+  for (const k of keys.slice(10)) {
+    // Everything after the first 10
     expect(r2Keys.has(k), "key " + k + " should be removed").toBe(false);
     expect(r2Keys.has(k.replace(/\.pack$/, ".idx")), "key " + k + ".idx should be removed").toBe(
       false
@@ -81,10 +82,12 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS (default 
     expect(packList, "packList should be updated").toEqual(keep);
     const lastPackKey = (await store.get("lastPackKey")) as string | undefined;
     expect(lastPackKey, "lastPackKey should be updated").toBe(keep[0]);
-    const p3 = await store.get(packOidsKey(keys[3]) as any);
-    const p4 = await store.get(packOidsKey(keys[4]) as any);
-    expect(p3, "packOidsKey(keys[3]) should be deleted").toBeUndefined();
-    expect(p4, "packOidsKey(keys[4]) should be deleted").toBeUndefined();
+    const p10 = await store.get(packOidsKey(keys[10]) as any);
+    const p11 = await store.get(packOidsKey(keys[11]) as any);
+    const p12 = await store.get(packOidsKey(keys[12]) as any);
+    expect(p10, "packOidsKey(keys[10]) should be deleted").toBeUndefined();
+    expect(p11, "packOidsKey(keys[11]) should be deleted").toBeUndefined();
+    expect(p12, "packOidsKey(keys[12]) should be deleted").toBeUndefined();
     const p0 = await store.get(packOidsKey(keys[0]) as any);
     const p1 = await store.get(packOidsKey(keys[1]) as any);
     expect(p0, "packOidsKey(keys[0]) should exist").toEqual(["a"]);

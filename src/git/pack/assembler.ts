@@ -1,5 +1,5 @@
 import { packIndexKey } from "@/keys.ts";
-import { createLogger } from "@/common/logger.ts";
+import { hexToBytes, bytesToHex, createLogger } from "@/common/index.ts";
 
 // --- In-process LRU cache for parsed .idx files (ephemeral per isolate) ---
 type IdxParsed = { oids: string[]; offsets: number[] };
@@ -75,7 +75,7 @@ export async function assemblePackFromR2(
   const parsed = await loadIdxParsed(env, packKey);
   if (!parsed) {
     const idxKey = packIndexKey(packKey);
-    log.debug("single:no-idx", { idxKey });
+    log.info("single:no-idx", { idxKey });
     return undefined;
   }
   const { oids, offsets } = parsed;
@@ -87,14 +87,14 @@ export async function assemblePackFromR2(
   // Ensure all needed objects are present in this pack
   for (const oid of neededOids)
     if (!oidToIndex.has(oid)) {
-      log.debug("single:missing-oid", { oid });
+      log.info("single:missing-oid", { oid });
       return undefined;
     }
 
   // Build mapping of entry -> header info and payload length
   const headResp = await env.REPO_BUCKET.head(packKey);
   if (!headResp) {
-    log.debug("single:no-pack", { packKey });
+    log.info("single:no-pack", { packKey });
     return undefined;
   }
   const packSize = headResp.size;
@@ -182,7 +182,7 @@ export async function assemblePackFromR2(
   }
 
   if (externalRefDelta) {
-    log.debug("single:thin-pack-detected", { packKey });
+    log.info("single:thin-pack-detected", { packKey });
     return undefined; // signal caller to use multi-pack assembly
   }
 
@@ -375,9 +375,10 @@ export async function assemblePackFromMultiplePacks(
     oidToIndex: Map<string, number>;
     offsetToIndex: Map<number, number>;
     packSize: number;
+    nextOffset: Map<number, number>;
   };
   const metas: Meta[] = [];
-  const CONC = 8;
+  const CONC = 6;
   const metaResults = await mapWithConcurrency(packKeys, CONC, async (key) => {
     const [parsed, head] = await Promise.all([loadIdxParsed(env, key), env.REPO_BUCKET.head(key)]);
     if (!parsed || !head) {
@@ -388,6 +389,14 @@ export async function assemblePackFromMultiplePacks(
     for (let i = 0; i < parsed.oids.length; i++) oidToIndex.set(parsed.oids[i], i);
     const offsetToIndex = new Map<number, number>();
     for (let i = 0; i < parsed.offsets.length; i++) offsetToIndex.set(parsed.offsets[i], i);
+    // Build per-pack nextOffset map using offsets sorted by physical position
+    const sortedOffs = parsed.offsets.slice().sort((a, b) => a - b);
+    const nextOffset = new Map<number, number>();
+    for (let i = 0; i < sortedOffs.length; i++) {
+      const cur = sortedOffs[i];
+      const nxt = i + 1 < sortedOffs.length ? sortedOffs[i + 1] : head.size - 20;
+      nextOffset.set(cur, nxt);
+    }
     const meta: Meta = {
       key,
       oids: parsed.oids,
@@ -395,6 +404,7 @@ export async function assemblePackFromMultiplePacks(
       oidToIndex,
       offsetToIndex,
       packSize: head.size,
+      nextOffset,
     };
     return meta;
   });
@@ -554,12 +564,24 @@ export async function assemblePackFromMultiplePacks(
     }
   }
 
-  // Two-pass header length and offsets
+  // Precompute original payload lengths once per node
+  const payloadLenByKey = new Map<string, number>();
+  for (const n of order) {
+    const k = nodeKey(n);
+    const off = n.m.offsets[n.i];
+    const objEnd = n.m.nextOffset.get(off)!;
+    const pl = objEnd - off - n.origHeaderLen;
+    payloadLenByKey.set(k, pl);
+  }
+
+  // Iteratively recompute OFS varint lengths and offsets until stable.
+  // A single second pass can still underestimate sizes when subsequent
+  // entries cross varint boundaries due to offset shifts.
   const newHeaderLen = new Map<string, number>();
   for (const n of order) {
     if (signal?.aborted) return undefined;
     if (n.type === 6) {
-      // Guess using original distance
+      // Initial guess using original distance
       const baseOff = n.base!.m.offsets[n.base!.i];
       const guessRel = n.m.offsets[n.i] - baseOff;
       newHeaderLen.set(nodeKey(n), n.sizeVarBytes.length + encodeOfsDeltaDistance(guessRel).length);
@@ -569,38 +591,64 @@ export async function assemblePackFromMultiplePacks(
       newHeaderLen.set(nodeKey(n), n.sizeVarBytes.length);
     }
   }
-  const newOffsets = new Map<string, number>();
+
+  let newOffsets = new Map<string, number>();
   let cur = 12;
-  for (const n of order) {
-    newOffsets.set(nodeKey(n), cur);
-    const origPayloadLen = n.m.offsets[n.i + 1]
-      ? n.m.offsets[n.i + 1] - n.m.offsets[n.i] - n.origHeaderLen
-      : n.m.packSize - 20 - n.m.offsets[n.i] - n.origHeaderLen;
-    cur += newHeaderLen.get(nodeKey(n))! + origPayloadLen;
-  }
-  let changed = false;
-  for (const n of order) {
-    if (n.type !== 6) continue;
-    const rel = newOffsets.get(nodeKey(n))! - newOffsets.get(nodeKey(n.base!))!;
-    const desired = n.sizeVarBytes.length + encodeOfsDeltaDistance(rel).length;
-    if (desired !== newHeaderLen.get(nodeKey(n))) {
-      newHeaderLen.set(nodeKey(n), desired);
-      changed = true;
-    }
-  }
-  if (changed) {
+  let iter = 0;
+  while (true) {
+    if (signal?.aborted) return undefined;
+    // Compute offsets based on current header lengths
+    newOffsets = new Map<string, number>();
     cur = 12;
     for (const n of order) {
-      newOffsets.set(nodeKey(n), cur);
-      const origPayloadLen = n.m.offsets[n.i + 1]
-        ? n.m.offsets[n.i + 1] - n.m.offsets[n.i] - n.origHeaderLen
-        : n.m.packSize - 20 - n.m.offsets[n.i] - n.origHeaderLen;
-      cur += newHeaderLen.get(nodeKey(n))! + origPayloadLen;
+      const k = nodeKey(n);
+      newOffsets.set(k, cur);
+      const pl = payloadLenByKey.get(k)!;
+      cur += newHeaderLen.get(k)! + pl;
     }
+    // Re-evaluate OFS varints with accurate distances
+    let changed = false;
+    for (const n of order) {
+      if (n.type !== 6) continue;
+      const k = nodeKey(n);
+      const rel = newOffsets.get(k)! - newOffsets.get(nodeKey(n.base!))!;
+      const desired = n.sizeVarBytes.length + encodeOfsDeltaDistance(rel).length;
+      if (desired !== newHeaderLen.get(k)) {
+        newHeaderLen.set(k, desired);
+        changed = true;
+      }
+    }
+    if (!changed || ++iter >= 16) break; // converge or cap iterations
   }
 
-  // Compose body
-  const body = new Uint8Array(cur);
+  // Recompute exact header lengths from final offsets to ensure consistency,
+  // then allocate the body buffer accordingly to avoid any underestimation.
+  const finalHeaderLen = new Map<string, number>();
+  for (const n of order) {
+    const k = nodeKey(n);
+    if (n.type === 6) {
+      const rel = newOffsets.get(k)! - newOffsets.get(nodeKey(n.base!))!;
+      finalHeaderLen.set(k, n.sizeVarBytes.length + encodeOfsDeltaDistance(rel).length);
+    } else if (n.type === 7) {
+      finalHeaderLen.set(k, n.sizeVarBytes.length + 20);
+    } else {
+      finalHeaderLen.set(k, n.sizeVarBytes.length);
+    }
+  }
+  // Recompute final offsets using the final header lengths to match allocation
+  newOffsets = new Map<string, number>();
+  let acc = 12;
+  for (const n of order) {
+    const k = nodeKey(n);
+    newOffsets.set(k, acc);
+    acc += (finalHeaderLen.get(k) || 0) + (payloadLenByKey.get(k) || 0);
+  }
+  const finalSize = acc;
+  // Update maps to reflect final header lengths
+  for (const [k, v] of finalHeaderLen) newHeaderLen.set(k, v);
+
+  // Compose body with exact final size
+  const body = new Uint8Array(finalSize);
   body.set(new TextEncoder().encode("PACK"), 0);
   const dv = new DataView(body.buffer);
   dv.setUint32(4, 2);
@@ -626,16 +674,45 @@ export async function assemblePackFromMultiplePacks(
       );
       p += 20;
     }
+    const k2 = nodeKey(n);
     const payloadStart = n.m.offsets[n.i] + n.origHeaderLen;
-    const payloadLen = n.m.offsets[n.i + 1]
-      ? n.m.offsets[n.i + 1] - n.m.offsets[n.i] - n.origHeaderLen
-      : n.m.packSize - 20 - n.m.offsets[n.i] - n.origHeaderLen;
+    const payloadLen = payloadLenByKey.get(k2)!;
+    // Validate computed ranges before issuing R2 GETs or writing into body
+    if (
+      payloadLen <= 0 ||
+      payloadStart < 0 ||
+      payloadStart + payloadLen >
+        n.m.packSize - 0 /* allow up to end (header excluded via -20 above) */
+    ) {
+      log.warn("multi:invalid-range", {
+        key: n.m.key,
+        offset: payloadStart,
+        length: payloadLen,
+        packSize: n.m.packSize,
+      });
+      return undefined;
+    }
     const payload = await readPackRange(env, n.m.key, payloadStart, payloadLen);
     if (!payload) {
       log.warn("multi:read-range-failed", {
         key: n.m.key,
         offset: payloadStart,
         length: payloadLen,
+      });
+      return undefined;
+    }
+    // Ensure we won't write past the end of the allocated body buffer
+    const k = nodeKey(n);
+    const entryStart = newOffsets.get(k)!;
+    const entryTotal = newHeaderLen.get(k)! + payload.length;
+    if (entryStart + entryTotal > body.byteLength) {
+      log.warn("multi:entry-overflow", {
+        at: entryStart,
+        entryBytes: entryTotal,
+        bodyBytes: body.byteLength,
+        oid: n.oid,
+        packKey: n.m.key,
+        type: n.type,
       });
       return undefined;
     }
@@ -692,7 +769,7 @@ async function readPackHeaderEx(
   const sizeVarBytes = head.subarray(start, p);
   if (type === 7) {
     // REF_DELTA
-    const baseOid = toHex(head.subarray(p, p + 20));
+    const baseOid = bytesToHex(head.subarray(p, p + 20));
     const headerLen = sizeVarBytes.length + 20;
     return { type, sizeVarBytes, headerLen, baseOid };
   }
@@ -742,7 +819,7 @@ function readPackHeaderExFromBuf(
   if (type === 7) {
     // REF_DELTA
     if (p + 20 > buf.length) return undefined;
-    const baseOid = toHex(buf.subarray(p, p + 20));
+    const baseOid = bytesToHex(buf.subarray(p, p + 20));
     const headerLen = sizeVarBytes.length + 20;
     return { type, sizeVarBytes, headerLen, baseOid };
   }
@@ -771,24 +848,25 @@ function readPackHeaderExFromBuf(
  * @returns Varint bytes encoding the relative distance
  */
 export function encodeOfsDeltaDistance(rel: number): Uint8Array {
-  // Git encodes ofs-delta distance with continuation bytes, MSB acts as flag and add-one trick
-  // We implement the inverse of the decoding algorithm used above.
-  const bytes: number[] = [];
-  let n = rel;
-  let stack: number[] = [];
-  // Build bytes in reverse then set MSB for all but last
-  stack.push(n & 0x7f);
-  while ((n >>= 7) > 0) {
-    n--; // compensate for the add-one in decoding
-    stack.push(0x80 | (n & 0x7f));
+  // Correct inverse of the decoder used above:
+  // Given X, produce groups g_k..g_0 such that:
+  //   X = (((g_0 + 1) << 7 | g_1) + 1 << 7 | g_2) ... | g_k
+  // We compute g_k first by peeling off low 7 bits, then iterate
+  // with: prev = ((cur - g) >> 7) - 1 until prev < 0, finally reverse.
+  if (rel <= 0) return new Uint8Array([0]);
+  let cur = rel >>> 0;
+  const groups: number[] = [];
+  while (true) {
+    const g = cur & 0x7f;
+    groups.push(g);
+    cur = ((cur - g) >>> 7) - 1;
+    if (cur < 0) break;
   }
-  // Reverse stack to get correct order and ensure only last has MSB cleared
-  for (let i = stack.length - 1; i >= 0; i--) {
-    const val = stack[i];
-    if (i === 0) bytes.push(val & 0x7f);
-    else bytes.push(val | 0x80);
-  }
-  return new Uint8Array(bytes);
+  // Now groups = [g_k, g_{k-1}, ..., g_0]; emit in order g_0..g_k,
+  // setting MSB on all but the final (least-significant) group.
+  groups.reverse();
+  for (let i = 0; i < groups.length - 1; i++) groups[i] |= 0x80;
+  return new Uint8Array(groups);
 }
 
 /**
@@ -816,7 +894,7 @@ function parseIdxV2(buf: Uint8Array): { oids: string[]; offsets: number[] } | un
   const oids: string[] = [];
   for (let i = 0; i < n; i++) {
     const off = namesStart + i * 20;
-    const hex = toHex(buf.subarray(off, off + 20));
+    const hex = bytesToHex(buf.subarray(off, off + 20));
     oids.push(hex);
   }
   const crcsStart = namesEnd;
@@ -873,26 +951,4 @@ async function readPackRange(
   if (!obj) return undefined;
   const ab = await obj.arrayBuffer();
   return new Uint8Array(ab);
-}
-
-/**
- * Converts a byte array to a hexadecimal string.
- * @param bytes - Input byte array (typically 20 bytes for SHA-1)
- * @returns Hexadecimal string representation
- */
-function toHex(bytes: Uint8Array): string {
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-/**
- * Converts a hexadecimal string to a byte array.
- * @param hex - Hexadecimal string (typically 40 chars for SHA-1)
- * @returns Byte array representation (20 bytes)
- */
-function hexToBytes(hex: string): Uint8Array {
-  const out = new Uint8Array(20);
-  for (let i = 0; i < 20; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  return out;
 }

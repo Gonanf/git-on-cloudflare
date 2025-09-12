@@ -3,4 +3,4 @@
  */
 
 export * from "./cache.ts";
-export * from "./kv-pack-cache.ts";
+// KV pack metadata cache removed

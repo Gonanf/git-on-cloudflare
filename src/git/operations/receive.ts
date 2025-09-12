@@ -8,10 +8,9 @@ import {
   type RepoStateSchema,
   type TypedStorage,
 } from "@/do/repoState.ts";
-import { r2PackKey, r2LooseKey } from "@/keys.ts";
+import { r2PackKey, r2LooseKey, packIndexKey } from "@/keys.ts";
 import * as git from "isomorphic-git";
 import { createLogger } from "@/common/index.ts";
-import { markPush, setUnpackStatus } from "@/cache/index.ts";
 
 // Connectivity check for receive-pack commands.
 // Ensures that each updated ref points to an object we can resolve immediately:
@@ -452,17 +451,15 @@ export async function receivePack(
         log.warn("head:resolve-failed", { error: String(e) });
       }
 
-      // Mark push in KV to prevent stale cache
-      // Use DO ID as cache key since we don't have access to owner/repo inside DO
-      const doId = state.id.toString();
-      await markPush(env.PACK_METADATA_CACHE, doId);
-      await setUnpackStatus(env.PACK_METADATA_CACHE, doId, true);
+      // KV metadata cache removed: no push markers or unpack status in KV
 
       // Persist pack metadata and schedule unpack only after successful ref updates
       try {
         if (packKey && indexedOids && indexedOids.length > 0) {
           await store.put("lastPackKey", packKey);
-          await store.put("lastPackOids", indexedOids);
+          // Clamp stored OIDs to avoid oversized DO state; consistent with reader-side cap
+          const capped = indexedOids.slice(0, 10000);
+          await store.put("lastPackOids", capped);
           await store.put(packOidsKey(packKey), indexedOids);
 
           const list = ((await store.get("packList")) || []).filter((k: string) => k !== packKey);
@@ -499,6 +496,16 @@ export async function receivePack(
       } catch (e) {
         log.warn("post-apply:metadata-or-unpack-schedule-failed", { error: String(e) });
       }
+    }
+
+    // If rejected but a pack was uploaded and indexed, clean up R2 objects
+    if (!allOk && packKey) {
+      try {
+        await env.REPO_BUCKET.delete(packKey);
+      } catch {}
+      try {
+        await env.REPO_BUCKET.delete(packIndexKey(packKey));
+      } catch {}
     }
 
     // Assemble report-status response

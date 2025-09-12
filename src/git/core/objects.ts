@@ -86,9 +86,9 @@ export async function encodeGitObject(
 /**
  * Parse a Git object to extract type and payload
  * @param raw - Raw Git object bytes (with header)
- * @returns Object type and payload
+ * @returns Object type (GitObjectType) and payload
  */
-export function parseGitObject(raw: Uint8Array): { type: string; payload: Uint8Array } {
+export function parseGitObject(raw: Uint8Array): { type: GitObjectType; payload: Uint8Array } {
   // Find the null byte that separates header from content
   let nullIndex = -1;
   for (let i = 0; i < raw.length; i++) {
@@ -103,8 +103,13 @@ export function parseGitObject(raw: Uint8Array): { type: string; payload: Uint8A
   }
 
   const header = new TextDecoder().decode(raw.subarray(0, nullIndex));
-  const [type] = header.split(" ");
+  const [typeStr] = header.split(" ");
   const payload = raw.subarray(nullIndex + 1);
+
+  if (typeStr !== "commit" && typeStr !== "tree" && typeStr !== "blob" && typeStr !== "tag") {
+    throw new Error(`Invalid Git object type: ${typeStr}`);
+  }
+  const type = typeStr as GitObjectType;
 
   return { type, payload };
 }

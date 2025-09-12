@@ -49,7 +49,7 @@ function emit(
   const line = JSON.stringify(entry);
   if (level === "debug") console.info(line);
   else if (level === "info") console.info(line);
-  else if (level === "warn") console.warn(line);
+  else if (level === "warn") console.info(line);
   else console.error(line);
 }
 

@@ -1,26 +1,20 @@
-import type { HeadInfo, Ref } from "./engine.ts";
+import type { HeadInfo, Ref } from "./types.ts";
 import { parseCommitText } from "@/git/core/commitParse.ts";
 import { packIndexKey } from "@/keys.ts";
+import { getPackCandidates } from "./packDiscovery.ts";
+import { getLimiter, countSubrequest } from "./limits.ts";
 import { createMemPackFs, createStubLooseLoader } from "@/git/pack/index.ts";
 import {
   buildObjectCacheKey,
   cacheOrLoadObject,
+  cachePutObject,
   type CacheContext,
-  getPackForOid,
-  saveOidToPackMapping,
-  shouldSkipKVCache,
-  savePackList,
-  getPackList,
 } from "@/cache/index.ts";
-import {
-  getUnpackProgress,
-  createLogger,
-  createInflateStream,
-  getRepoStub,
-  BinaryHeap,
-} from "@/common/index.ts";
+import { createLogger, createInflateStream, getRepoStub, BinaryHeap } from "@/common/index.ts";
 import * as git from "isomorphic-git";
-import type { RepoDurableObject } from "@/do/index.ts";
+import { inflateAndParseHeader, parseTagTarget } from "@/git/core/index.ts";
+
+const LOADER_CAP = 400; // cap DO loose-loader calls per request in heavy mode (prod subrequest budget ~1000)
 
 /**
  * Fetch HEAD and refs for a repository from its Durable Object.
@@ -43,7 +37,13 @@ export async function getHeadAndRefs(
   repoId: string
 ): Promise<{ head: HeadInfo | undefined; refs: Ref[] }> {
   const stub = getRepoStub(env, repoId);
-  return stub.getHeadAndRefs();
+  const logger = createLogger(env.LOG_LEVEL, { service: "getHeadAndRefs", repoId });
+  try {
+    return await stub.getHeadAndRefs();
+  } catch (e) {
+    logger.debug("getHeadAndRefs:error", { error: String(e) });
+    return { head: undefined, refs: [] };
+  }
 }
 
 /**
@@ -437,10 +437,9 @@ export async function readPath(
   } else if (startObj.type === "tree") {
     currentTreeOid = startOid;
   } else if (startObj.type === "tag") {
-    const text = new TextDecoder().decode(startObj.payload);
-    const m = text.match(/^object ([0-9a-f]{40})/m);
-    if (!m) throw new Error("Unsupported object type");
-    const target = m[1];
+    const t = parseTagTarget(startObj.payload);
+    if (!t || !t.targetOid) throw new Error("Unsupported object type");
+    const target = t.targetOid;
     const { tree } = await readCommit(env, repoId, target, cacheCtx);
     currentTreeOid = tree;
   } else if (startObj.type === "blob") {
@@ -469,7 +468,20 @@ export async function readPath(
 
       // Check blob size first to avoid loading large files
       const stub = getRepoStub(env, repoId);
-      const size = await stub.getObjectSize(ent.oid);
+      const log = createLogger(env.LOG_LEVEL, { service: "readPath", repoId });
+      const limiter = getLimiter(cacheCtx);
+      const size = await limiter.run("do:getObjectSize", async () => {
+        if (!countSubrequest(cacheCtx)) {
+          log.warn("soft-budget-exhausted", { op: "do:getObjectSize", oid: ent.oid });
+          return null as any;
+        }
+        try {
+          return await stub.getObjectSize(ent.oid);
+        } catch (e) {
+          log.debug("do:getObjectSize:error", { error: String(e), oid: ent.oid });
+          return null as any;
+        }
+      });
       if (size === null) throw new Error("Blob not found");
 
       // Content-Length (from DO/R2) is the compressed size, but we need decompressed size
@@ -642,11 +654,9 @@ export async function readBlobStream(
  * 3. R2 packfiles - Cold storage, ~100-300ms
  *
  * Optimizations and hints:
- * - KV-backed pack metadata hints are used to avoid extra DO metadata calls on cold paths:
- *   - OID → packKey mapping (TTL: see TTL constants in `src/cache/kv-pack-cache.ts`)
- *   - Recent pack list (ensures DO `/pack-latest` is always included)
- * - KV writes are gated by both `shouldSkipKVCache()` and DO `/unpack-progress` to avoid
- *   persisting stale metadata during active pushes/unpacking.
+ * - Per-request memoization caches pack lists and object results
+ * - DO pack metadata (`getPackLatest()`, `getPacks()`) seeds candidate packs
+ * - R2 listing under the DO pack prefix provides a last-resort discovery path
  *
  * Objects are immutable, so aggressive object caching (1 year TTL) is used by the Cache API
  * layer. For large blobs, prefer `readBlobStream()` to avoid memory buffering.
@@ -665,18 +675,32 @@ export async function readLooseObjectRaw(
 ): Promise<{ type: string; payload: Uint8Array } | undefined> {
   const oidLc = oid.toLowerCase();
   const stub = getRepoStub(env, repoId);
-  // used as the cache key for KV since DO doesn't have access to owner/repo.
+  // Repository DO ID used for R2 prefix scoping and pack discovery; also included in logs for tracing.
   const doId = stub.id.toString();
   const logger = createLogger(env.LOG_LEVEL, {
     service: "readLooseObjectRaw",
     repoId,
     doId,
-    requestId: cacheCtx?.req?.headers?.get("cf-ray") || undefined,
   });
 
-  // Try KV cache first for pack metadata
-  const skipKV = await shouldSkipKVCache(env.PACK_METADATA_CACHE, doId);
-  logger.debug("kv-skip-eval", { skipKV });
+  // Ensure per-request memo exists and is pinned to this repo to avoid cross-repo contamination
+  if (cacheCtx) {
+    if (!cacheCtx.memo || (cacheCtx.memo.repoId && cacheCtx.memo.repoId !== repoId)) {
+      cacheCtx.memo = { repoId };
+    } else if (!cacheCtx.memo.repoId) {
+      cacheCtx.memo.repoId = repoId;
+    }
+  }
+
+  // Per-request memo: short-circuit if we already loaded this OID in this request
+  if (cacheCtx?.memo?.objects?.has(oidLc)) {
+    return cacheCtx.memo.objects.get(oidLc);
+  }
+
+  // In heavy phases, avoid certain DO-backed paths to preserve subrequest budget.
+  const heavyNoCache = cacheCtx?.memo?.flags?.has("no-cache-read") === true;
+  // Global per-request limiter for all upstream calls (DO, R2)
+  const limiter = getLimiter(cacheCtx);
 
   /**
    * Load a pack and its index from R2 into an in-memory virtual FS map.
@@ -688,8 +712,20 @@ export async function readLooseObjectRaw(
     files: Map<string, Uint8Array>
   ): Promise<boolean> {
     const [p, i] = await Promise.all([
-      env.REPO_BUCKET.get(packKey),
-      env.REPO_BUCKET.get(packIndexKey(packKey)),
+      limiter.run("r2:get-pack", async () => {
+        if (!countSubrequest(cacheCtx)) {
+          logger.warn("soft-budget-exhausted", { op: "r2:get-pack", key: packKey });
+          return null;
+        }
+        return await env.REPO_BUCKET.get(packKey);
+      }),
+      limiter.run("r2:get-idx", async () => {
+        if (!countSubrequest(cacheCtx)) {
+          logger.warn("soft-budget-exhausted", { op: "r2:get-idx", key: packKey });
+          return null;
+        }
+        return await env.REPO_BUCKET.get(packIndexKey(packKey));
+      }),
     ]);
     if (!p || !i) return false;
 
@@ -703,108 +739,48 @@ export async function readLooseObjectRaw(
     return true;
   }
 
-  /**
-   * Fast-path: given a known `packKey`, load just that pack from R2 and extract `oid`.
-   * Used when KV OID→pack hints are available.
-   */
-  async function loadSinglePackFromR2(
-    env: Env,
-    packKey: string,
-    oid: string
-  ): Promise<{ type: string; payload: Uint8Array } | undefined> {
-    const files = new Map<string, Uint8Array>();
-    const ok = await addPackToFiles(env, packKey, files);
-    if (!ok) return undefined;
-
-    const looseLoader = createStubLooseLoader(stub);
-    const fs = createMemPackFs(files, { looseLoader });
-    const dir = "/git";
-    try {
-      const result = (await git.readObject({ fs, dir, oid, format: "content" })) as {
-        object: Uint8Array;
-        type: "blob" | "tree" | "commit" | "tag";
-      };
-      logger.debug("object-read", { source: "r2-pack-single", packKey, type: result.type });
-      return { type: result.type, payload: result.object };
-    } catch {
-      return undefined;
-    }
-  }
+  // Note: previously a KV-backed fast path loaded a single known pack; that path has been removed.
 
   /**
    * Build a candidate `packList` used for multi-pack reads:
-   * - Prefer KV `getPackList()` when not skipping KV
-   * - Always ensure DO `/pack-latest` is present to cover very recent pushes
-   * - Fallback to DO `/packs` (and finally `/pack-latest`) if KV is empty
+   * - Ensure DO `/pack-latest` is present to cover very recent pushes
+   * - Fallback to DO `/packs` (and finally `/pack-latest`) if still empty
+   * - As a last resort, list R2 under the DO pack prefix
    */
-  async function getPackListWithLatest(
-    env: Env,
-    stub: DurableObjectStub<RepoDurableObject>,
-    doId: string,
-    skipKV: boolean
-  ): Promise<string[]> {
-    let packList: string[] = [];
-    if (!skipKV) {
-      try {
-        const cached = await getPackList(env.PACK_METADATA_CACHE, doId);
-        if (cached && cached.length > 0) packList = [...cached];
-      } catch {}
-    }
-    // Ensure latest pack is present (covers recent pushes)
-    try {
-      const meta = await stub.getPackLatest();
-      const latest = meta?.key;
-      if (latest && !packList.includes(latest)) packList.unshift(latest);
-    } catch {}
-
-    // Fallback to DO /packs if still empty
-    if (packList.length === 0) {
-      try {
-        packList = await stub.getPacks();
-      } catch {
-        packList = [];
-      }
-      if (packList.length === 0) {
-        try {
-          const meta = await stub.getPackLatest();
-          const latest = meta?.key;
-          if (latest) packList.push(latest);
-        } catch {}
-      }
-    }
-    return packList;
-  }
 
   /**
    * Multi-pack path: identify a candidate pack via DO `/pack-oids` probes and load a
-   * small set of packs from R2 (helps delta resolution across packs). Writes pack
-   * metadata hints back to KV when safe.
+   * small set of packs from R2 (helps delta resolution across packs).
    */
   const loadFromPacks = async () => {
     try {
-      // Helper: consult DO progress to avoid KV writes during active unpacking
-      const allowKvWrite = async (): Promise<boolean> => {
-        const progress = await getUnpackProgress(env, repoId);
-        // Allow writes only when no unpack is running or progress is unavailable
-        return !(progress && progress.unpacking === true);
-      };
       // Step 1: Build candidate pack list
-      const packList = await getPackListWithLatest(env, stub, doId, skipKV);
-      logger.debug("pack-list-candidates", { count: packList.length, skipKV });
-      if (packList.length === 0) {
-        logger.warn("pack-list-empty", { oid: oidLc, afterFallbacks: true });
-        return undefined;
-      }
-
-      // Cache pack list (only if not unpacking)
-      if (cacheCtx && packList.length > 0 && !skipKV) {
-        const canWrite = await allowKvWrite();
-        if (canWrite) {
-          cacheCtx.ctx.waitUntil(savePackList(env.PACK_METADATA_CACHE, doId, packList));
-          logger.debug("kv-pack-list-saved", { count: packList.length });
-        } else {
-          logger.debug("kv-write-skipped-unpacking", { what: "packList" });
+      // Per-request memo: reuse pack list within the same request
+      const packListRaw = await getPackCandidates(env, stub, doId, heavyNoCache, cacheCtx);
+      let packList: string[] = packListRaw;
+      // Reduce probe set in heavy phases to limit DO RPCs and R2 downloads
+      const PROBE_MAX = heavyNoCache ? 10 : packList.length;
+      if (packList.length > PROBE_MAX) packList = packList.slice(0, PROBE_MAX);
+      if (cacheCtx?.memo) {
+        cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
+        if (!cacheCtx.memo.flags.has("pack-list-candidates-logged")) {
+          logger.debug("pack-list-candidates", { count: packList.length });
+          cacheCtx.memo.flags.add("pack-list-candidates-logged");
         }
+      } else {
+        logger.debug("pack-list-candidates", { count: packList.length });
+      }
+      if (packList.length === 0) {
+        // Throttle noisy warning to once per request
+        const alreadyWarned = cacheCtx?.memo?.flags?.has("pack-list-empty");
+        if (!alreadyWarned) {
+          logger.warn("pack-list-empty", { oid: oidLc, afterFallbacks: true });
+          if (cacheCtx?.memo) {
+            cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
+            cacheCtx.memo.flags.add("pack-list-empty");
+          }
+        }
+        return undefined;
       }
 
       // Step 2: Find which pack contains our target OID by querying pack indexes
@@ -812,62 +788,160 @@ export async function readLooseObjectRaw(
       const contains: Record<string, boolean> = {};
       for (const key of packList) {
         try {
-          const dataOids = await stub.getPackOids(key);
-          const set = new Set((dataOids || []).map((x: string) => x.toLowerCase()));
+          // Per-request memo: cache pack OIDs per pack key
+          let set: Set<string>;
+          if (cacheCtx?.memo?.packOids?.has(key)) {
+            set = cacheCtx.memo.packOids.get(key)!;
+          } else {
+            const dataOids = await limiter.run("do:getPackOids", async () => {
+              if (!countSubrequest(cacheCtx)) {
+                logger.warn("soft-budget-exhausted", { op: "do:getPackOids", key });
+                return [] as string[];
+              }
+              return await stub.getPackOids(key);
+            });
+            set = new Set((dataOids || []).map((x: string) => x.toLowerCase()));
+            if (cacheCtx?.memo) {
+              cacheCtx.memo.packOids = cacheCtx.memo.packOids || new Map();
+              cacheCtx.memo.packOids.set(key, set);
+            }
+          }
           const has = set.has(oidLc);
           contains[key] = has;
           if (!chosenPackKey && has) chosenPackKey = key;
         } catch {}
       }
       if (!chosenPackKey) chosenPackKey = packList[0];
-      logger.debug("chosen-pack", { chosenPackKey, hasDirectHit: !!contains[chosenPackKey] });
-
-      // Cache OID->pack mapping if we found it (only if not unpacking)
-      if (cacheCtx && chosenPackKey && contains[chosenPackKey] && !skipKV) {
-        const canWrite = await allowKvWrite();
-        if (canWrite) {
-          cacheCtx.ctx.waitUntil(
-            saveOidToPackMapping(env.PACK_METADATA_CACHE, doId, oidLc, chosenPackKey)
-          );
-          logger.debug("kv-oid-pack-saved", { oid: oidLc, packKey: chosenPackKey });
-        } else {
-          logger.debug("kv-write-skipped-unpacking", { what: "oid->pack", oid: oidLc });
+      if (cacheCtx?.memo) {
+        cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
+        if (!cacheCtx.memo.flags.has("chosen-pack-logged")) {
+          logger.debug("chosen-pack", { chosenPackKey, hasDirectHit: !!contains[chosenPackKey] });
+          cacheCtx.memo.flags.add("chosen-pack-logged");
         }
+      } else {
+        logger.debug("chosen-pack", { chosenPackKey, hasDirectHit: !!contains[chosenPackKey] });
       }
 
-      // Step 3: Load up to 5 packs from R2 (includes the one with our OID)
-      // Loading multiple packs is necessary for delta resolution
-      const toLoad = packList.slice(0, Math.min(5, packList.length));
-      if (!toLoad.includes(chosenPackKey)) toLoad.unshift(chosenPackKey);
-      const seenKeys = new Set<string>();
-      const uniqueLoad = toLoad.filter((k) => (seenKeys.has(k) ? false : (seenKeys.add(k), true)));
-      const files = new Map<string, Uint8Array>();
-      await Promise.all(
-        uniqueLoad.map(async (key) => {
-          try {
-            await addPackToFiles(env, key, files);
-          } catch {}
-        })
-      );
-      if (files.size === 0) return undefined;
+      // Note: previously we persisted KV hints (pack list and OID->pack). With KV removed,
+      // we rely solely on DO metadata and R2 listing.
 
-      // Step 4: Create a loader for loose objects (needed for thin pack delta resolution)
-      const looseLoader = createStubLooseLoader(stub);
+      // Step 3: Iteratively load packs from R2 until we can resolve the object (to handle
+      // cross-pack delta chains). Always prioritize the chosen pack, then load remaining
+      // packs in small batches. Cap the total to avoid excessive memory/time.
+      const order: string[] = (() => {
+        const arr = packList.slice(0);
+        if (chosenPackKey) {
+          const i = arr.indexOf(chosenPackKey);
+          if (i > 0) {
+            arr.splice(i, 1);
+            arr.unshift(chosenPackKey);
+          } else if (i < 0) {
+            arr.unshift(chosenPackKey);
+          }
+        }
+        // Cap total packs to load to reduce R2 GETs during heavy phases
+        const LOAD_MAX = heavyNoCache ? 12 : 20;
+        if (arr.length > LOAD_MAX) arr.length = LOAD_MAX;
+        return arr;
+      })();
 
-      const fs = createMemPackFs(files, { looseLoader });
+      // Reuse pack files across OIDs within the same request to avoid re-downloading packs
+      let files: Map<string, Uint8Array>;
+      if (cacheCtx?.memo?.packFiles) {
+        files = cacheCtx.memo.packFiles;
+      } else {
+        files = new Map<string, Uint8Array>();
+        if (cacheCtx?.memo) cacheCtx.memo.packFiles = files;
+      }
+      const loaded = new Set<string>();
+      const BATCH = 5;
       const dir = "/git";
-      const result = (await git.readObject({ fs, dir, oid: oidLc, format: "content" })) as {
-        object: Uint8Array;
-        type: "blob" | "tree" | "commit" | "tag";
+      const baseLoader = createStubLooseLoader(stub);
+      const looseLoader = async (oid: string) => {
+        if (cacheCtx?.memo) {
+          const next = (cacheCtx.memo.loaderCalls ?? 0) + 1;
+          cacheCtx.memo.loaderCalls = next;
+          const cap = cacheCtx.memo.loaderCap ?? LOADER_CAP;
+          if (heavyNoCache && next > cap) {
+            cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
+            if (!cacheCtx.memo.flags.has("loader-capped")) {
+              logger.warn("read:loader-calls-capped", { cap });
+              cacheCtx.memo.flags.add("loader-capped");
+              cacheCtx.memo.flags.add("closure-timeout");
+            }
+            return undefined;
+          }
+        }
+        return await limiter.run("do:getObject", async () => {
+          countSubrequest(cacheCtx);
+          return await baseLoader(oid);
+        });
       };
-      logger.debug("object-read", {
-        source: "r2-packs",
-        chosenPackKey,
-        packsLoaded: files.size,
-        type: result.type,
-      });
-      return { type: result.type, payload: result.object };
-    } catch {
+      const fs = createMemPackFs(files, { looseLoader });
+
+      for (let idx = 0; idx < order.length; idx += BATCH) {
+        const batch = order.slice(idx, idx + BATCH).filter((k) => !loaded.has(k));
+        await Promise.all(
+          batch.map(async (key) => {
+            try {
+              // Skip download if already present in the shared files map
+              const base = key.split("/").pop()!;
+              const idxBase = base.replace(/\.pack$/i, ".idx");
+              if (
+                files.has(`/git/objects/pack/${base}`) &&
+                files.has(`/git/objects/pack/${idxBase}`)
+              ) {
+                loaded.add(key);
+                return;
+              }
+              const ok = await addPackToFiles(env, key, files);
+              if (ok) loaded.add(key);
+            } catch {}
+          })
+        );
+        if (files.size === 0) continue;
+        try {
+          const result = (await git.readObject({ fs, dir, oid: oidLc, format: "content" })) as {
+            object: Uint8Array;
+            type: "blob" | "tree" | "commit" | "tag";
+          };
+          if (cacheCtx?.memo) {
+            cacheCtx.memo.flags = cacheCtx.memo.flags || new Set();
+            if (!cacheCtx.memo.flags.has("object-read-logged")) {
+              logger.debug("object-read", {
+                source: "r2-packs",
+                chosenPackKey,
+                packsLoaded: files.size,
+                type: result.type,
+              });
+              cacheCtx.memo.flags.add("object-read-logged");
+            }
+          } else {
+            logger.debug("object-read", {
+              source: "r2-packs",
+              chosenPackKey,
+              packsLoaded: files.size,
+              type: result.type,
+            });
+          }
+          // Store in per-request memo for subsequent reads within the same request
+          if (cacheCtx?.memo) {
+            cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
+            cacheCtx.memo.objects.set(oidLc, { type: result.type, payload: result.object });
+          }
+          return { type: result.type, payload: result.object };
+        } catch (e) {
+          logger.debug("git-readObject-miss", {
+            error: String(e),
+            oid: oidLc,
+            packsTried: files.size,
+          });
+          // continue to load next batch
+        }
+      }
+      return undefined;
+    } catch (e) {
+      logger.debug("loadFromPacks:error", { error: String(e) });
       return undefined;
     }
   };
@@ -875,25 +949,24 @@ export async function readLooseObjectRaw(
   // Helper function to load from Durable Object state (preferred for recent objects)
   const loadFromState = async (): Promise<{ type: string; payload: Uint8Array } | undefined> => {
     try {
-      const z = await stub.getObject(oidLc);
+      const z = await limiter.run("do:getObject", async () => {
+        if (!countSubrequest(cacheCtx)) {
+          logger.warn("soft-budget-exhausted", { op: "do:getObject", oid: oidLc });
+          return null;
+        }
+        return await stub.getObject(oidLc);
+      });
       if (z) {
-        const ds = createInflateStream();
-        const stream = new Blob([z]).stream().pipeThrough(ds);
-        const raw = new Uint8Array(await new Response(stream).arrayBuffer());
-        // header: <type> <len>\0
-        let p = 0;
-        let sp = p;
-        while (sp < raw.length && raw[sp] !== 0x20) sp++;
-        const type = new TextDecoder().decode(raw.subarray(p, sp));
-        let nul = sp + 1;
-        while (nul < raw.length && raw[nul] !== 0x00) nul++;
-        const payload = raw.subarray(nul + 1);
-        logger.debug("object-read", { source: "do-state", type });
-        return { type, payload };
+        const parsed = await inflateAndParseHeader(z instanceof Uint8Array ? z : new Uint8Array(z));
+        if (parsed) {
+          logger.debug("object-read", { source: "do-state", type: parsed.type });
+          return { type: parsed.type, payload: parsed.payload };
+        }
       } else {
         logger.debug("do-state-miss", { oid: oidLc });
       }
-    } catch {
+    } catch (e) {
+      logger.debug("do:getObject:error", { error: String(e), oid: oidLc });
       return undefined;
     }
   };
@@ -901,44 +974,62 @@ export async function readLooseObjectRaw(
   // Main flow: Use Cache API wrapper if context available, otherwise direct load
   if (cacheCtx) {
     const cacheKey = buildObjectCacheKey(cacheCtx.req, repoId, oidLc);
-    return cacheOrLoadObject(
-      cacheKey,
-      async () => {
-        // Try loose object via DO first (preferred)
-        const stateResult = await loadFromState();
-        if (stateResult) return stateResult;
-
-        // KV OID->pack fast path before scanning DO pack indexes
-        if (!skipKV) {
-          const cachedPackKey = await getPackForOid(env.PACK_METADATA_CACHE, doId, oidLc);
-          if (cachedPackKey) {
-            logger.debug("kv-oid-pack-hit", { packKey: cachedPackKey });
-            const result = await loadSinglePackFromR2(env, cachedPackKey, oidLc);
-            if (result) return result;
-          }
+    const bypassCacheRead = cacheCtx.memo?.flags?.has("no-cache-read") === true;
+    const doLoad = async (): Promise<{ type: string; payload: Uint8Array } | undefined> => {
+      // In heavy phases, avoid per-oid DO state reads which can exceed subrequest budgets.
+      if (heavyNoCache) {
+        // Go straight to pack path.
+        const res = await loadFromPacks();
+        if (res && cacheCtx?.memo) {
+          cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
+          cacheCtx.memo.objects.set(oidLc, res);
         }
+        return res;
+      }
 
-        // If DO fetch fails, try R2 packs
-        return await loadFromPacks();
-      },
-      cacheCtx.ctx
-    );
+      // Normal phase: Try loose object via DO first (preferred)
+      const stateResult = await loadFromState();
+      if (stateResult) {
+        if (cacheCtx?.memo) {
+          cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
+          cacheCtx.memo.objects.set(oidLc, stateResult);
+        }
+        return stateResult;
+      }
+
+      // If DO fetch fails, try R2 packs
+      const res = await loadFromPacks();
+      if (res && cacheCtx?.memo) {
+        cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
+        cacheCtx.memo.objects.set(oidLc, res);
+      }
+      return res;
+    };
+
+    if (!bypassCacheRead) {
+      const loaded = await cacheOrLoadObject(cacheKey, doLoad, cacheCtx.ctx);
+      if (loaded && cacheCtx?.memo) {
+        cacheCtx.memo.objects = cacheCtx.memo.objects || new Map();
+        cacheCtx.memo.objects.set(oidLc, loaded);
+      }
+      return loaded;
+    }
+
+    // Bypass Cache API read: perform load and optionally write to cache in background
+    const loaded = await doLoad();
+    if (loaded && !heavyNoCache) {
+      try {
+        const savePromise = cachePutObject(cacheKey, loaded.type, loaded.payload);
+        cacheCtx.ctx?.waitUntil?.(savePromise);
+      } catch {}
+    }
+    return loaded;
   }
 
-  // No cache context: Try DO state first, KV OID fast path, then fall back to R2 packs
+  // No cache context: Try DO state first, then fall back to R2 packs
   {
     const stateResult = await loadFromState();
     if (stateResult) return stateResult;
-
-    if (!skipKV) {
-      const cachedPackKey = await getPackForOid(env.PACK_METADATA_CACHE, doId, oidLc);
-      if (cachedPackKey) {
-        logger.debug("kv-oid-pack-hit", { packKey: cachedPackKey });
-        const result = await loadSinglePackFromR2(env, cachedPackKey, oidLc);
-        if (result) return result;
-      }
-    }
-
     return await loadFromPacks();
   }
 }

@@ -29,16 +29,21 @@ export type RepoStateSchema = {
 
 export type TypedStorage<S> = {
   get<K extends keyof S & string>(key: K): Promise<S[K] | undefined>;
+  get<K extends keyof S & string>(keys: K[]): Promise<Map<K, S[K] | undefined>>;
   put<K extends keyof S & string>(key: K, value: S[K]): Promise<void>;
   delete<K extends keyof S & string>(key: K): Promise<boolean | void>;
 };
 
 export function asTypedStorage<S>(storage: DurableObjectStorage): TypedStorage<S> {
-  return {
-    get: <K extends keyof S>(key: K) => storage.get(key as string) as Promise<S[K] | undefined>,
-    put: <K extends keyof S>(key: K, value: S[K]) => storage.put(key as string, value),
-    delete: <K extends keyof S>(key: K) => storage.delete(key as string),
-  };
+  async function get<K extends keyof S & string>(key: K): Promise<S[K] | undefined>;
+  async function get<K extends keyof S & string>(keys: K[]): Promise<Map<K, S[K] | undefined>>;
+  async function get(keyOrKeys: any): Promise<any> {
+    return storage.get(keyOrKeys as any);
+  }
+  const put = <K extends keyof S & string>(key: K, value: S[K]) =>
+    storage.put(key as string, value);
+  const del = <K extends keyof S & string>(key: K) => storage.delete(key as string);
+  return { get: get as any, put: put as any, delete: del as any };
 }
 
 // Key helpers for template-literal key families
