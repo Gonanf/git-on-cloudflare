@@ -1,13 +1,9 @@
+import type { AuthStateSchema, AuthUsers, RateLimitEntry } from "./authState";
+
 import { DurableObject } from "cloudflare:workers";
 import { createLogger } from "@/common";
-import { asTypedStorage } from "./repoState";
-import {
-  AuthStateSchema,
-  AuthUsers,
-  RateLimitEntry,
-  makeOwnerRateLimitKey,
-  makeAdminRateLimitKey,
-} from "./authState";
+import { asTypedStorage } from "../repo/repoState";
+import { makeOwnerRateLimitKey, makeAdminRateLimitKey } from "./authState";
 
 /**
  * Generates a cryptographically secure random salt

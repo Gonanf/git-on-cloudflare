@@ -1,8 +1,10 @@
+import type { IdxParsed } from "@/git/pack/packMeta.ts";
+
 import { packIndexKey } from "@/keys.ts";
 import { hexToBytes, bytesToHex, createLogger } from "@/common/index.ts";
+import { parseIdxV2, readPackHeaderEx, readPackRange } from "@/git/pack/packMeta.ts";
 
 // --- In-process LRU cache for parsed .idx files (ephemeral per isolate) ---
-type IdxParsed = { oids: string[]; offsets: number[] };
 const IDX_CACHE_MAX = 64;
 const idxCache = new Map<string, IdxParsed>(); // key: packKey
 
@@ -15,7 +17,7 @@ function touchIdxCache(key: string, value: IdxParsed) {
   }
 }
 
-async function loadIdxParsed(env: Env, packKey: string): Promise<IdxParsed | undefined> {
+export async function loadIdxParsed(env: Env, packKey: string): Promise<IdxParsed | undefined> {
   const cached = idxCache.get(packKey);
   if (cached) {
     // Touch for LRU
@@ -434,9 +436,10 @@ export async function assemblePackFromMultiplePacks(
     return undefined;
   }
 
-  // Selection: map each needed oid to one of the packs containing it (prefer earliest key)
+  // Selection: map each needed oid to ONE canonical source pack entry and reuse it everywhere
   type Sel = { m: Meta; i: number };
   const selected = new Map<string, Sel>(); // key: `${m.key}#${i}`
+  const chosen = new Map<string, Sel>(); // key: oid -> chosen selection
   const pending: Sel[] = [];
   const byOid = (oid: string): Sel | undefined => {
     for (const m of metas) {
@@ -445,18 +448,26 @@ export async function assemblePackFromMultiplePacks(
     }
     return undefined;
   };
-  for (const oid of neededOids) {
+  const getChosenSel = (oid: string): Sel | undefined => {
+    const x = chosen.get(oid);
+    if (x) return x;
     const sel = byOid(oid);
+    if (!sel) return undefined;
+    chosen.set(oid, sel);
+    return sel;
+  };
+  for (const oid of neededOids) {
+    const sel = getChosenSel(oid);
     if (!sel) {
       log.debug("multi:cannot-cover", { oid });
       return undefined; // cannot cover
     }
     const key = `${sel.m.key}#${sel.i}`;
-    selected.set(key, sel);
+    if (!selected.has(key)) selected.set(key, sel);
     pending.push(sel);
   }
 
-  // Include delta bases
+  // Include delta bases (use chosen sel for base OIDs to avoid duplicates across packs)
   while (pending.length) {
     if (signal?.aborted) return undefined;
     const { m, i } = pending.pop()!;
@@ -467,22 +478,26 @@ export async function assemblePackFromMultiplePacks(
       return undefined;
     }
     if (header.type === 6) {
+      // OFS_DELTA: compute base OID, then choose a canonical source for that OID
       const baseOff = off - (header.baseRel || 0);
       const bIdx = m.offsetToIndex.get(baseOff);
       if (bIdx === undefined) return undefined;
-      const key = `${m.key}#${bIdx}`;
+      const baseOid = m.oids[bIdx];
+      const baseSel = getChosenSel(baseOid);
+      if (!baseSel) return undefined;
+      const key = `${baseSel.m.key}#${baseSel.i}`;
       if (!selected.has(key)) {
-        selected.set(key, { m, i: bIdx });
-        pending.push({ m, i: bIdx });
+        selected.set(key, baseSel);
+        pending.push(baseSel);
       }
     } else if (header.type === 7) {
       const base = header.baseOid!;
-      const sel = byOid(base);
-      if (!sel) return undefined;
-      const key = `${sel.m.key}#${sel.i}`;
+      const baseSel = getChosenSel(base);
+      if (!baseSel) return undefined;
+      const key = `${baseSel.m.key}#${baseSel.i}`;
       if (!selected.has(key)) {
-        selected.set(key, sel);
-        pending.push(sel);
+        selected.set(key, baseSel);
+        pending.push(baseSel);
       }
     }
   }
@@ -510,14 +525,19 @@ export async function assemblePackFromMultiplePacks(
       type: h.type,
     };
     if (h.type === 6) {
+      // Resolve base by OID then map to chosen selection
       const baseOff = s.m.offsets[s.i] - (h.baseRel || 0);
       const bi = s.m.offsetToIndex.get(baseOff);
       if (bi === undefined) return undefined;
-      n.base = { m: s.m, i: bi };
+      const baseOid = s.m.oids[bi];
+      const baseSel = chosen.get(baseOid) || byOid(baseOid);
+      if (!baseSel) return undefined;
+      n.base = baseSel;
     } else if (h.type === 7) {
-      const sel = byOid(h.baseOid!);
-      if (!sel) return undefined;
-      n.base = sel;
+      const baseOid = h.baseOid!;
+      const baseSel = chosen.get(baseOid) || byOid(baseOid);
+      if (!baseSel) return undefined;
+      n.base = baseSel;
     }
     nodes.push(n);
     nodeMap.set(nodeKey(s), n);
@@ -752,63 +772,6 @@ export async function assemblePackFromMultiplePacks(
   return out;
 }
 
-// ---- low-level helpers ----
-
-/**
- * Read and parse a PACK entry header at a given offset.
- * Returns type, header length, size varint bytes, and delta metadata if applicable.
- *
- * @param env Worker environment
- * @param key R2 key of the `.pack`
- * @param offset Byte offset from start of pack where object begins
- */
-async function readPackHeaderEx(
-  env: Env,
-  key: string,
-  offset: number
-): Promise<
-  | {
-      type: number;
-      sizeVarBytes: Uint8Array;
-      headerLen: number;
-      baseOid?: string;
-      baseRel?: number;
-    }
-  | undefined
-> {
-  const head = await readPackRange(env, key, offset, 128);
-  if (!head) return undefined;
-  let p = 0;
-  const start = p;
-  let c = head[p++];
-  const type = (c >> 4) & 0x07;
-  // collect size varint bytes
-  while (c & 0x80) {
-    c = head[p++];
-  }
-  const sizeVarBytes = head.subarray(start, p);
-  if (type === 7) {
-    // REF_DELTA
-    const baseOid = bytesToHex(head.subarray(p, p + 20));
-    const headerLen = sizeVarBytes.length + 20;
-    return { type, sizeVarBytes, headerLen, baseOid };
-  }
-  if (type === 6) {
-    // OFS_DELTA
-    const ofsStart = p;
-    let x = 0;
-    let b = head[p++];
-    x = b & 0x7f;
-    while (b & 0x80) {
-      b = head[p++];
-      x = ((x + 1) << 7) | (b & 0x7f);
-    }
-    const headerLen = sizeVarBytes.length + (p - ofsStart);
-    return { type, sizeVarBytes, headerLen, baseRel: x };
-  }
-  return { type, sizeVarBytes, headerLen: sizeVarBytes.length };
-}
-
 /**
  * Parse a PACK entry header from an in-memory pack buffer at the given offset.
  * Mirrors the behavior of readPackHeaderEx but avoids R2 range reads.
@@ -896,79 +859,5 @@ export function encodeOfsDeltaDistance(rel: number): Uint8Array {
  * @param buf - Raw index file bytes
  * @returns Parsed index with OIDs and offsets, or undefined if invalid
  */
-function parseIdxV2(buf: Uint8Array): { oids: string[]; offsets: number[] } | undefined {
-  if (buf.byteLength < 8) return undefined;
-  if (!(buf[0] === 0xff && buf[1] === 0x74 && buf[2] === 0x4f && buf[3] === 0x63)) return undefined;
-  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
-  const version = dv.getUint32(4, false);
-  if (version !== 2 && version !== 3) return undefined;
-  let pos = 8;
-  const fanout: number[] = [];
-  for (let i = 0; i < 256; i++) {
-    fanout.push(dv.getUint32(pos, false));
-    pos += 4;
-  }
-  const n = fanout[255] || 0;
-  const namesStart = pos;
-  const namesEnd = namesStart + n * 20;
-  const oids: string[] = [];
-  for (let i = 0; i < n; i++) {
-    const off = namesStart + i * 20;
-    const hex = bytesToHex(buf.subarray(off, off + 20));
-    oids.push(hex);
-  }
-  const crcsStart = namesEnd;
-  const crcsEnd = crcsStart + n * 4;
-  const offsStart = crcsEnd;
-  const offsEnd = offsStart + n * 4;
-  const largeOffsStart = offsEnd;
-  // First pass to count large offsets
-  let largeCount = 0;
-  for (let i = 0; i < n; i++) {
-    const u32 = dv.getUint32(offsStart + i * 4, false);
-    if (u32 & 0x80000000) largeCount++;
-  }
-  const largeTableStart = largeOffsStart;
-  const offsets: number[] = [];
-  for (let i = 0; i < n; i++) {
-    const u32 = dv.getUint32(offsStart + i * 4, false);
-    if (u32 & 0x80000000) {
-      const li = u32 & 0x7fffffff;
-      const off64 = readUint64BE(dv, largeTableStart + li * 8);
-      offsets.push(Number(off64));
-    } else {
-      offsets.push(u32 >>> 0);
-    }
-  }
-  return { oids, offsets };
-}
-
-/**
- * Read an unsigned 64-bit big-endian integer from a DataView.
- */
-function readUint64BE(dv: DataView, pos: number): bigint {
-  const hi = dv.getUint32(pos, false);
-  const lo = dv.getUint32(pos + 4, false);
-  return (BigInt(hi) << 32n) | BigInt(lo);
-}
-
-/**
- * Read a byte range from an R2 `.pack` object.
- *
- * @param env Worker environment
- * @param key R2 key of the `.pack`
- * @param offset Starting byte offset
- * @param length Number of bytes to fetch
- */
-async function readPackRange(
-  env: Env,
-  key: string,
-  offset: number,
-  length: number
-): Promise<Uint8Array | undefined> {
-  // Workers R2 supports ranged GET
-  const obj = await env.REPO_BUCKET.get(key, { range: { offset, length } });
-  if (!obj) return undefined;
-  const ab = await obj.arrayBuffer();
-  return new Uint8Array(ab);
-}
+// parseIdxV2 moved to packMeta.ts
+// readPackRange moved to packMeta.ts

@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { env, runDurableObjectAlarm } from "cloudflare:test";
-import { asTypedStorage, RepoStateSchema, packOidsKey } from "@/do/repoState.ts";
+import { asTypedStorage, RepoStateSchema, packOidsKey } from "@/do/repo/repoState.ts";
 import { runDOWithRetry, withEnvOverrides } from "./util/test-helpers.ts";
 
 function makeRepoId(suffix: string) {

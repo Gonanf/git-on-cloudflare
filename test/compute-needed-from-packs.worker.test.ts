@@ -4,7 +4,7 @@ import * as git from "isomorphic-git";
 import type { RepoDurableObject } from "@/index";
 import { computeNeeded } from "@/git";
 import { createMemPackFs } from "@/git";
-import { asTypedStorage, RepoStateSchema } from "@/do/repoState.ts";
+import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
 import {
   uniqueRepoId,
   runDOWithRetry,

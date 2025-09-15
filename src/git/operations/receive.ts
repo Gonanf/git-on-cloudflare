@@ -1,14 +1,10 @@
+import type { Head, RepoStateSchema, TypedStorage } from "@/do/repo/repoState.ts";
+
 import { parsePktSection, pktLine, flushPkt, concatChunks } from "@/git/core/pktline.ts";
 import { indexPackOnly, createMemPackFs, createLooseLoader } from "@/git/pack/index.ts";
-import {
-  asTypedStorage,
-  packOidsKey,
-  objKey,
-  type Head,
-  type RepoStateSchema,
-  type TypedStorage,
-} from "@/do/repoState.ts";
+import { asTypedStorage, packOidsKey, objKey } from "@/do/repo/repoState.ts";
 import { r2PackKey, r2LooseKey, packIndexKey } from "@/keys.ts";
+import { scheduleAlarmIfSooner } from "@/do/repo/scheduler.ts";
 import * as git from "isomorphic-git";
 import { createLogger } from "@/common/index.ts";
 
@@ -29,7 +25,7 @@ async function runConnectivityCheck(args: {
 }) {
   const { pack, packKey, cmds, statuses, store, env, prefix, log } = args;
   try {
-    const lastPackOids = ((await store.get("lastPackOids")) as string[] | undefined) ?? [];
+    const lastPackOids = (await store.get("lastPackOids")) || [];
     const newOidsSet = new Set(lastPackOids.map((x) => x.toLowerCase()));
     // Build a small FS over the incoming pack + its idx to read objects
     const files = new Map<string, Uint8Array>();
@@ -49,9 +45,7 @@ async function runConnectivityCheck(args: {
         for (const oid of idxRes.oids) currentPackOids.add(String(oid).toLowerCase());
       }
     } catch {}
-    const packList = (((await store.get("packList")) as string[] | undefined) ?? []).filter((k) =>
-      packKey ? k !== packKey : true
-    );
+    const packList = (await store.get("packList")) || [];
 
     // Per-run memo caches to avoid repeated reads
     const hasCache = new Map<string, boolean>();
@@ -73,8 +67,8 @@ async function runConnectivityCheck(args: {
         } catch {}
         if (!ok) {
           for (const k of packList) {
-            const o = (await store.get(packOidsKey(k))) as string[] | undefined;
-            if (o && o.includes(lc)) {
+            const o = (await store.get(packOidsKey(k))) || [];
+            if (o.includes(lc)) {
               ok = true;
               break;
             }
@@ -103,7 +97,7 @@ async function runConnectivityCheck(args: {
 
         if (!ok) {
           try {
-            const obj = (await git.readObject({ fs, dir, oid: tLc, format: "parsed" })) as any;
+            const obj = (await git.readObject({ fs, dir, oid: tLc, format: "parsed" })) || null;
             if (obj && obj.type === "tree") ok = true;
           } catch {}
         }
@@ -144,7 +138,7 @@ async function runConnectivityCheck(args: {
       } catch {}
       // Parsed object
       try {
-        const obj = (await git.readObject({ fs, dir, oid: lc, format: "parsed" })) as any;
+        const obj = (await git.readObject({ fs, dir, oid: lc, format: "parsed" })) || null;
         if (obj?.type === "tree") {
           const k: FinalKind = { type: "tree", oid: lc };
           kindCache.set(lc, k);
@@ -174,9 +168,9 @@ async function runConnectivityCheck(args: {
       } catch {}
       // Raw content fallback for tag
       try {
-        const raw = (await git.readObject({ fs, dir, oid: lc, format: "content" })) as any;
+        const raw = (await git.readObject({ fs, dir, oid: lc, format: "content" })) || null;
         if (raw?.type === "tag" && raw.object instanceof Uint8Array) {
-          const text = new TextDecoder().decode(raw.object as Uint8Array);
+          const text = new TextDecoder().decode(raw.object);
           const mObj = text.match(/^object\s+([0-9a-f]{40})/m);
           const mType = text.match(/^type\s+(\w+)/m);
           const targetOid = (mObj ? mObj[1] : "").toLowerCase();
@@ -240,7 +234,7 @@ async function runConnectivityCheck(args: {
             try {
               const info = await git.readCommit({ fs, dir, oid: newOidLc });
               const parents: string[] = Array.isArray(info?.commit?.parent)
-                ? (info.commit.parent as string[])
+                ? info.commit.parent || []
                 : [];
               for (const p of parents) {
                 const exists = await hasObject(String(p).toLowerCase());
@@ -418,7 +412,7 @@ export async function receivePack(
     }
 
     // Load current refs state
-    const refs = ((await store.get("refs")) as { name: string; oid: string }[] | undefined) ?? [];
+    const refs = (await store.get("refs")) || [];
     const refMap = new Map(refs.map((r) => [r.name, r.oid] as const));
 
     // Validate commands against current refs
@@ -497,7 +491,7 @@ export async function receivePack(
       }
       // Refresh HEAD resolution based on updated refs
       try {
-        const curHead = (await store.get("head")) as Head | undefined;
+        const curHead = (await store.get("head")) || null;
         const target = curHead?.target || "refs/heads/main";
         const match = newRefs.find((r) => r.name === target);
         const resolved: Head = match ? { target, oid: match.oid } : { target, unborn: true };
@@ -536,7 +530,7 @@ export async function receivePack(
               processedCount: 0,
               startedAt: Date.now(),
             });
-            await state.storage.setAlarm(Date.now() + 100);
+            await scheduleAlarmIfSooner(state, env, Date.now() + 100);
             log.debug("unpack:scheduled", { packKey });
           } else {
             const existingNext = await store.get("unpackNext");

@@ -1,3 +1,6 @@
+import type { TreeEntry } from "@/git";
+import type { CacheContext } from "@/cache";
+
 import { AutoRouter } from "itty-router";
 import {
   getHeadAndRefs,
@@ -6,7 +9,6 @@ import {
   listMergeSideFirstParent,
   readCommitInfo,
   readBlobStream,
-  type TreeEntry,
 } from "@/git";
 import { repoKey } from "@/keys";
 import {
@@ -23,10 +25,10 @@ import {
   isValidPath,
   OID_RE,
   getContentTypeFromName,
+  HttpError,
 } from "@/web";
-import { HttpError } from "@/web";
 import { listReposForOwner } from "@/registry";
-import { buildCacheKeyFrom, cacheOrLoadJSON, cacheOrLoadJSONWithTTL, CacheContext } from "@/cache";
+import { buildCacheKeyFrom, cacheOrLoadJSON, cacheOrLoadJSONWithTTL } from "@/cache";
 import { handleError } from "@/web/templates";
 import { getUnpackProgress } from "@/common";
 

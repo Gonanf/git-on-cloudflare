@@ -14,6 +14,54 @@ export type UnpackWork = {
   startedAt: number;
 };
 
+export type HydrationTask = {
+  reason: "post-unpack" | "admin";
+  createdAt: number;
+  options?: { dryRun?: boolean };
+};
+
+export type HydrationStage =
+  | "plan"
+  | "scan-deltas"
+  | "scan-loose"
+  | "build-segment"
+  | "done"
+  | "error";
+
+export type HydrationWork = {
+  workId: string;
+  startedAt: number;
+  dryRun?: boolean;
+  snapshot?: {
+    lastPackKey: string | null;
+    packList: string[];
+    window?: string[];
+    // Optional cached coverage Bloom filter for recent window membership checks.
+    // Serialized form to avoid importing the BloomFilter type here.
+    coverageBloom?: { m: number; k: number; bits: string };
+  };
+  stage: HydrationStage;
+  progress?: {
+    packIndex?: number;
+    objCursor?: number;
+    looseCursorKey?: string;
+    segmentSeq?: number;
+    producedBytes?: number;
+  };
+  pending?: {
+    needBases?: string[];
+    needLoose?: string[];
+  };
+  stats?: Record<string, number>;
+  error?: {
+    message: string;
+    fatal?: boolean; // true for integrity errors, false/undefined for transient
+    retryCount?: number;
+    firstErrorAt?: number;
+    nextRetryAt?: number;
+  };
+};
+
 export type RepoStateSchema = {
   refs: Ref[];
   head: Head;
@@ -24,6 +72,8 @@ export type RepoStateSchema = {
   lastMaintenanceMs: number;
   unpackWork: UnpackWork | undefined; // Pending unpack work
   unpackNext: string | undefined; // One-deep next pack key awaiting promotion
+  hydrationWork: HydrationWork | undefined; // Current hydration work-in-progress
+  hydrationQueue: HydrationTask[] | undefined; // FIFO queue of hydration tasks
 } & Record<ObjKey, Uint8Array | ArrayBuffer> &
   Record<PackOidsKey, string[]>;
 

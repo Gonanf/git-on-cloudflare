@@ -1,8 +1,10 @@
-import { Liquid, type FS } from "liquidjs";
+import type { FS } from "liquidjs";
+import type { Readable as NodeReadable } from "node:stream";
+
+import { Liquid } from "liquidjs";
 import { escapeHtml } from "./format";
 import { isHttpError } from "./http";
 import { Readable } from "node:stream";
-import type { Readable as NodeReadable } from "node:stream";
 
 /**
  * LiquidJS engine configured to load templates from Wrangler ASSETS.

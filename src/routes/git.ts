@@ -1,3 +1,5 @@
+import type { HeadInfo, Ref } from "@/git";
+
 import { AutoRouter } from "itty-router";
 import {
   capabilityAdvertisement,
@@ -7,8 +9,6 @@ import {
   flushPkt,
   concatChunks,
   getHeadAndRefs,
-  HeadInfo,
-  Ref,
   inflateAndParseHeader,
   parseTagTarget,
 } from "@/git";

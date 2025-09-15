@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import { asTypedStorage, RepoStateSchema } from "@/do/repoState.ts";
+import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
 import { getUnpackProgress } from "@/common";
 import { runDOWithRetry } from "./util/test-helpers.ts";
 import type { RepoDurableObject } from "@/index";

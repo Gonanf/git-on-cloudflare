@@ -2,7 +2,7 @@ import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import * as git from "isomorphic-git";
-import { asTypedStorage, RepoStateSchema } from "@/do/repoState.ts";
+import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
 import { concatChunks, createMemPackFs, delimPkt, encodeObjHeader, flushPkt, pktLine } from "@/git";
 import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
 import { deflate, inflate } from "@/common/index.ts";

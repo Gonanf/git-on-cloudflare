@@ -46,3 +46,10 @@ export function isIdxKey(key: string): boolean {
 export function packKeyFromIndexKey(idxKey: string): string {
   return idxKey.replace(/\.idx$/, ".pack");
 }
+
+// Extract the Durable Object ID from a path starting with "do/<id>/..."
+// Returns null when the path does not include the expected prefix.
+export function getDoIdFromPath(path: string): string | null {
+  const m = /^do\/([^/]+)/.exec(path);
+  return m ? m[1] : null;
+}

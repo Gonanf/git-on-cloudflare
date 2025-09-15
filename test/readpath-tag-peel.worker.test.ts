@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
-import { asTypedStorage, type RepoStateSchema } from "@/do/repoState.ts";
+import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 import { readPath } from "@/git/operations/read.ts";
 import { encodeGitObject } from "@/git/core/objects.ts";
@@ -45,6 +45,8 @@ it("readPath resolves tag to its target commit tree (tag peel)", async () => {
   const result = await readPath(env as unknown as Env, repoId, "refs/tags/v1");
   expect(result.type).toBe("tree");
   // For the minimal repo, tree is empty
-  expect(Array.isArray(result.entries)).toBe(true);
-  expect(result.entries.length).toBe(0);
+  if (result.type === "tree") {
+    expect(Array.isArray(result.entries)).toBe(true);
+    expect(result.entries.length).toBe(0);
+  }
 });

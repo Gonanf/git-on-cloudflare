@@ -1,5 +1,5 @@
 import { AutoRouter } from "itty-router";
-import { getRepoStub } from "@/common";
+import { getRepoStub, isValidOid } from "@/common";
 import { repoKey } from "@/keys";
 import { verifyAuth } from "@/auth";
 import { listReposForOwner, addRepoToOwner, removeRepoFromOwner } from "@/registry";
@@ -18,6 +18,60 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
     return new Response(JSON.stringify({ owner, repos }), {
       headers: { "Content-Type": "application/json" },
     });
+  });
+
+  // Admin: clear hydration state and hydration-generated packs
+  router.delete(`/:owner/:repo/admin/hydrate`, async (request, env: Env) => {
+    const { owner, repo } = request.params as { owner: string; repo: string };
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return new Response("Unauthorized\n", {
+        status: 401,
+        headers: { "WWW-Authenticate": 'Basic realm="Git", charset="UTF-8"' },
+      });
+    }
+    const stub = getRepoStub(env, repoKey(owner, repo));
+    try {
+      const res = await stub.clearHydration();
+      return new Response(JSON.stringify({ ok: true, ...res }), {
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+      });
+    } catch (e) {
+      return new Response(JSON.stringify({ ok: false, error: String(e) }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  });
+
+  // Admin: trigger hydration (dry-run by default)
+  // POST body: { dryRun?: boolean }
+  router.post(`/:owner/:repo/admin/hydrate`, async (request, env: Env) => {
+    const { owner, repo } = request.params as { owner: string; repo: string };
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return new Response("Unauthorized\n", {
+        status: 401,
+        headers: { "WWW-Authenticate": 'Basic realm="Git", charset="UTF-8"' },
+      });
+    }
+    let body: { dryRun?: boolean } = {};
+    try {
+      body = await (request as Request).json();
+    } catch {}
+    const dryRun = body?.dryRun !== false; // default to true
+    const stub = getRepoStub(env, repoKey(owner, repo));
+    try {
+      const res = await stub.startHydration({ dryRun });
+      const json = JSON.stringify(res);
+      return new Response(json, {
+        status: dryRun ? 200 : 202,
+        headers: { "Content-Type": "application/json", "Cache-Control": "no-cache" },
+      });
+    } catch (e) {
+      return new Response(JSON.stringify({ error: String(e) }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
   });
 
   // Owner registry: backfill/sync membership
@@ -164,17 +218,21 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Debug: check a specific commit's tree presence
-  // GET param: ?commit=<40-hex>
-  router.get(`/:owner/:repo/admin/debug-check`, async (request, env: Env) => {
-    const { owner, repo } = request.params as { owner: string; repo: string };
+  router.get(`/:owner/:repo/admin/debug-commit/:commit`, async (request, env: Env) => {
+    const { owner, repo, commit } = request.params as {
+      owner: string;
+      repo: string;
+      commit: string;
+    };
     if (!(await verifyAuth(env, owner, request, true))) {
       return new Response("Unauthorized\n", {
         status: 401,
         headers: { "WWW-Authenticate": 'Basic realm="Git", charset="UTF-8"' },
       });
     }
-    const url = new URL((request as Request).url);
-    const commit = url.searchParams.get("commit") || "";
+    if (!isValidOid(commit)) {
+      return new Response("Invalid commit\n", { status: 400 });
+    }
     const stub = getRepoStub(env, repoKey(owner, repo));
     try {
       const result = await stub.debugCheckCommit(commit);

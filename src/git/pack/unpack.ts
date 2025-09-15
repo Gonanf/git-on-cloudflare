@@ -1,6 +1,7 @@
-import * as git from "isomorphic-git";
+import type { RepoStateSchema } from "@/do/repo/repoState.ts";
 
-import { asTypedStorage, type RepoStateSchema, objKey, packOidsKey } from "@/do/repoState.ts";
+import * as git from "isomorphic-git";
+import { asTypedStorage, objKey, packOidsKey } from "@/do/repo/repoState.ts";
 import {
   doPrefix,
   r2LooseKey,

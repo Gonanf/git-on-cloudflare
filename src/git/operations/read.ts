@@ -1,15 +1,12 @@
 import type { HeadInfo, Ref } from "./types.ts";
+import type { CacheContext } from "@/cache/index.ts";
+
 import { parseCommitText } from "@/git/core/commitParse.ts";
 import { packIndexKey } from "@/keys.ts";
 import { getPackCandidates } from "./packDiscovery.ts";
 import { getLimiter, countSubrequest } from "./limits.ts";
 import { createMemPackFs, createStubLooseLoader } from "@/git/pack/index.ts";
-import {
-  buildObjectCacheKey,
-  cacheOrLoadObject,
-  cachePutObject,
-  type CacheContext,
-} from "@/cache/index.ts";
+import { buildObjectCacheKey, cacheOrLoadObject, cachePutObject } from "@/cache/index.ts";
 import { createLogger, createInflateStream, getRepoStub, BinaryHeap } from "@/common/index.ts";
 import * as git from "isomorphic-git";
 import { inflateAndParseHeader, parseTagTarget } from "@/git/core/index.ts";

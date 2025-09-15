@@ -1,20 +1,16 @@
-import {
-  pktLine,
-  flushPkt,
-  delimPkt,
-  concatChunks,
-  decodePktLines,
-  objTypeCode,
-  encodeObjHeader,
-  type GitObjectType,
-} from "@/git/core/index.ts";
-import { getRepoStub, createLogger, deflate, createInflateStream } from "@/common/index.ts";
+import type { GitObjectType } from "@/git/core/index.ts";
+import type { Logger } from "@/common/index.ts";
+import type { CacheContext } from "@/cache/index.ts";
+import type { RepoDurableObject } from "@/do/repo/repoDO.ts";
+
+import { pktLine, flushPkt, delimPkt, concatChunks, decodePktLines } from "@/git/core/index.ts";
+import { getRepoStub, createLogger, createInflateStream } from "@/common/index.ts";
 import { readLooseObjectRaw } from "./read.ts";
 import { assemblePackFromR2, assemblePackFromMultiplePacks } from "@/git/pack/assembler.ts";
-import type { CacheContext } from "@/cache/index.ts";
 import { getPackCandidates } from "./packDiscovery.ts";
 import { getLimiter, countSubrequest } from "./limits.ts";
 import { beginClosurePhase, endClosurePhase } from "./heavyMode.ts";
+import { buildPackV2 } from "@/git/pack/index.ts";
 
 export function parseFetchArgs(body: Uint8Array) {
   const items = decodePktLines(body);
@@ -41,9 +37,68 @@ export function parseFetchArgs(body: Uint8Array) {
 }
 
 /**
+ * Builds a capped union of object OIDs across the given pack keys using DO RPCs.
+ * Prefers the batch API `getPackOidsBatch(keys)` and falls back to per-key RPCs on error.
+ * This union is intended to drive a multi-pack assembly that produces a thick pack
+ * without computing object closure (used for initial clone and timeout fallback).
+ * @param stub - Repo DO stub exposing getPackOidsBatch/getPackOids
+ * @param keys - Recent pack keys to union (already capped by caller)
+ * @param limiter - Per-request limiter wrapper
+ * @param cacheCtx - Optional CacheContext for subrequest accounting
+ * @param log - Logger-like object for debug logging
+ */
+async function buildUnionNeededForKeys(
+  stub: DurableObjectStub<RepoDurableObject>,
+  keys: string[],
+  limiter: { run<T>(name: string, fn: () => Promise<T>): Promise<T> },
+  cacheCtx: CacheContext | undefined,
+  log: Logger
+): Promise<string[]> {
+  const MAX_UNION = 25000;
+  const needSet = new Set<string>();
+  let usedBatch = false;
+  try {
+    const batchMap = await limiter.run("do:getPackOidsBatch", async () => {
+      countSubrequest(cacheCtx);
+      return await stub.getPackOidsBatch(keys);
+    });
+    for (const k of keys) {
+      const oids = (batchMap.get ? batchMap.get(k) : undefined) || [];
+      for (const oid of oids) {
+        needSet.add(String(oid).toLowerCase());
+        if (needSet.size >= MAX_UNION) break;
+      }
+      if (needSet.size >= MAX_UNION) break;
+    }
+    usedBatch = true;
+  } catch (e) {
+    log.debug("fetch:union:getPackOidsBatch:error", { error: String(e) });
+  }
+  if (!usedBatch) {
+    for (const k of keys) {
+      try {
+        const oids = await limiter.run("do:getPackOids", async () => {
+          countSubrequest(cacheCtx);
+          return await stub.getPackOids(k);
+        });
+        for (const oid of oids) {
+          needSet.add(String(oid).toLowerCase());
+          if (needSet.size >= MAX_UNION) break;
+        }
+      } catch {}
+      if (needSet.size >= MAX_UNION) break;
+    }
+  }
+  return Array.from(needSet);
+}
+
+/**
  * Handles Git fetch protocol v2 requests.
- * Implements fast path for initial clones (no haves) by assembling from latest R2 pack.
- * Falls back to computing minimal closure for incremental fetches.
+ * Optimizations:
+ * - Initial clone union-first fast path: directly assemble a thick pack by unioning across recent packs,
+ *   avoiding object-by-object closure when haves.length === 0 and hydration packs exist.
+ * - Standard incremental path: compute minimal closure and assemble from single or multiple packs.
+ * - Timeout fallback: safe multi-pack union when closure times out.
  * @param env - Worker environment
  * @param repoId - Repository identifier (owner/repo)
  * @param body - Raw request body containing fetch arguments
@@ -81,12 +136,24 @@ export async function handleFetchV2(
   // Try to assemble a full pack directly from existing R2 packs.
   if (haves.length === 0) {
     try {
-      // Intentionally avoid picking arbitrary packs here. A single pack may
-      // contain the WANT but miss required bases (e.g., commit's tree), which
-      // would produce an invalid or incomplete pack for initial clones.
-      // We fall through to the standard path that computes the minimal closure
-      // and will either assemble from the latest pack (if it fully covers) or
-      // use multi-pack union / loose fallback.
+      const doId = stub.id.toString();
+      const heavy = cacheCtx?.memo?.flags?.has("no-cache-read") === true;
+      const packKeys = await getPackCandidates(env, stub, doId, heavy, cacheCtx);
+      if (Array.isArray(packKeys) && packKeys.length >= 2) {
+        const MAX_KEYS = Math.min(10, packKeys.length);
+        const keys = packKeys.slice(0, MAX_KEYS);
+        const unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
+        if (unionNeeded.length > 0) {
+          const mp = await assemblePackFromMultiplePacks(env, keys, unionNeeded, signal);
+          if (mp) {
+            log.info("fetch:path:init-union", { packs: keys.length, union: unionNeeded.length });
+            // Exit heavy mode before streaming
+            endClosurePhase(cacheCtx);
+            // No haves in initial clones: acknowledgments block will emit NAK when done === false
+            return respondWithPackfile(mp, done, [], signal);
+          }
+        }
+      }
     } catch (e) {
       log.debug("fetch:init-fastpath-failed", { error: String(e) });
     }
@@ -110,46 +177,7 @@ export async function handleFetchV2(
       if (packKeys.length > 0) {
         const MAX_KEYS = Math.min(10, packKeys.length);
         const keys = packKeys.slice(0, MAX_KEYS);
-        // Build union of OIDs across selected packs (capped) so the assembler will produce
-        // a non-thin pack that mirrors these packs.
-        const MAX_UNION = 25000;
-        const needSet = new Set<string>();
-        // Prefer single DO batch to reduce subrequests
-        let usedBatch = false;
-        try {
-          const batchMap = await limiter.run("do:getPackOidsBatch", async () => {
-            countSubrequest(cacheCtx);
-            return await stub.getPackOidsBatch(keys);
-          });
-          for (const k of keys) {
-            const oids = (batchMap.get ? batchMap.get(k) : undefined) || [];
-            for (const oid of oids) {
-              needSet.add(String(oid).toLowerCase());
-              if (needSet.size >= MAX_UNION) break;
-            }
-            if (needSet.size >= MAX_UNION) break;
-          }
-          usedBatch = true;
-        } catch (e) {
-          log.debug("fetch:timeout-fallback:getPackOidsBatch:error", { error: String(e) });
-        }
-        // Safe fallback: per-key RPCs if batch failed
-        if (!usedBatch) {
-          for (const k of keys) {
-            try {
-              const oids = await limiter.run("do:getPackOids", async () => {
-                countSubrequest(cacheCtx);
-                return await stub.getPackOids(k);
-              });
-              for (const oid of oids) {
-                needSet.add(String(oid).toLowerCase());
-                if (needSet.size >= MAX_UNION) break;
-              }
-            } catch {}
-            if (needSet.size >= MAX_UNION) break;
-          }
-        }
-        const unionNeeded = Array.from(needSet);
+        const unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
         if (keys.length >= 2 && unionNeeded.length > 0) {
           const mp = await assemblePackFromMultiplePacks(env, keys, unionNeeded, signal);
           if (mp) {
@@ -850,28 +878,4 @@ async function findCommonHaves(env: Env, repoId: string, haves: string[]): Promi
   return uniq;
 }
 
-async function buildPackV2(
-  objs: { type: GitObjectType; payload: Uint8Array }[]
-): Promise<Uint8Array> {
-  // Header: 'PACK' + version (2) + number of objects (big-endian)
-  const hdr = new Uint8Array(12);
-  hdr.set(new TextEncoder().encode("PACK"), 0);
-  const dv = new DataView(hdr.buffer);
-  dv.setUint32(4, 2); // version 2
-  dv.setUint32(8, objs.length);
-
-  const parts: Uint8Array[] = [hdr];
-  for (const o of objs) {
-    const typeCode = objTypeCode(o.type);
-    const head = encodeObjHeader(typeCode, o.payload.byteLength);
-    parts.push(head);
-    const comp = await deflate(o.payload);
-    parts.push(comp);
-  }
-  const body = concatChunks(parts);
-  const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", body));
-  const out = new Uint8Array(body.length + 20);
-  out.set(body, 0);
-  out.set(sha, body.length);
-  return out;
-}
+// buildPackV2 is shared from src/git/pack/build.ts via pack/index.ts

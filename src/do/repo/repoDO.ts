@@ -1,12 +1,8 @@
+import type { RepoStateSchema, Head, UnpackWork } from "./repoState.ts";
+import type { UnpackProgress } from "@/common/index.ts";
+
 import { DurableObject } from "cloudflare:workers";
-import {
-  asTypedStorage,
-  RepoStateSchema,
-  objKey,
-  packOidsKey,
-  Head,
-  UnpackWork,
-} from "./repoState.ts";
+import { asTypedStorage, objKey, packOidsKey } from "./repoState.ts";
 import { doPrefix, r2LooseKey, r2PackDirPrefix, isPackKey, packIndexKey } from "@/keys.ts";
 import {
   encodeGitObjectAndDeflate,
@@ -18,13 +14,15 @@ import {
   parseCommitRefs,
   parseTreeChildOids,
 } from "@/git/index.ts";
+import { text, createLogger, createInflateStream, isValidOid } from "@/common/index.ts";
 import {
-  text,
-  createLogger,
-  createInflateStream,
-  UnpackProgress,
-  isValidOid,
-} from "@/common/index.ts";
+  enqueueHydrationTask,
+  processHydrationSlice,
+  summarizeHydrationPlan,
+  clearHydrationState,
+} from "./hydration.ts";
+import { ensureScheduled, scheduleAlarmIfSooner } from "./scheduler.ts";
+import { getConfig } from "./repoConfig.ts";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -73,6 +71,59 @@ export class RepoDurableObject extends DurableObject {
     });
   }
 
+  /**
+   * Processes a small hydration slice if hydration work or queue exists.
+   * Returns true when a slice was executed and the alarm should continue soon.
+   */
+  private async handleHydrationWork(
+    store: ReturnType<typeof asTypedStorage<RepoStateSchema>>
+  ): Promise<boolean> {
+    try {
+      const work = await store.get("hydrationWork");
+      const queue = await store.get("hydrationQueue");
+      const hasQueue = Array.isArray(queue) ? queue.length > 0 : !!queue;
+      if (!work && !hasQueue) return false;
+      const cont = await processHydrationSlice(this.ctx, this.env, this.prefix());
+      if (cont) return true;
+      return false;
+    } catch (e) {
+      this.logger.error("alarm:hydration:error", { error: String(e) });
+      await scheduleAlarmIfSooner(this.ctx, this.env, Date.now() + 1000);
+      return true;
+    }
+  }
+
+  public async startHydration(options?: { dryRun?: boolean }): Promise<{
+    queued: boolean;
+    dryRun?: boolean;
+    plan?: unknown;
+    workId?: string;
+    queueLength?: number;
+  }> {
+    await this.ensureAccessAndAlarm();
+    const dry = options?.dryRun !== false; // default to dry-run when undefined
+    if (dry) {
+      const plan = await summarizeHydrationPlan(this.ctx, this.env, this.prefix());
+      return { queued: false, dryRun: true, plan };
+    }
+    const res = await enqueueHydrationTask(this.ctx, this.env, { dryRun: false });
+    return { queued: true, dryRun: false, workId: res.workId, queueLength: res.queueLength };
+  }
+
+  /**
+   * RPC: Clear hydration state and hydration-generated packs only.
+   */
+  public async clearHydration(): Promise<{
+    clearedWork: boolean;
+    clearedQueue: number;
+    removedPacks: number;
+  }> {
+    await this.ensureAccessAndAlarm();
+    // Delegate to hydration helper
+    const res = await clearHydrationState(this.ctx, this.env);
+    return res;
+  }
+
   // Thin request router: delegates to focused handlers below.
   // Keep this mapping explicit and small so behavior is easy to audit.
   async fetch(request: Request): Promise<Response> {
@@ -83,14 +134,6 @@ export class RepoDurableObject extends DurableObject {
     const url = new URL(request.url);
     this.logger.debug("fetch", { path: url.pathname, method: request.method });
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-
-    // Dev: reindex the latest pack from R2 into loose objects
-    // Note: kept as an HTTP endpoint for convenience during development and
-    // manual debugging. Production flows should rely on background unpack
-    // work scheduled via receive-pack and the DO alarm loop.
-    if (url.pathname === "/reindex" && request.method === "POST") {
-      return this.handleReindexPost();
-    }
 
     // Receive-pack: parse update commands section and packfile, store pack to R2,
     // update refs atomically if valid, and respond with report-status. This remains
@@ -321,6 +364,30 @@ export class RepoDurableObject extends DurableObject {
     unpackWork: UnpackWork | null;
     unpackNext: string | null;
     looseSample: string[];
+    hydration?: {
+      running: boolean;
+      stage?: string;
+      segmentSeq?: number;
+      queued: number;
+      needBasesCount?: number;
+      needLooseCount?: number;
+      packIndex?: number;
+      objCursor?: number;
+      workId?: string;
+      startedAt?: number;
+      producedBytes?: number;
+      windowCount?: number;
+      window?: string[];
+      needBasesSample?: string[];
+      needLooseSample?: string[];
+      error?: {
+        message?: string;
+        fatal?: boolean;
+        retryCount?: number;
+        firstErrorAt?: number;
+      };
+      queueReasons?: ("post-unpack" | "admin")[];
+    };
   }> {
     await this.ensureAccessAndAlarm();
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
@@ -331,6 +398,8 @@ export class RepoDurableObject extends DurableObject {
     const packList = (await store.get("packList")) ?? [];
     const unpackWork = await store.get("unpackWork");
     const unpackNext = await store.get("unpackNext");
+    const hydrationWork = (await store.get("hydrationWork")) as any;
+    const hydrationQueue = ((await store.get("hydrationQueue")) as any) || [];
 
     const looseSample: string[] = [];
     try {
@@ -350,6 +419,46 @@ export class RepoDurableObject extends DurableObject {
       unpackWork: unpackWork || null,
       unpackNext: unpackNext || null,
       looseSample,
+      hydration: {
+        running: !!hydrationWork,
+        stage: hydrationWork?.stage,
+        segmentSeq: hydrationWork?.progress?.segmentSeq,
+        queued: Array.isArray(hydrationQueue) ? hydrationQueue.length : 0,
+        needBasesCount: Array.isArray(hydrationWork?.pending?.needBases)
+          ? hydrationWork.pending.needBases.length
+          : undefined,
+        needLooseCount: Array.isArray(hydrationWork?.pending?.needLoose)
+          ? hydrationWork.pending.needLoose.length
+          : undefined,
+        packIndex: hydrationWork?.progress?.packIndex,
+        objCursor: hydrationWork?.progress?.objCursor,
+        workId: hydrationWork?.workId,
+        startedAt: hydrationWork?.startedAt,
+        producedBytes: hydrationWork?.progress?.producedBytes,
+        windowCount: Array.isArray(hydrationWork?.snapshot?.window)
+          ? hydrationWork.snapshot.window.length
+          : undefined,
+        window: Array.isArray(hydrationWork?.snapshot?.window)
+          ? hydrationWork.snapshot.window.slice(0, 6)
+          : undefined,
+        needBasesSample: Array.isArray(hydrationWork?.pending?.needBases)
+          ? hydrationWork.pending.needBases.slice(0, 10)
+          : undefined,
+        needLooseSample: Array.isArray(hydrationWork?.pending?.needLoose)
+          ? hydrationWork.pending.needLoose.slice(0, 10)
+          : undefined,
+        error: hydrationWork?.error
+          ? {
+              message: hydrationWork.error.message,
+              fatal: hydrationWork.error.fatal,
+              retryCount: hydrationWork.error.retryCount,
+              firstErrorAt: hydrationWork.error.firstErrorAt,
+            }
+          : undefined,
+        queueReasons: Array.isArray(hydrationQueue)
+          ? hydrationQueue.map((q: any) => q?.reason)
+          : [],
+      },
     };
   }
 
@@ -545,7 +654,12 @@ export class RepoDurableObject extends DurableObject {
       return; // Exit early to let unpack continue
     }
 
-    // Priority 2: Check for idle cleanup or maintenance needs
+    // Priority 2: Hydration work (resumable, time-sliced)
+    if (await this.handleHydrationWork(store)) {
+      return; // Exit early; hydration requested another slice soon
+    }
+
+    // Priority 3: Check for idle cleanup or maintenance needs
     await this.handleIdleAndMaintenance(store);
 
     this.logger.debug("alarm:end", {});
@@ -567,9 +681,7 @@ export class RepoDurableObject extends DurableObject {
     } catch (e) {
       this.logger.error("alarm:process-unpack-error", { error: String(e) });
       // Best-effort reschedule so we don't get stuck
-      try {
-        await this.ctx.storage.setAlarm(Date.now() + 1000);
-      } catch {}
+      await scheduleAlarmIfSooner(this.ctx, this.env, Date.now() + 1000);
     }
     return true;
   }
@@ -584,7 +696,7 @@ export class RepoDurableObject extends DurableObject {
     store: ReturnType<typeof asTypedStorage<RepoStateSchema>>
   ): Promise<void> {
     try {
-      const cfg = this.getConfig();
+      const cfg = getConfig(this.env);
       const now = Date.now();
       const lastAccess = await store.get("lastAccessMs");
       const lastMaint = await store.get("lastMaintenanceMs");
@@ -600,8 +712,8 @@ export class RepoDurableObject extends DurableObject {
         await this.performMaintenance(store, cfg.keepPacks, now);
       }
 
-      // Schedule next alarm
-      await this.scheduleNextAlarm(lastAccess, lastMaint, now, cfg.idleMs, cfg.maintMs);
+      // Schedule next alarm via unified scheduler
+      await ensureScheduled(this.ctx, this.env, now);
     } catch (e) {
       this.logger.error("alarm:error", { error: String(e) });
     }
@@ -709,26 +821,8 @@ export class RepoDurableObject extends DurableObject {
     }
   }
 
-  private async scheduleNextAlarm(
-    lastAccess: number | undefined,
-    lastMaint: number | undefined,
-    now: number,
-    idleMs: number,
-    maintMs: number
-  ): Promise<void> {
-    try {
-      const nextIdleAt = (lastAccess ?? now) + idleMs;
-      const nextMaintAt = (lastMaint ?? now) + maintMs;
-      const next = Math.min(nextIdleAt, nextMaintAt);
-      await this.ctx.storage.setAlarm(next);
-      this.logger.debug("alarm:scheduled", { next });
-    } catch (e) {
-      this.logger.error("alarm:set-failed", { error: String(e) });
-    }
-  }
-
   private async touchAndMaybeSchedule(): Promise<void> {
-    const cfg = this.getConfig();
+    const cfg = getConfig(this.env);
     const now = Date.now();
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
 
@@ -740,52 +834,7 @@ export class RepoDurableObject extends DurableObject {
       }
     } catch {}
 
-    try {
-      // Check if we need to prioritize unpack work
-      if (await this.scheduleUnpackAlarmIfNeeded(store, cfg, now)) {
-        return;
-      }
-
-      // Otherwise schedule regular idle/maintenance alarm
-      await this.scheduleRegularAlarm(store, cfg, now);
-    } catch (e) {
-      this.logger.error("alarm:schedule-failed", { error: String(e) });
-    }
-  }
-
-  private async scheduleUnpackAlarmIfNeeded(
-    store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
-    cfg: ReturnType<typeof this.getConfig>,
-    now: number
-  ): Promise<boolean> {
-    const work = await store.get("unpackWork");
-    const next = await store.get("unpackNext");
-    if (!work && !next) return false;
-
-    const existing = (await this.ctx.storage.getAlarm()) as number | null | undefined;
-    const soon = now + cfg.unpackDelayMs;
-
-    if (!existing || existing < now || existing > soon) {
-      await this.ctx.storage.setAlarm(soon);
-    }
-    return true;
-  }
-
-  private async scheduleRegularAlarm(
-    store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
-    cfg: ReturnType<typeof this.getConfig>,
-    now: number
-  ): Promise<void> {
-    const lastMaint = await store.get("lastMaintenanceMs");
-    const existing = await this.ctx.storage.getAlarm();
-
-    const nextIdle = now + cfg.idleMs;
-    const nextMaint = (lastMaint ?? now) + cfg.maintMs;
-    const next = Math.min(nextIdle, nextMaint);
-
-    if (!existing || existing < now || existing > next) {
-      await this.ctx.storage.setAlarm(next);
-    }
+    await ensureScheduled(this.ctx, this.env, now);
   }
 
   /**
@@ -905,20 +954,6 @@ export class RepoDurableObject extends DurableObject {
     } catch {}
   }
 
-  private async handleReindexPost(): Promise<Response> {
-    await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const key = await store.get("lastPackKey");
-    if (!key) return text("No pack to reindex\n", 404);
-    const obj = await this.env.REPO_BUCKET.get(key);
-    if (!obj) return text("Pack not found in R2\n", 404);
-    const bytes = new Uint8Array(await obj.arrayBuffer());
-    this.logger.info("reindex:start", { key });
-    await unpackPackToLoose(bytes, this.ctx, this.env, this.prefix(), key);
-    this.logger.info("reindex:done", { key });
-    return text("OK\n");
-  }
-
   public async getObjectSize(oid: string): Promise<number | null> {
     await this.ensureAccessAndAlarm();
     const prefix = this.prefix();
@@ -992,33 +1027,6 @@ export class RepoDurableObject extends DurableObject {
       service: "RepoDO",
       doId: this.ctx.id.toString(),
     });
-  }
-
-  private getConfig() {
-    // Parse configuration from env vars with sensible defaults.
-    // All values are validated and clamped to safe ranges.
-    const idleMins = Number(this.env.REPO_DO_IDLE_MINUTES ?? 30);
-    const maintMins = Number(this.env.REPO_DO_MAINT_MINUTES ?? 60 * 24);
-    const keepPacks = Number(this.env.REPO_KEEP_PACKS ?? 3);
-    const packListMaxRaw = Number(this.env.REPO_PACKLIST_MAX ?? 20);
-    const unpackChunkSize = Number(this.env.REPO_UNPACK_CHUNK_SIZE ?? 50);
-    const unpackMaxMs = Number(this.env.REPO_UNPACK_MAX_MS ?? 5000);
-    const unpackDelayMs = Number(this.env.REPO_UNPACK_DELAY_MS ?? 100);
-    const unpackBackoffMs = Number(this.env.REPO_UNPACK_BACKOFF_MS ?? 1000);
-    const clamp = (n: number, min: number, max: number) =>
-      Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : min;
-    const packListMax = clamp(packListMaxRaw, 1, 100);
-    return {
-      idleMs: clamp(idleMins, 1, 60 * 24 * 7) * 60 * 1000,
-      maintMs: clamp(maintMins, 5, 60 * 24 * 30) * 60 * 1000,
-      // keepPacks cannot exceed the recent-list window (packListMax)
-      keepPacks: clamp(keepPacks, 1, packListMax),
-      packListMax,
-      unpackChunkSize: clamp(unpackChunkSize, 1, 1000),
-      unpackMaxMs: clamp(unpackMaxMs, 50, 30_000),
-      unpackDelayMs: clamp(unpackDelayMs, 10, 10_000),
-      unpackBackoffMs: clamp(unpackBackoffMs, 100, 60_000),
-    };
   }
 
   private async runMaintenance(keepPacks: number) {
@@ -1125,7 +1133,7 @@ export class RepoDurableObject extends DurableObject {
     work: UnpackWork,
     packBytes: Uint8Array
   ): Promise<{ processed: number; processedInRun: number; exceededBudget: boolean }> {
-    const cfg = this.getConfig();
+    const cfg = getConfig(this.env);
     const startTime = Date.now();
     let processed = work.processedCount;
     let processedInRunTotal = 0;
@@ -1209,7 +1217,7 @@ export class RepoDurableObject extends DurableObject {
     result: { processed: number; processedInRun: number; exceededBudget: boolean }
   ): Promise<void> {
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const cfg = this.getConfig();
+    const cfg = getConfig(this.env);
 
     if (result.processed >= work.oids.length) {
       // Done unpacking current pack
@@ -1229,7 +1237,7 @@ export class RepoDurableObject extends DurableObject {
           });
           await store.delete("unpackNext");
           // Schedule next alarm soon to continue unpacking
-          await this.ctx.storage.setAlarm(Date.now() + cfg.unpackDelayMs);
+          await scheduleAlarmIfSooner(this.ctx, this.env, Date.now() + cfg.unpackDelayMs);
           this.logger.info("queue:promote-next", { packKey: nextKey, total: nextOids.length });
           return;
         } else {
@@ -1238,8 +1246,13 @@ export class RepoDurableObject extends DurableObject {
           this.logger.warn("queue:next-missing-oids", { packKey: nextKey });
         }
       }
-
-      // No queued work remains
+      // No queued work remains: enqueue hydration (deduped) and schedule
+      try {
+        await enqueueHydrationTask(this.ctx, this.env, { dryRun: false, reason: "post-unpack" });
+      } catch (e) {
+        this.logger.error("queue:hydration-failed", { error: String(e) });
+      }
+      await ensureScheduled(this.ctx, this.env);
     } else {
       // Update progress and reschedule
       await store.put("unpackWork", {
@@ -1248,7 +1261,7 @@ export class RepoDurableObject extends DurableObject {
       });
 
       const delay = result.processedInRun === 0 ? cfg.unpackBackoffMs : cfg.unpackDelayMs;
-      await this.ctx.storage.setAlarm(Date.now() + delay);
+      await scheduleAlarmIfSooner(this.ctx, this.env, Date.now() + delay);
 
       const percent = Math.round((result.processed / work.oids.length) * 100);
       this.logger.debug("unpack:progress", {

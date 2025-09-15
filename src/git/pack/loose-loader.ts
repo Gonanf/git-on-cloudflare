@@ -3,12 +3,9 @@
  * Used with createMemPackFs to enable thin pack resolution
  */
 
-import {
-  type RepoDurableObject,
-  type TypedStorage,
-  type RepoStateSchema,
-  objKey,
-} from "@/do/index.ts";
+import type { RepoDurableObject, TypedStorage, RepoStateSchema } from "@/do/index.ts";
+
+import { objKey } from "@/do/index.ts";
 import { r2LooseKey } from "@/keys.ts";
 
 /**
