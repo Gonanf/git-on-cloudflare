@@ -20,6 +20,7 @@ git pull https://your-domain.com/owner/repo
   - `agent=git-on-cloudflare/0.1`
   - `ls-refs`
   - `fetch`
+  - `sideband-64k`
   - `ofs-delta`
   - `object-format=sha1`
 
@@ -144,9 +145,24 @@ All admin endpoints require authentication with owner tokens.
 - **`GET /:owner/:repo/admin/debug-state`**  
   Dump Durable Object state (JSON)
 
-- **`GET /:owner/:repo/admin/debug-check`**  
+- **`GET /:owner/:repo/admin/debug-commit/:commit`**  
   Check if a commit's tree is present  
-  Query params: `?commit=<40-hex-sha>`
+  Params: `:commit` is a 40-hex SHA
+
+- **`GET /:owner/:repo/admin/debug-oid/:oid`**  
+  Check if a specific OID exists across loose, R2 loose, and packs  
+  Params: `:oid` is a 40-hex SHA
+
+### Hydration Endpoints
+
+- **`POST /:owner/:repo/admin/hydrate`**  
+  Trigger repository hydration.  
+  Body: `{ "dryRun"?: boolean }` (defaults to true).  
+  Returns dry-run plan when `dryRun` is true; enqueues work and returns 202 when `dryRun` is false.
+
+- **`DELETE /:owner/:repo/admin/hydrate`**  
+  Clear hydration state and remove hydration-generated packs.  
+  Returns counts of cleared items.
 
 ## Response Formats
 

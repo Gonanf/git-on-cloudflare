@@ -42,7 +42,6 @@ import { debugState, debugCheckCommit, debugCheckOid } from "./debug.ts";
  * - Writes received packfiles to R2 under `do/<id>/objects/pack/*.pack` (and .idx)
  * - Exposes focused internal HTTP endpoints:
  *   - `POST /receive` — receive-pack implementation (delegates to git/operations/receive.ts)
- *   - `POST /reindex` — reindex latest pack (dev/diagnostic)
  * - All other operations are provided as typed RPC methods on the class.
  *
  * Read Path (RPC)

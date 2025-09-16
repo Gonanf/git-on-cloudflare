@@ -9,7 +9,7 @@ Host unlimited private Git repositories at the edge with <50ms response times gl
 
 ## Key Features
 
-- **Complete Git Smart HTTP v2 implementation** with pack protocol support
+- **Complete Git Smart HTTP v2 implementation** with pack protocol support (`ls-refs`, `fetch`, sideband-64k, ofs-delta)
 - **Strong consistency** via Durable Objects for refs/HEAD (the hard part of distributed Git)
 - **Two-tier caching** reducing latency from 200ms to <50ms for hot paths
 - **Streaming pack assembly** from R2 with range reads for efficient clones
@@ -82,7 +82,7 @@ wrangler secret put AUTH_ADMIN_TOKEN
 npm run deploy
 ```
 
-Your Git server is now live at `https://your-subdomain.workers.dev`. Push repos, browse code, manage auth — all from the edge.
+Your Git server will deploy to your configured route or to `*.workers.dev`, depending on your Wrangler configuration. Push repos, browse code, manage auth — all from the edge.
 
 ## Authentication
 
@@ -105,6 +105,8 @@ With auth enabled:
 - Manage tokens at `/auth` or via API
 - Tokens use PBKDF2-SHA256 with 100k iterations
 
+Admin endpoints for hydration and repository management are protected via owner Basic auth and the admin bearer token for `/auth/api/*`.
+
 ## Configuration
 
 Environment variables control pack management and unpacking behavior:
@@ -113,8 +115,12 @@ Environment variables control pack management and unpacking behavior:
 REPO_DO_IDLE_MINUTES=30      # Cleanup idle repos after 30 min
 REPO_DO_MAINT_MINUTES=1440   # Run maintenance daily
 REPO_KEEP_PACKS=10           # Long-term pack retention
-REPO_UNPACK_CHUNK_SIZE=50    # Objects per chunk
-REPO_UNPACK_MAX_MS=1000      # Max time per unpack operation
+REPO_PACKLIST_MAX=50         # Max recent packs considered for discovery
+REPO_UNPACK_CHUNK_SIZE=25    # Objects per unpack slice
+REPO_UNPACK_MAX_MS=1000      # Max CPU time per unpack slice
+REPO_UNPACK_DELAY_MS=500     # Delay between slices (ms)
+REPO_UNPACK_BACKOFF_MS=1000  # Backoff when under load (ms)
+LOG_LEVEL=info               # debug|info|warn|error
 ```
 
 See `wrangler.jsonc` for the complete configuration.
@@ -129,8 +135,8 @@ See `wrangler.jsonc` for the complete configuration.
 
 ## Limitations
 
-- Pushes over 128MB are processed in chunks
-- 30s CPU limit per request (Workers platform limit)
+- Receive-pack buffers the uploaded pack in memory inside the Durable Object. Practical pack size limit is ~100–128MB; very large pushes may fail. Split large pushes when needed.
+- 30s CPU limit per request on the main fetch paths (unpack runs in alarm-driven slices)
 - HTTP(S) only, no SSH protocol support
 - No server-side hooks yet
 

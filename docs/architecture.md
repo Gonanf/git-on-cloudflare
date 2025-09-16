@@ -11,9 +11,9 @@ The codebase is organized into focused modules with `index.ts` export files:
   - `core/` - Protocol handling, pkt-line, readers
   - `pack/` - Pack assembly, unpacking, indexing
 - **`/do`** - Durable Objects
-  - `repoDO.ts` - Repository Durable Object (per-repo authority)
+  - `repo/repoDO.ts` - Repository Durable Object (per-repo authority)
+  - `auth/authDO.ts` - Authentication Durable Object
 - **`/auth`** - Authentication module
-  - `authDO.ts` - Auth Durable Object
   - `verify.ts` - Token verification
 - **`/cache`** - Two-tier caching system
   - UI layer caching (JSON responses)
@@ -38,16 +38,15 @@ The codebase is organized into focused modules with `index.ts` export files:
 - Routes for Git endpoints, admin JSON, and the web UI
 - Integrates all route handlers via AutoRouter
 
-### Repository DO (`src/do/repoDO.ts`)
+### Repository DO (`src/do/repo/repoDO.ts`)
 
 - Owns refs/HEAD and loose objects for a single repo
 - HTTP endpoints (minimal):
   - `POST /receive` — receive-pack (push) handler
-  - `POST /reindex` — reindex latest pack (dev/diagnostic)
 - Typed RPC methods (selected):
   - `listRefs()`, `setRefs()`, `getHead()`, `setHead()`, `getHeadAndRefs()`
   - `getObjectStream()`, `getObject()`, `getObjectSize()`
-  - `getPackLatest()`, `getPacks()`, `getPackOids()`
+  - `getPackLatest()`, `getPacks()`, `getPackOids()`, `getPackOidsBatch()`
   - `getUnpackProgress()` — unpacking status/progress for UI gating (includes `queuedCount` and `currentPackKey`)
 - Push flow: raw `.pack` is written to R2, a fast index-only step writes `.idx`, and unpack is queued for background processing on the DO alarm in small time-budgeted chunks.
 - Maintains pack metadata (`lastPackKey`, `lastPackOids`, `packList`, `packOids:<key>`) used by fetch assembly.
@@ -75,8 +74,13 @@ The codebase is organized into focused modules with `index.ts` export files:
 
 ## Background processing and alarms
 
-- The repo DO `alarm()` performs three duties: (1) unpack chunks within a time budget; (2) idle cleanup for empty, idle repos; (3) periodic pack maintenance (prune old packs + metadata).
+- The repo DO `alarm()` performs multiple duties:
+  1. Unpack chunks within a time budget
+  2. Hydration slices (resumable segment building and coverage thickening)
+  3. Idle cleanup for empty, idle repos
+  4. Periodic pack maintenance (prune old packs + metadata)
   - `handleUnpackWork()` - Processes pending unpack work
+  - Hydration helpers: `startHydration()` (RPC), `clearHydration()` (RPC), `processHydrationSlice()`
   - `handleIdleAndMaintenance()` - Manages idle cleanup and maintenance
   - `shouldCleanupIdle()` - Determines if cleanup is needed
   - `performIdleCleanup()` - Executes cleanup
