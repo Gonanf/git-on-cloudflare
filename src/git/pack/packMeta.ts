@@ -121,7 +121,12 @@ function readUint64BE(dv: DataView, pos: number): bigint {
 export async function readPackHeaderEx(
   env: Env,
   key: string,
-  offset: number
+  offset: number,
+  options?: {
+    limiter?: { run<T>(label: string, fn: () => Promise<T>): Promise<T> };
+    countSubrequest?: (n?: number) => void;
+    signal?: AbortSignal;
+  }
 ): Promise<
   | {
       type: number;
@@ -132,7 +137,8 @@ export async function readPackHeaderEx(
     }
   | undefined
 > {
-  const head = await readPackRange(env, key, offset, 128);
+  if (options?.signal?.aborted) return undefined;
+  const head = await readPackRange(env, key, offset, 128, options);
   if (!head) return undefined;
   let p = 0;
   const start = p;
@@ -172,10 +178,23 @@ export async function readPackRange(
   env: Env,
   key: string,
   offset: number,
-  length: number
+  length: number,
+  options?: {
+    limiter?: { run<T>(label: string, fn: () => Promise<T>): Promise<T> };
+    countSubrequest?: (n?: number) => void;
+    signal?: AbortSignal;
+  }
 ): Promise<Uint8Array | undefined> {
-  const obj = await env.REPO_BUCKET.get(key, { range: { offset, length } });
-  if (!obj) return undefined;
-  const ab = await obj.arrayBuffer();
-  return new Uint8Array(ab);
+  if (options?.signal?.aborted) return undefined;
+  const run = async () => {
+    const obj = await env.REPO_BUCKET.get(key, { range: { offset, length } });
+    if (!obj) return undefined;
+    const ab = await obj.arrayBuffer();
+    return new Uint8Array(ab);
+  };
+  if (options?.limiter) {
+    options.countSubrequest?.();
+    return await options.limiter.run("r2:get-range", run);
+  }
+  return await run();
 }

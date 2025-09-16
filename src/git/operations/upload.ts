@@ -148,7 +148,11 @@ async function tryAssembleSinglePackPath(
   env: Env,
   packKeys: string[],
   needed: string[],
-  signal: AbortSignal | undefined,
+  options: {
+    signal?: AbortSignal;
+    limiter?: { run<T>(name: string, fn: () => Promise<T>): Promise<T> };
+    countSubrequest?: (n?: number) => void;
+  },
   log: Logger
 ): Promise<Uint8Array | undefined> {
   const firstKey = Array.isArray(packKeys) && packKeys.length > 0 ? packKeys[0] : undefined;
@@ -156,7 +160,7 @@ async function tryAssembleSinglePackPath(
     log.warn("fetch:single-pack:missing-meta", {});
   } else {
     log.info("fetch:try:single-pack", { key: firstKey, needed: needed.length });
-    const assembled = await assemblePackFromR2(env, firstKey, needed, signal);
+    const assembled = await assemblePackFromR2(env, firstKey, needed, options);
     if (assembled) {
       log.info("fetch:path:single-pack", { key: firstKey });
       return assembled;
@@ -168,7 +172,7 @@ async function tryAssembleSinglePackPath(
     for (const k of packKeys) {
       try {
         log.info("fetch:try:single-pack:any", { key: k, needed: needed.length });
-        const assembled = await assemblePackFromR2(env, k, needed, signal);
+        const assembled = await assemblePackFromR2(env, k, needed, options);
         if (assembled) {
           log.info("fetch:path:single-pack:any", { key: k });
           return assembled;
@@ -258,7 +262,13 @@ export async function handleFetchV2(
           } catch {}
         }
         if (unionNeeded.length > 0) {
-          const mp = await assemblePackFromMultiplePacks(env, keys, unionNeeded, signal);
+          const mp = await assemblePackFromMultiplePacks(env, keys, unionNeeded, {
+            signal,
+            limiter,
+            countSubrequest: (n?: number) => {
+              countSubrequest(cacheCtx, n);
+            },
+          });
           if (mp) {
             log.info("fetch:path:init-union", { packs: keys.length, union: unionNeeded.length });
             // Exit heavy mode before streaming
@@ -280,7 +290,13 @@ export async function handleFetchV2(
           if (keys2 && keys2.length > keys.length) {
             const union2 = await buildUnionNeededForKeys(stub, keys2, limiter, cacheCtx, log);
             if (union2.length > 0) {
-              const mp2 = await assemblePackFromMultiplePacks(env, keys2, union2, signal);
+              const mp2 = await assemblePackFromMultiplePacks(env, keys2, union2, {
+                signal,
+                limiter,
+                countSubrequest: (n?: number) => {
+                  countSubrequest(cacheCtx, n);
+                },
+              });
               if (mp2) {
                 log.info("fetch:path:init-union:expand-r2", {
                   packs: keys2.length,
@@ -318,7 +334,13 @@ export async function handleFetchV2(
         const keys = packKeys.slice(0, MAX_KEYS);
         const unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
         if (keys.length >= 2 && unionNeeded.length > 0) {
-          const mp = await assemblePackFromMultiplePacks(env, keys, unionNeeded, signal);
+          const mp = await assemblePackFromMultiplePacks(env, keys, unionNeeded, {
+            signal,
+            limiter,
+            countSubrequest: (n?: number) => {
+              countSubrequest(cacheCtx, n);
+            },
+          });
           if (mp) {
             log.info("fetch:path:multi-pack-timeout-fallback", {
               packs: keys.length,
@@ -332,7 +354,13 @@ export async function handleFetchV2(
           const k = keys[0];
           try {
             log.info("fetch:timeout-fallback:try-single", { key: k, union: unionNeeded.length });
-            const single = await assemblePackFromR2(env, k, unionNeeded, signal);
+            const single = await assemblePackFromR2(env, k, unionNeeded, {
+              signal,
+              limiter,
+              countSubrequest: (n?: number) => {
+                countSubrequest(cacheCtx, n);
+              },
+            });
             if (single) {
               log.info("fetch:timeout-fallback:path-single", { key: k });
               const ackOids = done ? [] : await findCommonHaves(env, repoId, haves);
@@ -416,7 +444,19 @@ export async function handleFetchV2(
 
   if (!skipSinglePack) {
     try {
-      const assembled = await tryAssembleSinglePackPath(env, packKeys, needed, signal, log);
+      const assembled = await tryAssembleSinglePackPath(
+        env,
+        packKeys,
+        needed,
+        {
+          signal,
+          limiter,
+          countSubrequest: (n?: number) => {
+            countSubrequest(cacheCtx, n);
+          },
+        },
+        log
+      );
       if (assembled) return respondWithPackfile(assembled, done, ackOids, signal);
     } catch (e) {
       log.warn("fetch:single-pack:failed", { error: String(e) });
@@ -435,7 +475,13 @@ export async function handleFetchV2(
         env,
         packKeys.slice(0, SLICE),
         needed,
-        signal
+        {
+          signal,
+          limiter,
+          countSubrequest: (n?: number) => {
+            countSubrequest(cacheCtx, n);
+          },
+        }
       );
       if (mpAssembled) {
         log.info("fetch:path:multi-pack", { packs: SLICE });
@@ -449,7 +495,13 @@ export async function handleFetchV2(
             packs: keys2.length,
             needed: needed.length,
           });
-          const mp2 = await assemblePackFromMultiplePacks(env, keys2, needed, signal);
+          const mp2 = await assemblePackFromMultiplePacks(env, keys2, needed, {
+            signal,
+            limiter,
+            countSubrequest: (n?: number) => {
+              countSubrequest(cacheCtx, n);
+            },
+          });
           if (mp2) {
             log.info("fetch:path:multi-pack:expand-r2", { packs: keys2.length });
             return respondWithPackfile(mp2, done, ackOids, signal);

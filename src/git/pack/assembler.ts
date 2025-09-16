@@ -17,7 +17,15 @@ function touchIdxCache(key: string, value: IdxParsed) {
   }
 }
 
-export async function loadIdxParsed(env: Env, packKey: string): Promise<IdxParsed | undefined> {
+export async function loadIdxParsed(
+  env: Env,
+  packKey: string,
+  options?: {
+    limiter?: { run<T>(label: string, fn: () => Promise<T>): Promise<T> };
+    countSubrequest?: (n?: number) => void;
+    signal?: AbortSignal;
+  }
+): Promise<IdxParsed | undefined> {
   const cached = idxCache.get(packKey);
   if (cached) {
     // Touch for LRU
@@ -25,7 +33,14 @@ export async function loadIdxParsed(env: Env, packKey: string): Promise<IdxParse
     return cached;
   }
   const idxKey = packIndexKey(packKey);
-  const idxObj = await env.REPO_BUCKET.get(idxKey);
+  if (options?.signal?.aborted) return undefined;
+  const run = async () => await env.REPO_BUCKET.get(idxKey);
+  const idxObj = options?.limiter
+    ? await options.limiter.run("r2:get-idx", async () => {
+        options.countSubrequest?.();
+        return await run();
+      })
+    : await run();
   if (!idxObj) return undefined;
   const idxBuf = new Uint8Array(await idxObj.arrayBuffer());
   const parsed = parseIdxV2(idxBuf);
@@ -66,15 +81,19 @@ export async function assemblePackFromR2(
   env: Env,
   packKey: string,
   neededOids: string[],
-  signal?: AbortSignal
+  options?: {
+    signal?: AbortSignal;
+    limiter?: { run<T>(label: string, fn: () => Promise<T>): Promise<T> };
+    countSubrequest?: (n?: number) => void;
+  }
 ): Promise<Uint8Array | undefined> {
   const log = createLogger(env.LOG_LEVEL, { service: "PackAssembler", repoId: packKey });
   const started = Date.now();
   let r2Gets = 0;
   log.debug("single:start", { needed: neededOids.length, packKey });
-  if (signal?.aborted) return undefined;
+  if (options?.signal?.aborted) return undefined;
   // Fetch and parse .idx for this pack
-  const parsed = await loadIdxParsed(env, packKey);
+  const parsed = await loadIdxParsed(env, packKey, options);
   if (!parsed) {
     const idxKey = packIndexKey(packKey);
     log.info("single:no-idx", { idxKey });
@@ -94,7 +113,12 @@ export async function assemblePackFromR2(
     }
 
   // Build mapping of entry -> header info and payload length
-  const headResp = await env.REPO_BUCKET.head(packKey);
+  const headResp = options?.limiter
+    ? await options.limiter.run("r2:head-pack", async () => {
+        options.countSubrequest?.();
+        return await env.REPO_BUCKET.head(packKey);
+      })
+    : await env.REPO_BUCKET.head(packKey);
   if (!headResp) {
     log.info("single:no-pack", { packKey });
     return undefined;
@@ -104,7 +128,15 @@ export async function assemblePackFromR2(
   const shouldLoadWholePack =
     packSize <= 16 * 1024 * 1024 || neededOids.length >= oids.length * 0.25;
   const wholePack: Uint8Array | undefined = shouldLoadWholePack
-    ? (r2Gets++, new Uint8Array(await (await env.REPO_BUCKET.get(packKey))!.arrayBuffer()))
+    ? (r2Gets++,
+      new Uint8Array(
+        await (await (options?.limiter
+          ? options.limiter.run("r2:get-pack", async () => {
+              options.countSubrequest?.();
+              return await env.REPO_BUCKET.get(packKey);
+            })
+          : env.REPO_BUCKET.get(packKey)))!.arrayBuffer()
+      ))
     : undefined;
   if (wholePack) log.debug("single:fast-path:whole-pack-loaded", { bytes: wholePack.byteLength });
   const sortedOffs = offsets.slice().sort((a, b) => a - b);
@@ -136,14 +168,14 @@ export async function assemblePackFromR2(
   const entries = new Map<number, Entry>();
   let externalRefDelta = false; // REF_DELTA base outside this pack -> would produce a thin pack
   while (pending.length) {
-    if (signal?.aborted) return undefined;
+    if (options?.signal?.aborted) return undefined;
     const idx = pending.pop()!;
     if (entries.has(idx)) continue;
     const off = offsets[idx];
     const objEnd = nextOffset.get(off)!;
     const header = wholePack
       ? readPackHeaderExFromBuf(wholePack, off)
-      : await readPackHeaderEx(env, packKey, off);
+      : await readPackHeaderEx(env, packKey, off, options);
     if (!header) {
       log.warn("single:read-header-failed", { off });
       return undefined;
@@ -193,7 +225,7 @@ export async function assemblePackFromR2(
   // Iteratively recompute OFS varint lengths and offsets until stable (like multi-pack path)
   const newHeaderLen = new Map<number, number>();
   for (const i of order) {
-    if (signal?.aborted) return undefined;
+    if (options?.signal?.aborted) return undefined;
     const e = entries.get(i)!;
     if (e.type === 6) {
       // Initial guess using original distance
@@ -211,7 +243,7 @@ export async function assemblePackFromR2(
   let cur = 12; // after PACK header
   let iter = 0;
   while (true) {
-    if (signal?.aborted) return undefined;
+    if (options?.signal?.aborted) return undefined;
     // Compute offsets based on current header lengths
     newOffsets = new Map<number, number>();
     cur = 12;
@@ -320,7 +352,7 @@ export async function assemblePackFromR2(
     const blobs: Uint8Array[] = [];
     for (const g of groups) {
       r2Gets++;
-      const payload = await readPackRange(env, packKey, g.start, g.end - g.start);
+      const payload = await readPackRange(env, packKey, g.start, g.end - g.start, options);
       if (!payload) {
         log.warn("single:read-range-failed", { offset: g.start, length: g.end - g.start });
         return undefined;
@@ -383,13 +415,18 @@ export async function assemblePackFromMultiplePacks(
   env: Env,
   packKeys: string[],
   neededOids: string[],
-  signal?: AbortSignal
+  options?: {
+    signal?: AbortSignal;
+    limiter?: { run<T>(label: string, fn: () => Promise<T>): Promise<T> };
+    countSubrequest?: (n?: number) => void;
+  }
 ): Promise<Uint8Array | undefined> {
   const log = createLogger(env.LOG_LEVEL, { service: "PackAssemblerMulti" });
   const started = Date.now();
   let r2PayloadGets = 0;
+  let r2WholeGets = 0;
   log.debug("multi:start", { packs: packKeys.length, needed: neededOids.length });
-  if (signal?.aborted) return undefined;
+  if (options?.signal?.aborted) return undefined;
   type Meta = {
     key: string;
     oids: string[];
@@ -398,11 +435,20 @@ export async function assemblePackFromMultiplePacks(
     offsetToIndex: Map<number, number>;
     packSize: number;
     nextOffset: Map<number, number>;
+    wholePack?: Uint8Array;
   };
   const metas: Meta[] = [];
   const CONC = 6;
+  const WHOLE_PACK_MAX = 16 * 1024 * 1024; // 16 MiB threshold for whole-pack preload
   const metaResults = await mapWithConcurrency(packKeys, CONC, async (key) => {
-    const [parsed, head] = await Promise.all([loadIdxParsed(env, key), env.REPO_BUCKET.head(key)]);
+    if (options?.signal?.aborted) return undefined;
+    const parsed = await loadIdxParsed(env, key, options);
+    const head = options?.limiter
+      ? await options.limiter.run("r2:head-pack", async () => {
+          options.countSubrequest?.();
+          return await env.REPO_BUCKET.head(key);
+        })
+      : await env.REPO_BUCKET.head(key);
     if (!parsed || !head) {
       log.debug("multi:missing-pack-or-idx", { key, idx: !!parsed, head: !!head });
       return undefined;
@@ -419,6 +465,21 @@ export async function assemblePackFromMultiplePacks(
       const nxt = i + 1 < sortedOffs.length ? sortedOffs[i + 1] : head.size - 20;
       nextOffset.set(cur, nxt);
     }
+    let wholePack: Uint8Array | undefined;
+    if (head.size <= WHOLE_PACK_MAX) {
+      try {
+        const obj = options?.limiter
+          ? await options.limiter.run("r2:get-pack", async () => {
+              options.countSubrequest?.();
+              return await env.REPO_BUCKET.get(key);
+            })
+          : await env.REPO_BUCKET.get(key);
+        if (obj) {
+          wholePack = new Uint8Array(await obj.arrayBuffer());
+          r2WholeGets++;
+        }
+      } catch {}
+    }
     const meta: Meta = {
       key,
       oids: parsed.oids,
@@ -427,6 +488,7 @@ export async function assemblePackFromMultiplePacks(
       offsetToIndex,
       packSize: head.size,
       nextOffset,
+      wholePack,
     };
     return meta;
   });
@@ -469,10 +531,12 @@ export async function assemblePackFromMultiplePacks(
 
   // Include delta bases (use chosen sel for base OIDs to avoid duplicates across packs)
   while (pending.length) {
-    if (signal?.aborted) return undefined;
+    if (options?.signal?.aborted) return undefined;
     const { m, i } = pending.pop()!;
     const off = m.offsets[i];
-    const header = await readPackHeaderEx(env, m.key, off);
+    const header = m.wholePack
+      ? readPackHeaderExFromBuf(m.wholePack, off)
+      : await readPackHeaderEx(env, m.key, off, options);
     if (!header) {
       log.warn("multi:read-header-failed", { key: m.key, off });
       return undefined;
@@ -515,7 +579,9 @@ export async function assemblePackFromMultiplePacks(
   const nodeMap = new Map<string, Node>();
   for (const s of selected.values()) {
     const off = s.m.offsets[s.i];
-    const h = await readPackHeaderEx(env, s.m.key, off);
+    const h = s.m.wholePack
+      ? readPackHeaderExFromBuf(s.m.wholePack, off)
+      : await readPackHeaderEx(env, s.m.key, off, options);
     if (!h) return undefined;
     const n: Node = {
       ...s,
@@ -619,7 +685,7 @@ export async function assemblePackFromMultiplePacks(
   // entries cross varint boundaries due to offset shifts.
   const newHeaderLen = new Map<string, number>();
   for (const n of order) {
-    if (signal?.aborted) return undefined;
+    if (options?.signal?.aborted) return undefined;
     if (n.type === 6) {
       // Initial guess using original distance
       const baseOff = n.base!.m.offsets[n.base!.i];
@@ -636,7 +702,7 @@ export async function assemblePackFromMultiplePacks(
   let cur = 12;
   let iter = 0;
   while (true) {
-    if (signal?.aborted) return undefined;
+    if (options?.signal?.aborted) return undefined;
     // Compute offsets based on current header lengths
     newOffsets = new Map<string, number>();
     cur = 12;
@@ -694,7 +760,7 @@ export async function assemblePackFromMultiplePacks(
   dv.setUint32(4, 2);
   dv.setUint32(8, order.length);
   for (const n of order) {
-    if (signal?.aborted) return undefined;
+    if (options?.signal?.aborted) return undefined;
     let p = newOffsets.get(nodeKey(n))!;
     body.set(n.sizeVarBytes, p);
     p += n.sizeVarBytes.length;
@@ -732,7 +798,9 @@ export async function assemblePackFromMultiplePacks(
       });
       return undefined;
     }
-    const payload = await readPackRange(env, n.m.key, payloadStart, payloadLen);
+    const payload = n.m.wholePack
+      ? n.m.wholePack.subarray(payloadStart, payloadStart + payloadLen)
+      : await readPackRange(env, n.m.key, payloadStart, payloadLen, options);
     if (!payload) {
       log.warn("multi:read-range-failed", {
         key: n.m.key,
@@ -757,7 +825,7 @@ export async function assemblePackFromMultiplePacks(
       return undefined;
     }
     body.set(payload, p);
-    r2PayloadGets++;
+    if (!n.m.wholePack) r2PayloadGets++;
   }
   const sha = new Uint8Array(await crypto.subtle.digest("SHA-1", body));
   const out = new Uint8Array(body.byteLength + 20);
@@ -767,6 +835,7 @@ export async function assemblePackFromMultiplePacks(
     objects: order.length,
     bytes: out.byteLength,
     payloadGets: r2PayloadGets,
+    wholeGets: r2WholeGets,
     timeMs: Date.now() - started,
   });
   return out;
