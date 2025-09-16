@@ -3,14 +3,13 @@ import type { GitObjectType } from "@/git/core/index.ts";
 import type { Logger } from "@/common/logger.ts";
 
 import { asTypedStorage, packOidsKey, objKey } from "./repoState.ts";
-import { createLogger } from "@/common/index.ts";
+import { createLogger, BloomFilter } from "@/common/index.ts";
 import { loadIdxParsed } from "@/git/pack/assembler.ts";
 import { inflateAndParseHeader } from "@/git/core/index.ts";
 import { r2PackKey, packIndexKey, getDoIdFromPath } from "@/keys.ts";
 import { getConfig } from "./repoConfig.ts";
 import { ensureScheduled } from "./scheduler.ts";
 import { indexPackOnly, readPackHeaderEx, buildPackV2 } from "@/git/pack/index.ts";
-import { BloomFilter } from "@/common/bloom.ts";
 
 // File-wide constants to avoid magic numbers across stages
 const HYDR_SAMPLE_PER_PACK = 128; // sample items per pack during planning

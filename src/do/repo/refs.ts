@@ -14,7 +14,7 @@ import { asTypedStorage } from "./repoState.ts";
  * @param ctx - Durable Object state context
  * @returns Array of ref objects with name and oid, or empty array if none exist
  */
-export async function getRefs(ctx: any): Promise<{ name: string; oid: string }[]> {
+export async function getRefs(ctx: DurableObjectState): Promise<{ name: string; oid: string }[]> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   return (await store.get("refs")) ?? [];
 }
@@ -24,7 +24,10 @@ export async function getRefs(ctx: any): Promise<{ name: string; oid: string }[]
  * @param ctx - Durable Object state context
  * @param refs - New refs array to store
  */
-export async function setRefs(ctx: any, refs: { name: string; oid: string }[]): Promise<void> {
+export async function setRefs(
+  ctx: DurableObjectState,
+  refs: { name: string; oid: string }[]
+): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   await store.put("refs", refs);
 }
@@ -34,7 +37,7 @@ export async function setRefs(ctx: any, refs: { name: string; oid: string }[]): 
  * @param ctx - Durable Object state context
  * @returns The resolved HEAD object with target and either oid or unborn flag
  */
-export async function resolveHead(ctx: any): Promise<Head> {
+export async function resolveHead(ctx: DurableObjectState): Promise<Head> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   const stored = await store.get("head");
   const refs = await getRefs(ctx);
@@ -57,7 +60,7 @@ export async function resolveHead(ctx: any): Promise<Head> {
  * @param ctx - Durable Object state context
  * @param head - New HEAD value
  */
-export async function setHead(ctx: any, head: Head): Promise<void> {
+export async function setHead(ctx: DurableObjectState, head: Head): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   await store.put("head", head);
 }
@@ -68,7 +71,7 @@ export async function setHead(ctx: any, head: Head): Promise<void> {
  * @returns Object containing HEAD and refs
  */
 export async function getHeadAndRefs(
-  ctx: any
+  ctx: DurableObjectState
 ): Promise<{ head: Head; refs: { name: string; oid: string }[] }> {
   const [head, refs] = await Promise.all([resolveHead(ctx), getRefs(ctx)]);
   return { head, refs };

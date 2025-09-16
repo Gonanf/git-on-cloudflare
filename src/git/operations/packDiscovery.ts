@@ -4,6 +4,27 @@ import type { RepoDurableObject } from "@/do/index.ts";
 import { getLimiter, countSubrequest, DEFAULT_SUBREQUEST_BUDGET } from "./limits.ts";
 import { createLogger } from "@/common/index.ts";
 
+// ---- local helpers (module-scoped) ----
+function hydrationFirst(list: string[]): string[] {
+  const hydra: string[] = [];
+  const normal: string[] = [];
+  for (const k of list) {
+    const base = k.split("/").pop() || "";
+    if (base.startsWith("pack-hydr-")) hydra.push(k);
+    else normal.push(k);
+  }
+  return [...hydra, ...normal];
+}
+
+function mergeUnique(dst: string[], extra: string[]) {
+  const seen = new Set(dst);
+  for (const k of extra)
+    if (!seen.has(k)) {
+      seen.add(k);
+      dst.push(k);
+    }
+}
+
 /**
  * Shared helper to discover candidate pack keys for a repository.
  * Order semantics: newest-first when seeded from DO; R2 scan is best-effort.
@@ -14,19 +35,22 @@ export async function getPackCandidates(
   stub: DurableObjectStub<RepoDurableObject>,
   doId: string,
   heavy: boolean,
-  cacheCtx?: CacheContext
+  cacheCtx?: CacheContext,
+  options?: { expandR2?: boolean }
 ): Promise<string[]> {
-  // Reuse per-request memo if present
-  if (cacheCtx?.memo?.packList && Array.isArray(cacheCtx.memo.packList)) {
-    return cacheCtx.memo.packList;
-  }
-  // Coalesce concurrent discovery calls within the same request
-  if (cacheCtx?.memo?.packListPromise) {
-    try {
-      const existing = await cacheCtx.memo.packListPromise;
-      return existing;
-    } catch {
-      // fall-through to attempt discovery again; promise creators log errors below
+  // Reuse per-request memo when not expanding; when expanding, seed from memo but continue
+  if (!options?.expandR2) {
+    if (cacheCtx?.memo?.packList && Array.isArray(cacheCtx.memo.packList)) {
+      return cacheCtx.memo.packList;
+    }
+    // Coalesce concurrent discovery calls within the same request
+    if (cacheCtx?.memo?.packListPromise) {
+      try {
+        const existing = await cacheCtx.memo.packListPromise;
+        return existing;
+      } catch {
+        // fall-through to attempt discovery again; promise creators log errors below
+      }
     }
   }
 
@@ -35,7 +59,9 @@ export async function getPackCandidates(
   if (cacheCtx) cacheCtx.memo = cacheCtx.memo || { subreqBudget: DEFAULT_SUBREQUEST_BUDGET };
   const log = createLogger(env.LOG_LEVEL, { service: "PackDiscovery", doId });
 
-  let packList: string[] = [];
+  let packList: string[] = Array.isArray(cacheCtx?.memo?.packList)
+    ? cacheCtx!.memo!.packList!.slice(0)
+    : [];
   const dedupe = (arr: string[]) => {
     const seen = new Set<string>();
     const out: string[] = [];
@@ -73,15 +99,17 @@ export async function getPackCandidates(
           const latest = packList[0];
           const i = list.indexOf(latest);
           if (i >= 0) list.splice(i, 1);
-          packList = dedupe([latest, ...list]);
+          packList = dedupe([latest, ...hydrationFirst(list)]);
         } else {
-          packList = list.slice(0);
+          // No latest: still prefer hydration packs first
+          packList = hydrationFirst(list);
         }
       }
     } catch {}
 
-    // Last resort: scan R2 under this DO's pack prefix
-    if (packList.length === 0) {
+    // R2 scan: use as last resort when we have no candidates,
+    // or as an expansion when explicitly requested via options.expandR2
+    if (packList.length === 0 || options?.expandR2) {
       try {
         const prefix = r2PackDirPrefix(doPrefix(doId));
         const MAX = heavy ? 10 : 50;
@@ -100,7 +128,16 @@ export async function getPackCandidates(
           }
           cursor = res && res.truncated ? res.cursor : undefined;
         } while (cursor && found.length < MAX);
-        if (found.length > 0) packList = found;
+        if (found.length > 0) {
+          // Prefer hydration packs early for R2 path as well
+          const expanded = hydrationFirst(found);
+          // If this was an expansion, merge while preserving order and deduping
+          if (options?.expandR2 && packList.length > 0) {
+            mergeUnique(packList, expanded);
+          } else {
+            packList = expanded;
+          }
+        }
       } catch (e) {
         log.debug("packDiscovery:r2:list:error", { error: String(e) });
       }
@@ -119,12 +156,12 @@ export async function getPackCandidates(
     return packList;
   })();
 
-  if (cacheCtx?.memo) cacheCtx.memo.packListPromise = inflight;
+  if (cacheCtx?.memo && !options?.expandR2) cacheCtx.memo.packListPromise = inflight;
   try {
     const list = await inflight;
     if (cacheCtx?.memo) cacheCtx.memo.packList = list;
     return list;
   } finally {
-    if (cacheCtx?.memo) cacheCtx.memo.packListPromise = undefined;
+    if (cacheCtx?.memo && !options?.expandR2) cacheCtx.memo.packListPromise = undefined;
   }
 }

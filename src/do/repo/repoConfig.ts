@@ -3,8 +3,8 @@ export function getConfig(env: Env) {
   // All values are validated and clamped to safe ranges.
   const idleMins = Number(env.REPO_DO_IDLE_MINUTES ?? 30);
   const maintMins = Number(env.REPO_DO_MAINT_MINUTES ?? 60 * 24);
-  const keepPacks = Number(env.REPO_KEEP_PACKS ?? 3);
-  const packListMaxRaw = Number(env.REPO_PACKLIST_MAX ?? 20);
+  const keepPacks = Number(env.REPO_KEEP_PACKS ?? 10);
+  const packListMaxRaw = Number(env.REPO_PACKLIST_MAX ?? 25);
   const unpackChunkSize = Number(env.REPO_UNPACK_CHUNK_SIZE ?? 50);
   const unpackMaxMs = Number(env.REPO_UNPACK_MAX_MS ?? 5000);
   const unpackDelayMs = Number(env.REPO_UNPACK_DELAY_MS ?? 100);

@@ -6,6 +6,7 @@
  */
 
 import type { RepoStateSchema } from "./repoState.ts";
+import type { Logger } from "@/common/logger.ts";
 
 import { asTypedStorage, packOidsKey } from "./repoState.ts";
 import { r2PackDirPrefix, isPackKey, packIndexKey, doPrefix } from "@/keys.ts";
@@ -21,12 +22,9 @@ import { getConfig } from "./repoConfig.ts";
  * @param logger - Logger instance
  */
 export async function handleIdleAndMaintenance(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
-  logger?: {
-    error: (msg: string, data?: any) => void;
-    warn: (msg: string, data?: any) => void;
-  }
+  logger?: Logger
 ): Promise<void> {
   try {
     const cfg = getConfig(env);
@@ -87,12 +85,9 @@ async function shouldCleanupIdle(
  * @param logger - Logger instance
  */
 async function performIdleCleanup(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
-  logger?: {
-    error: (msg: string, data?: any) => void;
-    warn: (msg: string, data?: any) => void;
-  }
+  logger?: Logger
 ): Promise<void> {
   const storage = ctx.storage;
 
@@ -122,14 +117,7 @@ async function performIdleCleanup(
  * @param prefix - Repository prefix (do/<id>)
  * @param logger - Logger instance
  */
-async function purgeR2Mirror(
-  env: Env,
-  prefix: string,
-  logger?: {
-    error: (msg: string, data?: any) => void;
-    warn: (msg: string, data?: any) => void;
-  }
-): Promise<void> {
+async function purgeR2Mirror(env: Env, prefix: string, logger?: Logger): Promise<void> {
   try {
     const pfx = `${prefix}/`;
     let cursor: string | undefined = undefined;
@@ -176,13 +164,11 @@ function isMaintenanceDue(lastMaint: number | undefined, now: number, maintMs: n
  * @param logger - Logger instance
  */
 async function performMaintenance(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   keepPacks: number,
   now: number,
-  logger?: {
-    error: (msg: string, data?: any) => void;
-  }
+  logger?: Logger
 ): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   try {
@@ -205,19 +191,29 @@ async function performMaintenance(
  * @param logger - Logger instance
  */
 async function runMaintenance(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   keepPacks: number,
-  logger?: {
-    warn: (msg: string, data?: any) => void;
-  }
+  logger?: Logger
 ): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
 
   // Ensure packList exists
   const packList = (await store.get("packList")) ?? [];
   if (packList.length === 0) return;
+
+  // Prune safety: avoid pruning before hydration has produced at least one segment.
+  // If no hydration packs exist (basename starts with 'pack-hydr-'), skip pruning now.
+  try {
+    const hasHydration = Array.isArray(packList)
+      ? packList.some((k: string) => (k.split("/").pop() || "").startsWith("pack-hydr-"))
+      : false;
+    if (!hasHydration) {
+      logger?.warn?.("maintenance:prune-skipped:no-hydration", { count: packList.length });
+      return;
+    }
+  } catch {}
 
   // Determine which packs to keep
   // packList is maintained newest-first (most recent at index 0), so keep the first N

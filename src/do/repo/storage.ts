@@ -29,7 +29,7 @@ import {
  * @returns ReadableStream of compressed object data or null if not found
  */
 export async function getObjectStream(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   oid: string
@@ -67,7 +67,7 @@ export async function getObjectStream(
  * @returns Compressed object data or null if not found
  */
 export async function getObject(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   oid: string
@@ -94,7 +94,12 @@ export async function getObject(
  * @param oid - Object ID to check
  * @returns true if object exists in DO or R2 storage
  */
-export async function hasLoose(ctx: any, env: Env, prefix: string, oid: string): Promise<boolean> {
+export async function hasLoose(
+  ctx: DurableObjectState,
+  env: Env,
+  prefix: string,
+  oid: string
+): Promise<boolean> {
   if (!isValidOid(oid)) return false;
 
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
@@ -121,7 +126,7 @@ export async function hasLoose(ctx: any, env: Env, prefix: string, oid: string):
  * @returns Array of booleans indicating existence
  */
 export async function hasLooseBatch(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   oids: string[],
@@ -184,7 +189,7 @@ export async function hasLooseBatch(
  * @returns Size in bytes or null if not found
  */
 export async function getObjectSize(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   oid: string
@@ -214,7 +219,7 @@ export async function getObjectSize(
  * @param bytes - Compressed object data
  */
 export async function storeObject(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   oid: string,
@@ -259,7 +264,7 @@ async function mirrorObjectToR2(
  * @returns Map of OID to data, with null for missing objects
  */
 export async function getObjectsBatch(
-  ctx: any,
+  ctx: DurableObjectState,
   oids: string[]
 ): Promise<Map<string, Uint8Array | null>> {
   const result = new Map<string, Uint8Array | null>();
@@ -300,7 +305,7 @@ export async function getObjectsBatch(
  * @returns Map of OID to array of referenced OIDs
  */
 export async function getObjectRefsBatch(
-  ctx: any,
+  ctx: DurableObjectState,
   oids: string[],
   logger?: { debug: (msg: string, data?: any) => void }
 ): Promise<Map<string, string[]>> {
@@ -348,7 +353,7 @@ export async function getObjectRefsBatch(
  * @returns Parsed commit information or null if not found
  */
 export async function readCommitFromStore(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   oid: string

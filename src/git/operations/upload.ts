@@ -92,6 +92,96 @@ async function buildUnionNeededForKeys(
   return Array.from(needSet);
 }
 
+// Helper: expand candidate packs via R2 and return an expanded sliced list up to packCap.
+async function expandCandidates(
+  env: Env,
+  stub: DurableObjectStub<RepoDurableObject>,
+  doId: string,
+  heavy: boolean,
+  cacheCtx: CacheContext | undefined,
+  packCap: number,
+  currentLen: number,
+  log: Logger
+): Promise<string[] | undefined> {
+  try {
+    const expanded = await getPackCandidates(env, stub, doId, heavy, cacheCtx, { expandR2: true });
+    const SLICE2 = Math.min(packCap, expanded.length);
+    if (SLICE2 > currentLen) return expanded.slice(0, SLICE2);
+  } catch (e) {
+    log.debug("fetch:expand-candidates-failed", { error: String(e) });
+  }
+  return undefined;
+}
+
+// Helper: derive pack cap from env with clamping.
+function getPackCapFromEnv(env: Env): number {
+  const raw = Number(env.REPO_PACKLIST_MAX ?? 20);
+  const n = Number.isFinite(raw) ? Math.floor(raw) : 20;
+  return Math.max(1, Math.min(100, n));
+}
+
+// Helper: compute how many wanted commits have a root tree missing from a membership set.
+// Used by both the initial union guard and the post-closure coverage guard.
+async function countMissingRootTreesFromWants(
+  env: Env,
+  repoId: string,
+  wants: string[],
+  cacheCtx: CacheContext | undefined,
+  has: Set<string>
+): Promise<number> {
+  const td = new TextDecoder();
+  const CHECK_MAX = Math.min(wants.length, 32);
+  let missingRoots = 0;
+  for (let i = 0; i < CHECK_MAX; i++) {
+    const want = wants[i];
+    const obj = await readLooseObjectRaw(env, repoId, want, cacheCtx);
+    if (!obj || obj.type !== "commit") continue;
+    const text = td.decode(obj.payload);
+    const m = text.match(/^tree ([0-9a-f]{40})/m);
+    if (m && !has.has(m[1])) missingRoots++;
+  }
+  return missingRoots;
+}
+
+// Helper: try assembling from a single pack (first key, then others) with logging.
+async function tryAssembleSinglePackPath(
+  env: Env,
+  packKeys: string[],
+  needed: string[],
+  signal: AbortSignal | undefined,
+  log: Logger
+): Promise<Uint8Array | undefined> {
+  const firstKey = Array.isArray(packKeys) && packKeys.length > 0 ? packKeys[0] : undefined;
+  if (!firstKey) {
+    log.warn("fetch:single-pack:missing-meta", {});
+  } else {
+    log.info("fetch:try:single-pack", { key: firstKey, needed: needed.length });
+    const assembled = await assemblePackFromR2(env, firstKey, needed, signal);
+    if (assembled) {
+      log.info("fetch:path:single-pack", { key: firstKey });
+      return assembled;
+    } else {
+      log.info("fetch:single-pack-miss", { key: firstKey });
+    }
+  }
+  if (Array.isArray(packKeys)) {
+    for (const k of packKeys) {
+      try {
+        log.info("fetch:try:single-pack:any", { key: k, needed: needed.length });
+        const assembled = await assemblePackFromR2(env, k, needed, signal);
+        if (assembled) {
+          log.info("fetch:path:single-pack:any", { key: k });
+          return assembled;
+        } else {
+          log.info("fetch:single-pack-any-miss", { key: k });
+        }
+      } catch {}
+    }
+    log.info("fetch:single-pack-all-miss", { attempted: packKeys.length });
+  }
+  return undefined;
+}
+
 /**
  * Handles Git fetch protocol v2 requests.
  * Optimizations:
@@ -116,6 +206,9 @@ export async function handleFetchV2(
   const log = createLogger(env.LOG_LEVEL, { service: "FetchV2", repoId });
   const limiter = getLimiter(cacheCtx);
   if (signal?.aborted) return new Response("client aborted\n", { status: 499 });
+  // Worker-side cap for how many candidate packs we union/assemble across.
+  // Clamp to [1,100] and default to 20 when unset, mirroring DO-side config bounds.
+  const packCap = getPackCapFromEnv(env);
   // Enter heavy closure phase: avoid cache reads and cap loader calls
   beginClosurePhase(cacheCtx, { loaderCap: 400, doBatchBudget: 20 });
   if (wants.length === 0) {
@@ -140,9 +233,30 @@ export async function handleFetchV2(
       const heavy = cacheCtx?.memo?.flags?.has("no-cache-read") === true;
       const packKeys = await getPackCandidates(env, stub, doId, heavy, cacheCtx);
       if (Array.isArray(packKeys) && packKeys.length >= 2) {
-        const MAX_KEYS = Math.min(10, packKeys.length);
-        const keys = packKeys.slice(0, MAX_KEYS);
-        const unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
+        const MAX_KEYS = Math.min(packCap, packKeys.length);
+        let keys = packKeys.slice(0, MAX_KEYS);
+        let unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
+        // Quick root-tree coverage guard: if union seems insufficient, expand to full candidate window
+        if (unionNeeded.length > 0) {
+          try {
+            const missingRoots = await countMissingRootTreesFromWants(
+              env,
+              repoId,
+              wants,
+              cacheCtx,
+              new Set(unionNeeded)
+            );
+            if (missingRoots > 0 && keys.length < Math.min(packCap, packKeys.length)) {
+              const SLICE = Math.min(packCap, packKeys.length);
+              const moreKeys = packKeys.slice(0, SLICE);
+              if (moreKeys.length > keys.length) {
+                keys = moreKeys;
+                unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
+              }
+              log.warn("fetch:init-union-missing-roots", { missingRoots, packs: keys.length });
+            }
+          } catch {}
+        }
         if (unionNeeded.length > 0) {
           const mp = await assemblePackFromMultiplePacks(env, keys, unionNeeded, signal);
           if (mp) {
@@ -151,6 +265,31 @@ export async function handleFetchV2(
             endClosurePhase(cacheCtx);
             // No haves in initial clones: acknowledgments block will emit NAK when done === false
             return respondWithPackfile(mp, done, [], signal);
+          }
+          // One-time expand-on-miss using R2 to pull in a few more candidates and retry
+          const keys2 = await expandCandidates(
+            env,
+            stub,
+            doId,
+            heavy,
+            cacheCtx,
+            packCap,
+            keys.length,
+            log
+          );
+          if (keys2 && keys2.length > keys.length) {
+            const union2 = await buildUnionNeededForKeys(stub, keys2, limiter, cacheCtx, log);
+            if (union2.length > 0) {
+              const mp2 = await assemblePackFromMultiplePacks(env, keys2, union2, signal);
+              if (mp2) {
+                log.info("fetch:path:init-union:expand-r2", {
+                  packs: keys2.length,
+                  union: union2.length,
+                });
+                endClosurePhase(cacheCtx);
+                return respondWithPackfile(mp2, done, [], signal);
+              }
+            }
           }
         }
       }
@@ -175,7 +314,7 @@ export async function handleFetchV2(
       const heavy = cacheCtx?.memo?.flags?.has("no-cache-read") === true;
       const packKeys = await getPackCandidates(env, stub, doId, heavy, cacheCtx);
       if (packKeys.length > 0) {
-        const MAX_KEYS = Math.min(10, packKeys.length);
+        const MAX_KEYS = Math.min(packCap, packKeys.length);
         const keys = packKeys.slice(0, MAX_KEYS);
         const unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
         if (keys.length >= 2 && unionNeeded.length > 0) {
@@ -221,19 +360,13 @@ export async function handleFetchV2(
   let skipSinglePack = false;
   if (haves.length === 0) {
     try {
-      const neededSet = new Set(needed);
-      const CHECK_MAX = Math.min(wants.length, 32);
-      let missingRoots = 0;
-      for (let i = 0; i < CHECK_MAX; i++) {
-        const want = wants[i];
-        const obj = await readLooseObjectRaw(env, repoId, want, cacheCtx);
-        if (!obj || obj.type !== "commit") continue;
-        const text = new TextDecoder().decode(obj.payload);
-        const m = text.match(/^tree ([0-9a-f]{40})/m);
-        if (!m) continue;
-        const tree = m[1];
-        if (!neededSet.has(tree)) missingRoots++;
-      }
+      const missingRoots = await countMissingRootTreesFromWants(
+        env,
+        repoId,
+        wants,
+        cacheCtx,
+        new Set(needed)
+      );
       if (missingRoots > 0) {
         skipSinglePack = true;
         log.warn("fetch:coverage-guard-triggered", { missingRoots, wants: wants.length });
@@ -283,37 +416,8 @@ export async function handleFetchV2(
 
   if (!skipSinglePack) {
     try {
-      const firstKey = Array.isArray(packKeys) && packKeys.length > 0 ? packKeys[0] : undefined;
-      if (firstKey) {
-        log.info("fetch:try:single-pack", { key: firstKey, needed: needed.length });
-        const assembled = await assemblePackFromR2(env, firstKey, needed, signal);
-        if (assembled) {
-          log.info("fetch:path:single-pack", { key: firstKey });
-          return respondWithPackfile(assembled, done, ackOids, signal);
-        } else {
-          log.info("fetch:single-pack-miss", { key: firstKey });
-        }
-      } else {
-        log.warn("fetch:single-pack:missing-meta", {});
-      }
-      // Try each recent pack individually
-      if (Array.isArray(packKeys)) {
-        for (const k of packKeys) {
-          try {
-            log.info("fetch:try:single-pack:any", { key: k, needed: needed.length });
-            const assembled = await assemblePackFromR2(env, k, needed, signal);
-            if (assembled) {
-              log.info("fetch:path:single-pack:any", { key: k });
-              return respondWithPackfile(assembled, done, ackOids, signal);
-            } else {
-              log.info("fetch:single-pack-any-miss", { key: k });
-            }
-          } catch {}
-        }
-        log.info("fetch:single-pack-all-miss", {
-          attempted: Array.isArray(packKeys) ? packKeys.length : 0,
-        });
-      }
+      const assembled = await tryAssembleSinglePackPath(env, packKeys, needed, signal, log);
+      if (assembled) return respondWithPackfile(assembled, done, ackOids, signal);
     } catch (e) {
       log.warn("fetch:single-pack:failed", { error: String(e) });
       // ignore and move on to multi-pack
@@ -325,21 +429,32 @@ export async function handleFetchV2(
   // Multi-pack union: only makes sense when we have at least 2 packs
   if (Array.isArray(packKeys) && packKeys.length >= 2) {
     try {
-      log.info("fetch:try:multi-pack", {
-        packs: Math.min(10, packKeys.length),
-        needed: needed.length,
-      });
+      const SLICE = Math.min(packCap, packKeys.length);
+      log.info("fetch:try:multi-pack", { packs: SLICE, needed: needed.length });
       const mpAssembled = await assemblePackFromMultiplePacks(
         env,
-        packKeys.slice(0, 10),
+        packKeys.slice(0, SLICE),
         needed,
         signal
       );
       if (mpAssembled) {
-        log.info("fetch:path:multi-pack", { packs: Math.min(10, packKeys.length) });
+        log.info("fetch:path:multi-pack", { packs: SLICE });
         return respondWithPackfile(mpAssembled, done, ackOids, signal);
       } else {
-        log.info("fetch:multi-pack-failed", { packs: Math.min(10, packKeys.length) });
+        log.info("fetch:multi-pack-failed", { packs: SLICE });
+        // One-time expand-on-miss using R2 and retry
+        const keys2 = await expandCandidates(env, stub, doId, heavy, cacheCtx, packCap, SLICE, log);
+        if (keys2 && keys2.length > SLICE) {
+          log.info("fetch:try:multi-pack:expand-r2", {
+            packs: keys2.length,
+            needed: needed.length,
+          });
+          const mp2 = await assemblePackFromMultiplePacks(env, keys2, needed, signal);
+          if (mp2) {
+            log.info("fetch:path:multi-pack:expand-r2", { packs: keys2.length });
+            return respondWithPackfile(mp2, done, ackOids, signal);
+          }
+        }
       }
     } catch {
       // fall through

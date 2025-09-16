@@ -19,7 +19,7 @@ import { readCommitFromStore } from "./storage.ts";
  * @returns Debug state object with repository metadata and statistics
  */
 export async function debugState(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env
 ): Promise<{
   meta: { doId: string; prefix: string };
@@ -188,7 +188,7 @@ export async function debugState(
  * @returns Detailed commit information and presence in storage
  */
 export async function debugCheckCommit(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   commit: string
 ): Promise<{
@@ -260,7 +260,7 @@ export async function debugCheckCommit(
  * @returns Object presence information
  */
 export async function debugCheckOid(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   oid: string
 ): Promise<{

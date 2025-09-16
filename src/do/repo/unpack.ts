@@ -19,7 +19,7 @@ import { enqueueHydrationTask } from "./hydration.ts";
  * @param ctx - Durable Object state context
  * @returns UnpackProgress object with current status
  */
-export async function getUnpackProgress(ctx: any): Promise<UnpackProgress> {
+export async function getUnpackProgress(ctx: DurableObjectState): Promise<UnpackProgress> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   const work = await store.get("unpackWork");
   const nextKey = await store.get("unpackNext");
@@ -45,7 +45,7 @@ export async function getUnpackProgress(ctx: any): Promise<UnpackProgress> {
  * @returns true if unpack work was found and processed, false otherwise
  */
 export async function handleUnpackWork(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   logger?: {
@@ -78,7 +78,7 @@ export async function handleUnpackWork(
  * @param logger - Logger instance
  */
 async function processUnpackChunk(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   work: UnpackWork,
@@ -124,7 +124,7 @@ async function loadPackBytes(
  * @param ctx - Durable Object state context
  * @param packKey - Pack key that was missing
  */
-async function abortUnpackWork(ctx: any, packKey: string): Promise<void> {
+async function abortUnpackWork(ctx: DurableObjectState, packKey: string): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   await store.delete("unpackWork");
 }
@@ -140,7 +140,7 @@ async function abortUnpackWork(ctx: any, packKey: string): Promise<void> {
  * @returns Processing result with counts
  */
 async function processUnpackBatch(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   work: UnpackWork,
@@ -235,7 +235,7 @@ function isTimeExceeded(startTime: number, maxDuration: number): boolean {
  * @returns Number of objects processed
  */
 async function unpackChunk(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   prefix: string,
   packBytes: Uint8Array,
@@ -260,7 +260,7 @@ async function unpackChunk(
  * @param logger - Logger instance
  */
 async function updateUnpackProgress(
-  ctx: any,
+  ctx: DurableObjectState,
   env: Env,
   work: UnpackWork,
   result: { processed: number; processedInRun: number; exceededBudget: boolean },

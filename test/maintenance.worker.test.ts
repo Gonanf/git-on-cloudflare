@@ -29,11 +29,17 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS", async (
     await env.REPO_BUCKET.put(key, new Uint8Array([i]));
     await env.REPO_BUCKET.put(key.replace(/\.pack$/, ".idx"), new Uint8Array([i, i]));
   }
+  // Add a hydration segment to satisfy prune safety (presence of a 'pack-hydr-*')
+  // Place it after the normal packs so KEEP window remains the first 10 of `keys`.
+  const hydrKey = `${prefix}/objects/pack/pack-hydr-999.pack`;
+  await env.REPO_BUCKET.put(hydrKey, new Uint8Array([9, 9, 9]));
+  await env.REPO_BUCKET.put(hydrKey.replace(/\.pack$/, ".idx"), new Uint8Array([9, 9]));
 
   // Seed DO storage with packList and lastPackKey, and dummy packOids entries
   await runDOWithRetry(getStub as any, async (_instance: any, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
-    await store.put("packList", keys);
+    // Include hydration pack at the end so trimming still keeps the first 10 of `keys`
+    await store.put("packList", [...keys, hydrKey]);
     await store.put("lastPackKey", keys[keys.length - 1]);
     // Force maintenance due
     await store.put("lastMaintenanceMs", 0);

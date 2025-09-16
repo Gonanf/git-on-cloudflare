@@ -8,13 +8,16 @@
 import type { RepoStateSchema } from "./repoState.ts";
 
 import { asTypedStorage, packOidsKey } from "./repoState.ts";
+import { getConfig } from "./repoConfig.ts";
 
 /**
  * Get the latest pack information with its OIDs
  * @param ctx - Durable Object state context
  * @returns Latest pack key and OIDs, or null if no packs exist
  */
-export async function getPackLatest(ctx: any): Promise<{ key: string; oids: string[] } | null> {
+export async function getPackLatest(
+  ctx: DurableObjectState
+): Promise<{ key: string; oids: string[] } | null> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   const key = await store.get("lastPackKey");
   if (!key) return null;
@@ -25,11 +28,13 @@ export async function getPackLatest(ctx: any): Promise<{ key: string; oids: stri
 /**
  * Get list of pack keys (newest first)
  * @param ctx - Durable Object state context
- * @returns Array of pack keys, limited to 20 most recent
+ * @param env - Worker environment for configuration
+ * @returns Array of pack keys, limited to configured packListMax
  */
-export async function getPacks(ctx: any): Promise<string[]> {
+export async function getPacks(ctx: DurableObjectState, env: Env): Promise<string[]> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
-  const list = ((await store.get("packList")) || []).slice(0, 20);
+  const cfg = getConfig(env);
+  const list = ((await store.get("packList")) || []).slice(0, cfg.packListMax);
   return list;
 }
 
@@ -39,7 +44,7 @@ export async function getPacks(ctx: any): Promise<string[]> {
  * @param key - Pack key to get OIDs for
  * @returns Array of OIDs in the pack
  */
-export async function getPackOids(ctx: any, key: string): Promise<string[]> {
+export async function getPackOids(ctx: DurableObjectState, key: string): Promise<string[]> {
   if (!key) return [];
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
   const oids = (await store.get(packOidsKey(key))) || [];
@@ -55,7 +60,7 @@ export async function getPackOids(ctx: any, key: string): Promise<string[]> {
  * @returns Map of pack key -> string[] of OIDs (empty array if missing)
  */
 export async function getPackOidsBatch(
-  ctx: any,
+  ctx: DurableObjectState,
   keys: string[],
   logger?: { debug: (msg: string, data?: any) => void }
 ): Promise<Map<string, string[]>> {
@@ -96,7 +101,11 @@ export async function getPackOidsBatch(
  * @param packKey - New pack key to add
  * @param oids - OIDs in the new pack
  */
-export async function addPackToList(ctx: any, packKey: string, oids: string[]): Promise<void> {
+export async function addPackToList(
+  ctx: DurableObjectState,
+  packKey: string,
+  oids: string[]
+): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
 
   // Store pack OIDs
@@ -117,7 +126,7 @@ export async function addPackToList(ctx: any, packKey: string, oids: string[]): 
  * @param ctx - Durable Object state context
  * @param packKey - Pack key to remove
  */
-export async function removePackFromList(ctx: any, packKey: string): Promise<void> {
+export async function removePackFromList(ctx: DurableObjectState, packKey: string): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
 
   // Remove from pack list
@@ -151,7 +160,7 @@ export async function removePackFromList(ctx: any, packKey: string): Promise<voi
  * @returns Array of removed pack keys
  */
 export async function prunePackList(
-  ctx: any,
+  ctx: DurableObjectState,
   keepCount: number,
   logger?: { warn: (msg: string, data?: any) => void }
 ): Promise<string[]> {

@@ -208,7 +208,7 @@ export class RepoDurableObject extends DurableObject {
 
   public async getPacks(): Promise<string[]> {
     await this.ensureAccessAndAlarm();
-    return await getPacks(this.ctx);
+    return await getPacks(this.ctx, this.env);
   }
 
   public async getPackOids(key: string): Promise<string[]> {
