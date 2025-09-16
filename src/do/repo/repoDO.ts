@@ -1,20 +1,11 @@
-import type { RepoStateSchema, Head, UnpackWork } from "./repoState.ts";
+import type { RepoStateSchema, Head } from "./repoState.ts";
 import type { UnpackProgress } from "@/common/index.ts";
 
 import { DurableObject } from "cloudflare:workers";
-import { asTypedStorage, objKey, packOidsKey } from "./repoState.ts";
-import { doPrefix, r2LooseKey, r2PackDirPrefix, isPackKey, packIndexKey } from "@/keys.ts";
-import {
-  encodeGitObjectAndDeflate,
-  unpackPackToLoose,
-  unpackOidsChunkFromPackBytes,
-  receivePack,
-  parseCommitText,
-  inflateAndParseHeader,
-  parseCommitRefs,
-  parseTreeChildOids,
-} from "@/git/index.ts";
-import { text, createLogger, createInflateStream, isValidOid } from "@/common/index.ts";
+import { asTypedStorage, objKey } from "./repoState.ts";
+import { doPrefix } from "@/keys.ts";
+import { encodeGitObjectAndDeflate, receivePack } from "@/git/index.ts";
+import { text, createLogger, isValidOid } from "@/common/index.ts";
 import {
   enqueueHydrationTask,
   processHydrationSlice,
@@ -23,6 +14,22 @@ import {
 } from "./hydration.ts";
 import { ensureScheduled, scheduleAlarmIfSooner } from "./scheduler.ts";
 import { getConfig } from "./repoConfig.ts";
+
+import {
+  getObjectStream,
+  getObject,
+  hasLoose,
+  hasLooseBatch,
+  getObjectSize,
+  storeObject,
+  getObjectsBatch,
+  getObjectRefsBatch,
+} from "./storage.ts";
+import { getPackLatest, getPacks, getPackOids, getPackOidsBatch } from "./packs.ts";
+import { getRefs, setRefs, resolveHead, setHead, getHeadAndRefs } from "./refs.ts";
+import { handleUnpackWork, getUnpackProgress } from "./unpack.ts";
+import { handleIdleAndMaintenance } from "./maintenance.ts";
+import { debugState, debugCheckCommit, debugCheckOid } from "./debug.ts";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -71,10 +78,215 @@ export class RepoDurableObject extends DurableObject {
     });
   }
 
+  // Thin request router: delegates to focused handlers below.
+  // Keep this mapping explicit and small so behavior is easy to audit.
+  async fetch(request: Request): Promise<Response> {
+    // Touch access and (re)schedule an idle cleanup alarm
+    try {
+      await this.touchAndMaybeSchedule();
+    } catch {}
+    const url = new URL(request.url);
+    this.logger.debug("fetch", { path: url.pathname, method: request.method });
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+
+    // Receive-pack: parse update commands section and packfile, store pack to R2,
+    // update refs atomically if valid, and respond with report-status. This remains
+    // on HTTP (instead of RPC) to preserve streaming semantics end-to-end without
+    // buffering the pack in memory.
+    if (url.pathname === "/receive" && request.method === "POST") {
+      return this.handleReceive(request);
+    }
+
+    return text("Not found\n", 404);
+  }
+
+  // --- Alarm-based tasks ---
+  // Combines three responsibilities:
+  // 1) Unpack work: Process pending pack objects in chunks to avoid blocking
+  // 2) Idle cleanup: If the DO remains idle beyond IDLE_MS and appears empty/unused, purge storage and R2 mirror.
+  // 3) Maintenance: Periodically prune stale packs and metadata even for active repos.
+  async alarm(): Promise<void> {
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    this.logger.debug("alarm:start", {});
+
+    // Priority 1: Handle pending unpack work
+    if (await handleUnpackWork(this.ctx, this.env, this.prefix(), this.logger)) {
+      return; // Exit early to let unpack continue
+    }
+
+    // Priority 2: Hydration work (resumable, time-sliced)
+    if (await this.handleHydrationWork(store)) {
+      return; // Exit early; hydration requested another slice soon
+    }
+
+    // Priority 3: Check for idle cleanup or maintenance needs
+    await handleIdleAndMaintenance(this.ctx, this.env, this.logger);
+
+    this.logger.debug("alarm:end", {});
+  }
+
+  private async touchAndMaybeSchedule(): Promise<void> {
+    const cfg = getConfig(this.env);
+    const now = Date.now();
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+
+    // Update last access time with throttling (max once per 60s)
+    try {
+      if (!this.lastAccessMemMs || now - this.lastAccessMemMs >= 60_000) {
+        await store.put("lastAccessMs", now);
+        this.lastAccessMemMs = now;
+      }
+    } catch {}
+
+    await ensureScheduled(this.ctx, this.env, now);
+  }
+
   /**
-   * Processes a small hydration slice if hydration work or queue exists.
-   * Returns true when a slice was executed and the alarm should continue soon.
+   * Safe wrapper around touchAndMaybeSchedule() for RPC and internal entrypoints.
+   * Ensures last access time is updated and an alarm is scheduled without
+   * forcing every method to duplicate try/catch.
    */
+  private async ensureAccessAndAlarm(): Promise<void> {
+    try {
+      await this.touchAndMaybeSchedule();
+    } catch (e) {
+      try {
+        this.logger.warn("touch:schedule:failed", { error: String(e) });
+      } catch {}
+    }
+  }
+
+  public async listRefs(): Promise<{ name: string; oid: string }[]> {
+    await this.ensureAccessAndAlarm();
+    return await getRefs(this.ctx);
+  }
+
+  public async setRefs(refs: { name: string; oid: string }[]): Promise<void> {
+    await this.ensureAccessAndAlarm();
+    await setRefs(this.ctx, refs);
+  }
+
+  public async getHead(): Promise<Head> {
+    await this.ensureAccessAndAlarm();
+    return await resolveHead(this.ctx);
+  }
+
+  public async setHead(head: Head): Promise<void> {
+    await this.ensureAccessAndAlarm();
+    await setHead(this.ctx, head);
+  }
+
+  public async getHeadAndRefs(): Promise<{ head: Head; refs: { name: string; oid: string }[] }> {
+    await this.ensureAccessAndAlarm();
+    return await getHeadAndRefs(this.ctx);
+  }
+
+  public async getObjectStream(oid: string): Promise<ReadableStream | null> {
+    await this.ensureAccessAndAlarm();
+    return await getObjectStream(this.ctx, this.env, this.prefix(), oid);
+  }
+
+  public async getObject(oid: string): Promise<ArrayBuffer | Uint8Array | null> {
+    await this.ensureAccessAndAlarm();
+    return await getObject(this.ctx, this.env, this.prefix(), oid);
+  }
+
+  public async hasLoose(oid: string): Promise<boolean> {
+    await this.ensureAccessAndAlarm();
+    return await hasLoose(this.ctx, this.env, this.prefix(), oid);
+  }
+
+  public async hasLooseBatch(oids: string[]): Promise<boolean[]> {
+    await this.ensureAccessAndAlarm();
+    return await hasLooseBatch(this.ctx, this.env, this.prefix(), oids, this.logger);
+  }
+
+  public async getPackLatest(): Promise<{ key: string; oids: string[] } | null> {
+    await this.ensureAccessAndAlarm();
+    return await getPackLatest(this.ctx);
+  }
+
+  public async getPacks(): Promise<string[]> {
+    await this.ensureAccessAndAlarm();
+    return await getPacks(this.ctx);
+  }
+
+  public async getPackOids(key: string): Promise<string[]> {
+    await this.ensureAccessAndAlarm();
+    return await getPackOids(this.ctx, key);
+  }
+
+  public async getPackOidsBatch(keys: string[]): Promise<Map<string, string[]>> {
+    await this.ensureAccessAndAlarm();
+    return await getPackOidsBatch(this.ctx, keys, this.logger);
+  }
+
+  public async getUnpackProgress(): Promise<UnpackProgress> {
+    await this.ensureAccessAndAlarm();
+    return await getUnpackProgress(this.ctx);
+  }
+
+  public async debugState(): Promise<any> {
+    await this.ensureAccessAndAlarm();
+    return await debugState(this.ctx, this.env);
+  }
+
+  public async debugCheckCommit(commit: string): Promise<any> {
+    await this.ensureAccessAndAlarm();
+    return await debugCheckCommit(this.ctx, this.env, commit);
+  }
+
+  public async debugCheckOid(oid: string): Promise<any> {
+    await this.ensureAccessAndAlarm();
+    return await debugCheckOid(this.ctx, this.env, oid);
+  }
+
+  public async getObjectsBatch(oids: string[]): Promise<Map<string, Uint8Array | null>> {
+    await this.ensureAccessAndAlarm();
+    return await getObjectsBatch(this.ctx, oids);
+  }
+
+  public async getObjectRefsBatch(oids: string[]): Promise<Map<string, string[]>> {
+    await this.ensureAccessAndAlarm();
+    return await getObjectRefsBatch(this.ctx, oids, this.logger);
+  }
+
+  private async handleReceive(request: Request) {
+    // Delegate to extracted implementation for clarity and testability.
+    this.logger.info("receive:start", {});
+    // Pre-body guard: block when current unpack is running and a next pack is already queued
+    try {
+      const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+      const work = await store.get("unpackWork");
+      const next = await store.get("unpackNext");
+      if (work && next) {
+        this.logger.warn("receive:block-busy", { retryAfter: 10 });
+        return new Response("Repository is busy unpacking; please retry shortly.\n", {
+          status: 503,
+          headers: {
+            "Retry-After": "10",
+            "Content-Type": "text/plain; charset=utf-8",
+          },
+        });
+      }
+    } catch {}
+    const res = await receivePack(this.ctx, this.env, this.prefix(), request);
+    this.logger.info("receive:end", { status: res.status });
+    return res;
+  }
+
+  private prefix() {
+    // Tests and R2 layout expect Durable Object data under the 'do/<id>' prefix
+    return doPrefix(this.ctx.id.toString());
+  }
+
+  private get logger() {
+    return createLogger(this.env.LOG_LEVEL, {
+      service: "RepoDO",
+      doId: this.ctx.id.toString(),
+    });
+  }
+
   private async handleHydrationWork(
     store: ReturnType<typeof asTypedStorage<RepoStateSchema>>
   ): Promise<boolean> {
@@ -110,9 +322,6 @@ export class RepoDurableObject extends DurableObject {
     return { queued: true, dryRun: false, workId: res.workId, queueLength: res.queueLength };
   }
 
-  /**
-   * RPC: Clear hydration state and hydration-generated packs only.
-   */
   public async clearHydration(): Promise<{
     clearedWork: boolean;
     clearedQueue: number;
@@ -122,583 +331,6 @@ export class RepoDurableObject extends DurableObject {
     // Delegate to hydration helper
     const res = await clearHydrationState(this.ctx, this.env);
     return res;
-  }
-
-  // Thin request router: delegates to focused handlers below.
-  // Keep this mapping explicit and small so behavior is easy to audit.
-  async fetch(request: Request): Promise<Response> {
-    // Touch access and (re)schedule an idle cleanup alarm
-    try {
-      await this.touchAndMaybeSchedule();
-    } catch {}
-    const url = new URL(request.url);
-    this.logger.debug("fetch", { path: url.pathname, method: request.method });
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-
-    // Receive-pack: parse update commands section and packfile, store pack to R2,
-    // update refs atomically if valid, and respond with report-status. This remains
-    // on HTTP (instead of RPC) to preserve streaming semantics end-to-end without
-    // buffering the pack in memory.
-    if (url.pathname === "/receive" && request.method === "POST") {
-      return this.handleReceive(request);
-    }
-
-    return text("Not found\n", 404);
-  }
-
-  public async listRefs(): Promise<{ name: string; oid: string }[]> {
-    await this.ensureAccessAndAlarm();
-    return await this.getRefs();
-  }
-
-  public async setRefs(refs: { name: string; oid: string }[]): Promise<void> {
-    await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    await store.put("refs", refs);
-  }
-
-  public async getHead(): Promise<Head> {
-    await this.ensureAccessAndAlarm();
-    return await this.resolveHead();
-  }
-
-  public async setHead(head: Head): Promise<void> {
-    await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    await store.put("head", head);
-  }
-
-  public async getHeadAndRefs(): Promise<{ head: Head; refs: { name: string; oid: string }[] }> {
-    await this.ensureAccessAndAlarm();
-    const [head, refs] = await Promise.all([this.resolveHead(), this.getRefs()]);
-    return { head, refs };
-  }
-
-  public async getObjectStream(oid: string): Promise<ReadableStream | null> {
-    await this.ensureAccessAndAlarm();
-    if (!isValidOid(oid)) return null;
-    // Try R2 first
-    try {
-      const obj = await this.env.REPO_BUCKET.get(r2LooseKey(this.prefix(), oid));
-      if (obj) return obj.body;
-    } catch {}
-    // Fallback to DO storage
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const data = await store.get(objKey(oid));
-    if (!data) return null;
-    // IMPORTANT: This stream contains the Git object in its zlib-compressed form
-    // including the Git header. Callers that want the raw payload should pipe
-    // through `createInflateStream()` and strip the header ("<type> <len>\0").
-    return new ReadableStream({
-      start(controller) {
-        controller.enqueue(data);
-        controller.close();
-      },
-    });
-  }
-
-  public async getObject(oid: string): Promise<ArrayBuffer | Uint8Array | null> {
-    await this.ensureAccessAndAlarm();
-    if (!isValidOid(oid)) return null;
-    // Try R2 first
-    try {
-      const obj = await this.env.REPO_BUCKET.get(r2LooseKey(this.prefix(), oid));
-      if (obj) return new Uint8Array(await obj.arrayBuffer());
-    } catch {}
-    // Fallback to DO storage
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const data = await store.get(objKey(oid));
-    return data || null;
-  }
-
-  public async hasLoose(oid: string): Promise<boolean> {
-    await this.ensureAccessAndAlarm();
-    if (!isValidOid(oid)) return false;
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const data = await store.get(objKey(oid));
-    if (data) return true;
-    try {
-      const head = await this.env.REPO_BUCKET.head(r2LooseKey(this.prefix(), oid));
-      return !!head;
-    } catch {}
-    return false;
-  }
-
-  /**
-   * Batch membership check for loose objects. Returns an array of booleans aligned with input OIDs.
-   * Uses small concurrency for R2 HEADs; DO storage checks are performed directly.
-   */
-  public async hasLooseBatch(oids: string[]): Promise<boolean[]> {
-    await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const prefix = this.prefix();
-    const env = this.env;
-
-    // Short-circuit using recent pack membership to avoid R2 HEADs
-    // Build a small set of OIDs from the newest packs we know about.
-    const packSet = new Set<string>();
-    try {
-      const last = ((await store.get("lastPackOids")) || []) as string[];
-      for (const x of last) packSet.add(x.toLowerCase());
-      // Include a couple more recent packs if available
-      const list = (((await store.get("packList")) || []) as string[]).slice(0, 2);
-      for (const k of list) {
-        try {
-          const arr = ((await store.get(packOidsKey(k))) || []) as string[];
-          for (const x of arr) packSet.add(x.toLowerCase());
-        } catch {}
-      }
-    } catch {}
-
-    const checkOne = async (oid: string): Promise<boolean> => {
-      if (!isValidOid(oid)) return false;
-      // 1) Fast-path: known to be present in a recent pack
-      if (packSet.size > 0 && packSet.has(oid.toLowerCase())) return true;
-      // 2) DO state (loose) lookup
-      const data = await store.get(objKey(oid));
-      if (data) return true;
-      try {
-        // 3) R2 loose HEAD fallback
-        const head = await env.REPO_BUCKET.head(r2LooseKey(prefix, oid));
-        return !!head;
-      } catch {
-        return false;
-      }
-    };
-
-    const MAX = 16;
-    const out: boolean[] = [];
-    for (let i = 0; i < oids.length; i += MAX) {
-      const part = oids.slice(i, i + MAX);
-      const res = await Promise.all(part.map((oid) => checkOne(oid)));
-      out.push(...res);
-    }
-    return out;
-  }
-
-  public async getPackLatest(): Promise<{ key: string; oids: string[] } | null> {
-    await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const key = await store.get("lastPackKey");
-    if (!key) return null;
-    const oids = ((await store.get("lastPackOids")) || []).slice(0, 10000);
-    return { key, oids };
-  }
-
-  public async getPacks(): Promise<string[]> {
-    await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const list = ((await store.get("packList")) || []).slice(0, 20);
-    return list;
-  }
-
-  public async getPackOids(key: string): Promise<string[]> {
-    await this.ensureAccessAndAlarm();
-    if (!key) return [];
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const oids = (await store.get(packOidsKey(key))) || [];
-    return oids;
-  }
-
-  /**
-   * Batch API: Retrieve OID membership arrays for multiple pack keys in one call.
-   * Uses DurableObjectStorage.get([...]) to reduce roundtrips and total subrequests.
-   * @param keys - Pack keys to fetch membership for
-   * @returns Map of pack key -> string[] of OIDs (empty array if missing)
-   */
-  public async getPackOidsBatch(keys: string[]): Promise<Map<string, string[]>> {
-    await this.ensureAccessAndAlarm();
-    const out = new Map<string, string[]>();
-    try {
-      if (!Array.isArray(keys) || keys.length === 0) return out;
-      // Clamp batch size to a reasonable number to avoid large payloads
-      const BATCH = 128;
-      for (let i = 0; i < keys.length; i += BATCH) {
-        const part = keys.slice(i, i + BATCH);
-        const storageKeys = part.map((k) => packOidsKey(k) as unknown as string);
-        const fetched = (await this.ctx.storage.get(storageKeys)) as Map<string, unknown>;
-        for (let j = 0; j < part.length; j++) {
-          const packKey = part[j];
-          const skey = storageKeys[j];
-          const val = fetched.get(skey);
-          if (Array.isArray(val)) {
-            out.set(packKey, val as string[]);
-          } else {
-            out.set(packKey, []);
-          }
-        }
-      }
-    } catch (e) {
-      try {
-        this.logger.debug("getPackOidsBatch:error", { error: String(e), count: keys?.length || 0 });
-      } catch {}
-    }
-    return out;
-  }
-
-  public async getUnpackProgress(): Promise<UnpackProgress> {
-    await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const work = await store.get("unpackWork");
-    const nextKey = await store.get("unpackNext");
-    if (!work) return { unpacking: false, queuedCount: nextKey ? 1 : 0 } as UnpackProgress;
-    return {
-      unpacking: true,
-      processed: work.processedCount,
-      total: work.oids.length,
-      percent: Math.round((work.processedCount / work.oids.length) * 100),
-      currentPackKey: work.packKey,
-      queuedCount: nextKey ? 1 : 0,
-    } as UnpackProgress;
-  }
-
-  public async debugState(): Promise<{
-    meta: { doId: string; prefix: string };
-    head?: Head;
-    refsCount: number;
-    refs: { name: string; oid: string }[];
-    lastPackKey: string | null;
-    lastPackOidsCount: number;
-    packListCount: number;
-    packList: string[];
-    packStats?: Array<{
-      key: string;
-      packSize?: number;
-      hasIndex: boolean;
-      indexSize?: number;
-    }>;
-    unpackWork: UnpackWork | null;
-    unpackNext: string | null;
-    looseSample: string[];
-    hydration?: {
-      running: boolean;
-      stage?: string;
-      segmentSeq?: number;
-      queued: number;
-      needBasesCount?: number;
-      needLooseCount?: number;
-      packIndex?: number;
-      objCursor?: number;
-      workId?: string;
-      startedAt?: number;
-      producedBytes?: number;
-      windowCount?: number;
-      window?: string[];
-      needBasesSample?: string[];
-      needLooseSample?: string[];
-      error?: {
-        message?: string;
-        fatal?: boolean;
-        retryCount?: number;
-        firstErrorAt?: number;
-      };
-      queueReasons?: ("post-unpack" | "admin")[];
-    };
-  }> {
-    await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const refs = (await store.get("refs")) ?? [];
-    const head = await store.get("head");
-    const lastPackKey = await store.get("lastPackKey");
-    const lastPackOids = (await store.get("lastPackOids")) ?? [];
-    const packList = (await store.get("packList")) ?? [];
-    const unpackWork = await store.get("unpackWork");
-    const unpackNext = await store.get("unpackNext");
-    const hydrationWork = (await store.get("hydrationWork")) as any;
-    const hydrationQueue = ((await store.get("hydrationQueue")) as any) || [];
-
-    const looseSample: string[] = [];
-    try {
-      const it = await this.ctx.storage.list({ prefix: "obj:", limit: 10 });
-      for (const k of it.keys()) looseSample.push(String(k).slice(4));
-    } catch {}
-
-    // Gather pack statistics
-    const packStats: Array<{
-      key: string;
-      packSize?: number;
-      hasIndex: boolean;
-      indexSize?: number;
-    }> = [];
-
-    for (const packKey of packList.slice(0, 20)) {
-      // Limit to first 20 packs for performance
-      try {
-        const packStat: {
-          key: string;
-          packSize?: number;
-          hasIndex: boolean;
-          indexSize?: number;
-        } = {
-          key: packKey,
-          hasIndex: false,
-        };
-
-        // Get pack file size from R2
-        try {
-          const packHead = await this.env.REPO_BUCKET.head(packKey);
-          if (packHead) {
-            packStat.packSize = packHead.size;
-          }
-        } catch {}
-
-        // Check if index exists and get its size
-        const indexKey = packIndexKey(packKey);
-        try {
-          const indexHead = await this.env.REPO_BUCKET.head(indexKey);
-          if (indexHead) {
-            packStat.hasIndex = true;
-            packStat.indexSize = indexHead.size;
-          }
-        } catch {}
-
-        packStats.push(packStat);
-      } catch {}
-    }
-
-    return {
-      meta: { doId: this.ctx.id.toString(), prefix: this.prefix() },
-      head,
-      refsCount: refs.length,
-      refs: refs.slice(0, 20),
-      lastPackKey: lastPackKey || null,
-      lastPackOidsCount: lastPackOids.length,
-      packListCount: packList.length,
-      packList,
-      packStats: packStats.length > 0 ? packStats : undefined,
-      unpackWork: unpackWork || null,
-      unpackNext: unpackNext || null,
-      looseSample,
-      hydration: {
-        running: !!hydrationWork,
-        stage: hydrationWork?.stage,
-        segmentSeq: hydrationWork?.progress?.segmentSeq,
-        queued: Array.isArray(hydrationQueue) ? hydrationQueue.length : 0,
-        needBasesCount: Array.isArray(hydrationWork?.pending?.needBases)
-          ? hydrationWork.pending.needBases.length
-          : undefined,
-        needLooseCount: Array.isArray(hydrationWork?.pending?.needLoose)
-          ? hydrationWork.pending.needLoose.length
-          : undefined,
-        packIndex: hydrationWork?.progress?.packIndex,
-        objCursor: hydrationWork?.progress?.objCursor,
-        workId: hydrationWork?.workId,
-        startedAt: hydrationWork?.startedAt,
-        producedBytes: hydrationWork?.progress?.producedBytes,
-        windowCount: Array.isArray(hydrationWork?.snapshot?.window)
-          ? hydrationWork.snapshot.window.length
-          : undefined,
-        window: Array.isArray(hydrationWork?.snapshot?.window)
-          ? hydrationWork.snapshot.window.slice(0, 6)
-          : undefined,
-        needBasesSample: Array.isArray(hydrationWork?.pending?.needBases)
-          ? hydrationWork.pending.needBases.slice(0, 10)
-          : undefined,
-        needLooseSample: Array.isArray(hydrationWork?.pending?.needLoose)
-          ? hydrationWork.pending.needLoose.slice(0, 10)
-          : undefined,
-        error: hydrationWork?.error
-          ? {
-              message: hydrationWork.error.message,
-              fatal: hydrationWork.error.fatal,
-              retryCount: hydrationWork.error.retryCount,
-              firstErrorAt: hydrationWork.error.firstErrorAt,
-            }
-          : undefined,
-        queueReasons: Array.isArray(hydrationQueue)
-          ? hydrationQueue.map((q: any) => q?.reason)
-          : [],
-      },
-    };
-  }
-
-  public async debugCheckCommit(commit: string): Promise<{
-    commit: { oid: string; parents: string[]; tree?: string };
-    presence: { hasLooseCommit: boolean; hasLooseTree: boolean; hasR2LooseTree: boolean };
-    membership: Record<string, { hasCommit: boolean; hasTree: boolean }>;
-  }> {
-    await this.ensureAccessAndAlarm();
-    const q = (commit || "").toLowerCase();
-    if (!isValidOid(q)) {
-      throw new Error("Invalid commit");
-    }
-
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const packList = (await store.get("packList")) ?? [];
-    const membership: Record<string, { hasCommit: boolean; hasTree: boolean }> = {};
-    for (const key of packList) {
-      try {
-        const oids = (await store.get(packOidsKey(key))) ?? [];
-        const set = new Set(oids.map((x) => x.toLowerCase()));
-        membership[key] = { hasCommit: set.has(q), hasTree: false };
-      } catch {}
-    }
-
-    let tree: string | undefined = undefined;
-    let parents: string[] = [];
-    try {
-      const info = await this.readCommitFromStore(q);
-      if (info) {
-        tree = info.tree.toLowerCase();
-        parents = info.parents;
-      }
-    } catch {}
-
-    const hasLooseCommit = !!(await this.ctx.storage.get(objKey(q)));
-    let hasLooseTree = false;
-    let hasR2LooseTree = false;
-    if (tree) {
-      hasLooseTree = !!(await this.ctx.storage.get(objKey(tree)));
-      try {
-        const head = await this.env.REPO_BUCKET.head(r2LooseKey(this.prefix(), tree));
-        hasR2LooseTree = !!head;
-      } catch {}
-      for (const key of Object.keys(membership)) {
-        try {
-          const oids = (await store.get(packOidsKey(key))) ?? [];
-          const set = new Set(oids.map((x) => x.toLowerCase()));
-          membership[key].hasTree = !!tree && set.has(tree);
-        } catch {}
-      }
-    }
-
-    return {
-      commit: { oid: q, parents, tree },
-      presence: { hasLooseCommit, hasLooseTree, hasR2LooseTree },
-      membership,
-    };
-  }
-
-  /**
-   * Debug: Check if an OID exists in various storage locations
-   * @param oid - The object ID to check
-   */
-  public async debugCheckOid(oid: string): Promise<{
-    oid: string;
-    presence: {
-      hasLoose: boolean;
-      hasR2Loose: boolean;
-    };
-    inPacks: string[];
-  }> {
-    await this.ensureAccessAndAlarm();
-    if (!isValidOid(oid)) {
-      throw new Error(`Invalid OID: ${oid}`);
-    }
-
-    // Check DO loose storage
-    const hasLoose = !!(await this.ctx.storage.get(objKey(oid)));
-
-    // Check R2 loose storage
-    let hasR2Loose = false;
-    try {
-      const head = await this.env.REPO_BUCKET.head(r2LooseKey(this.prefix(), oid));
-      hasR2Loose = !!head;
-    } catch {}
-
-    // Check which packs contain this OID
-    const inPacks: string[] = [];
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const packList = (await store.get("packList")) || [];
-
-    // Check each pack's OID list
-    for (const packKey of packList) {
-      try {
-        const packOids = (await store.get(packOidsKey(packKey))) || [];
-        if (packOids.includes(oid)) {
-          inPacks.push(packKey);
-        }
-      } catch {}
-    }
-
-    return {
-      oid,
-      presence: {
-        hasLoose,
-        hasR2Loose,
-      },
-      inPacks,
-    };
-  }
-
-  /**
-   * Batch API: Get multiple objects at once to reduce subrequest count.
-   * Returns a Map of OID to compressed data (with Git header).
-   * @param oids - Array of object IDs to fetch
-   * @returns Map of OID to data, with null for missing objects
-   */
-  public async getObjectsBatch(oids: string[]): Promise<Map<string, Uint8Array | null>> {
-    await this.ensureAccessAndAlarm();
-    const result = new Map<string, Uint8Array | null>();
-
-    // Batch size to avoid memory issues while maximizing throughput
-    const BATCH_SIZE = 256;
-
-    for (let i = 0; i < oids.length; i += BATCH_SIZE) {
-      const batch = oids.slice(i, i + BATCH_SIZE);
-      // Use Durable Object storage.get(array) to fetch many keys at once
-      const keys = batch.map((oid) => objKey(oid) as unknown as string);
-      const fetched = (await this.ctx.storage.get(keys)) as Map<
-        string,
-        Uint8Array | ArrayBuffer | undefined
-      >;
-      for (const oid of batch) {
-        const key = objKey(oid) as unknown as string;
-        const data = fetched.get(key);
-        if (data) {
-          const uint8Data = data instanceof Uint8Array ? data : new Uint8Array(data);
-          result.set(oid, uint8Data);
-        } else {
-          // Do NOT fetch from R2 here to avoid subrequest bursts inside the DO invocation.
-          // Return null for DO-missing objects; the Worker will perform pack-based retrieval
-          // with better reuse and per-request memoization.
-          result.set(oid, null);
-        }
-      }
-    }
-    return result;
-  }
-
-  /**
-   * Batch API: Extract object references (for commits and trees) without full parsing.
-   * @param oids - Array of object IDs to get references for
-   * @returns Map of OID to array of referenced OIDs
-   */
-  public async getObjectRefsBatch(oids: string[]): Promise<Map<string, string[]>> {
-    await this.ensureAccessAndAlarm();
-    const result = new Map<string, string[]>();
-
-    const objects = await this.getObjectsBatch(oids);
-
-    for (const [oid, data] of objects) {
-      if (!data) {
-        result.set(oid, []);
-        continue;
-      }
-
-      try {
-        const parsed = await inflateAndParseHeader(data);
-        if (!parsed) {
-          result.set(oid, []);
-          continue;
-        }
-        const { type, payload } = parsed;
-        const refs: string[] = [];
-        if (type === "commit") {
-          const { tree, parents } = parseCommitRefs(payload);
-          if (tree) refs.push(tree);
-          for (const p of parents) refs.push(p);
-        } else if (type === "tree") {
-          for (const child of parseTreeChildOids(payload)) refs.push(child);
-        }
-        result.set(oid, refs);
-      } catch (e) {
-        this.logger.debug("getObjectRefsBatch:parse-error", { oid, error: String(e) });
-        result.set(oid, []);
-      }
-    }
-
-    return result;
   }
 
   /**
@@ -739,648 +371,11 @@ export class RepoDurableObject extends DurableObject {
   public async putLooseObject(oid: string, zdata: Uint8Array): Promise<void> {
     await this.ensureAccessAndAlarm();
     if (!isValidOid(oid)) throw new Error("Bad oid");
-    await this.storeObject(oid, zdata);
-  }
-
-  // --- Alarm-based tasks ---
-  // Combines three responsibilities:
-  // 1) Unpack work: Process pending pack objects in chunks to avoid blocking
-  // 2) Idle cleanup: If the DO remains idle beyond IDLE_MS and appears empty/unused, purge storage and R2 mirror.
-  // 3) Maintenance: Periodically prune stale packs and metadata even for active repos.
-  async alarm(): Promise<void> {
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    this.logger.debug("alarm:start", {});
-
-    // Priority 1: Handle pending unpack work
-    if (await this.handleUnpackWork(store)) {
-      return; // Exit early to let unpack continue
-    }
-
-    // Priority 2: Hydration work (resumable, time-sliced)
-    if (await this.handleHydrationWork(store)) {
-      return; // Exit early; hydration requested another slice soon
-    }
-
-    // Priority 3: Check for idle cleanup or maintenance needs
-    await this.handleIdleAndMaintenance(store);
-
-    this.logger.debug("alarm:end", {});
-  }
-
-  /**
-   * Processes pending unpack work from the queue.
-   * @param store - The typed storage instance
-   * @returns true if unpack work was found and processed, false otherwise
-   */
-  private async handleUnpackWork(
-    store: ReturnType<typeof asTypedStorage<RepoStateSchema>>
-  ): Promise<boolean> {
-    const unpackWork = await store.get("unpackWork");
-    if (!unpackWork) return false;
-
-    try {
-      await this.processUnpackChunk(unpackWork);
-    } catch (e) {
-      this.logger.error("alarm:process-unpack-error", { error: String(e) });
-      // Best-effort reschedule so we don't get stuck
-      await scheduleAlarmIfSooner(this.ctx, this.env, Date.now() + 1000);
-    }
-    return true;
-  }
-
-  /**
-   * Handles idle cleanup and periodic maintenance tasks.
-   * Checks if the repository should be cleaned up due to idleness,
-   * and performs periodic maintenance (pack pruning) if due.
-   * @param store - The typed storage instance
-   */
-  private async handleIdleAndMaintenance(
-    store: ReturnType<typeof asTypedStorage<RepoStateSchema>>
-  ): Promise<void> {
-    try {
-      const cfg = getConfig(this.env);
-      const now = Date.now();
-      const lastAccess = await store.get("lastAccessMs");
-      const lastMaint = await store.get("lastMaintenanceMs");
-
-      // Check if idle cleanup is needed
-      if (await this.shouldCleanupIdle(store, cfg.idleMs, lastAccess)) {
-        await this.performIdleCleanup();
-        return;
-      }
-
-      // Check if maintenance is due
-      if (this.isMaintenanceDue(lastMaint, now, cfg.maintMs)) {
-        await this.performMaintenance(store, cfg.keepPacks, now);
-      }
-
-      // Schedule next alarm via unified scheduler
-      await ensureScheduled(this.ctx, this.env, now);
-    } catch (e) {
-      this.logger.error("alarm:error", { error: String(e) });
-    }
-  }
-
-  /**
-   * Determines if the repository should be cleaned up due to idleness.
-   * A repo is considered for cleanup if it's been idle beyond the threshold
-   * AND appears empty (no refs, unborn/missing HEAD, no packs).
-   * @param store - The typed storage instance
-   * @param idleMs - Idle threshold in milliseconds
-   * @param lastAccess - Last access timestamp
-   * @returns true if cleanup should proceed
-   */
-  private async shouldCleanupIdle(
-    store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
-    idleMs: number,
-    lastAccess: number | undefined
-  ): Promise<boolean> {
-    const now = Date.now();
-    const idleExceeded = !lastAccess || now - lastAccess >= idleMs;
-    if (!idleExceeded) return false;
-
-    // Check if repo looks empty
-    const refs = (await store.get("refs")) ?? [];
-    const head = await store.get("head");
-    const lastPackKey = await store.get("lastPackKey");
-
-    return refs.length === 0 && (!head || head.unborn || !head.target) && !lastPackKey;
-  }
-
-  /**
-   * Performs complete cleanup of an idle repository.
-   * Deletes all DO storage and purges the R2 mirror.
-   */
-  private async performIdleCleanup(): Promise<void> {
-    const storage = this.ctx.storage;
-
-    // Purge DO storage
-    try {
-      await storage.deleteAll();
-    } catch (e) {
-      this.logger.error("cleanup:delete-storage-failed", { error: String(e) });
-    }
-
-    // Purge R2 mirror
-    await this.purgeR2Mirror();
-
-    // Clear the alarm after cleanup
-    try {
-      await storage.deleteAlarm();
-    } catch (e) {
-      this.logger.warn("cleanup:delete-alarm-failed", { error: String(e) });
-    }
-  }
-
-  /**
-   * Purges all R2 objects under this DO's prefix.
-   * Continues even if individual deletes fail.
-   */
-  private async purgeR2Mirror(): Promise<void> {
-    try {
-      const prefix = this.prefix();
-      const pfx = `${prefix}/`;
-      let cursor: string | undefined = undefined;
-
-      do {
-        const res: R2Objects = await this.env.REPO_BUCKET.list({ prefix: pfx, cursor });
-        const objects: R2Object[] = (res && res.objects) || [];
-
-        for (const obj of objects) {
-          try {
-            await this.env.REPO_BUCKET.delete(obj.key);
-          } catch (e) {
-            this.logger.warn("cleanup:delete-r2-object-failed", {
-              key: obj.key,
-              error: String(e),
-            });
-          }
-        }
-
-        cursor = res.truncated ? res.cursor : undefined;
-      } while (cursor);
-    } catch (e) {
-      this.logger.error("cleanup:purge-r2-failed", { error: String(e) });
-    }
-  }
-
-  private isMaintenanceDue(lastMaint: number | undefined, now: number, maintMs: number): boolean {
-    return !lastMaint || now - lastMaint >= maintMs;
-  }
-
-  private async performMaintenance(
-    store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
-    keepPacks: number,
-    now: number
-  ): Promise<void> {
-    try {
-      // Deletes older packs beyond the keep-window from both DO metadata and R2,
-      // and keeps `lastPackKey/lastPackOids` consistent.
-      await this.runMaintenance(keepPacks);
-      await store.put("lastMaintenanceMs", now);
-    } catch (e) {
-      this.logger.error("maintenance:failed", { error: String(e) });
-    }
-  }
-
-  private async touchAndMaybeSchedule(): Promise<void> {
-    const cfg = getConfig(this.env);
-    const now = Date.now();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-
-    // Update last access time with throttling (max once per 60s)
-    try {
-      if (!this.lastAccessMemMs || now - this.lastAccessMemMs >= 60_000) {
-        await store.put("lastAccessMs", now);
-        this.lastAccessMemMs = now;
-      }
-    } catch {}
-
-    await ensureScheduled(this.ctx, this.env, now);
-  }
-
-  /**
-   * Safe wrapper around touchAndMaybeSchedule() for RPC and internal entrypoints.
-   * Ensures last access time is updated and an alarm is scheduled without
-   * forcing every method to duplicate try/catch.
-   */
-  private async ensureAccessAndAlarm(): Promise<void> {
-    try {
-      await this.touchAndMaybeSchedule();
-    } catch (e) {
-      try {
-        this.logger.warn("touch:schedule:failed", { error: String(e) });
-      } catch {}
-    }
-  }
-
-  // Read and parse a commit object directly from DO storage (fallback to R2 if needed)
-  private async readCommitFromStore(oid: string): Promise<{
-    oid: string;
-    tree: string;
-    parents: string[];
-    author?: { name: string; email: string; when: number; tz: string };
-    committer?: { name: string; email: string; when: number; tz: string };
-    message: string;
-  } | null> {
-    // Prefer DO-stored loose object to avoid R2/HTTP hops
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    let data = await store.get(objKey(oid));
-
-    if (!data) {
-      // Fallback: try R2-stored loose copy
-      try {
-        const obj = await this.env.REPO_BUCKET.get(r2LooseKey(this.prefix(), oid));
-        if (obj) data = await obj.arrayBuffer();
-      } catch {}
-    }
-    if (!data) return null;
-
-    const z = data instanceof ArrayBuffer ? new Uint8Array(data) : data;
-    // Decompress (zlib/deflate) and parse git header
-    const ds = createInflateStream();
-    const stream = new Blob([z]).stream().pipeThrough(ds);
-    const raw = new Uint8Array(await new Response(stream).arrayBuffer());
-    // header: <type> <len>\0
-    let p = 0;
-    let sp = p;
-    while (sp < raw.length && raw[sp] !== 0x20) sp++;
-    const type = new TextDecoder().decode(raw.subarray(p, sp));
-    if (type !== "commit") return null;
-    let nul = sp + 1;
-    while (nul < raw.length && raw[nul] !== 0x00) nul++;
-    const payload = raw.subarray(nul + 1);
-    const text = new TextDecoder().decode(payload);
-
-    const parsed = parseCommitText(text);
-    return { oid, ...parsed };
-  }
-
-  /**
-   * Retrieves all refs from storage.
-   * @returns Array of ref objects with name and oid, or empty array if none exist
-   */
-  private async getRefs(): Promise<{ name: string; oid: string }[]> {
-    await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    return (await store.get("refs")) ?? [];
-  }
-
-  /**
-   * Resolves the current HEAD state by looking up the target ref.
-   * @returns The resolved HEAD object with target and either oid or unborn flag
-   */
-  private async resolveHead(): Promise<Head> {
-    await this.ensureAccessAndAlarm();
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const stored = await store.get("head");
-    const refs = await this.getRefs();
-
-    // Determine target (default to main)
-    const target = stored?.target || "refs/heads/main";
-    const match = refs.find((r) => r.name === target);
-    const resolved = match
-      ? ({ target, oid: match.oid } as Head)
-      : ({ target, unborn: true } as Head);
-
-    // Persist resolved head only if it changed
-    await this.updateHeadIfChanged(store, stored, resolved);
-
-    return resolved;
-  }
-
-  /**
-   * Updates HEAD in storage only if the resolved value differs semantically.
-   * Handles normalization of legacy HEAD shapes (e.g., both oid and unborn present).
-   * @param store - The typed storage instance
-   * @param stored - The currently stored HEAD value
-   * @param resolved - The newly resolved HEAD value
-   */
-  private async updateHeadIfChanged(
-    store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
-    stored: Head | undefined,
-    resolved: Head
-  ): Promise<void> {
-    try {
-      const storedOid = stored?.oid ?? undefined;
-      const resolvedOid = resolved.oid ?? undefined;
-      const sameTarget = !!stored && stored.target === resolved.target;
-      const sameOid = storedOid === resolvedOid;
-      const sameUnborn =
-        storedOid || resolvedOid ? true : (stored?.unborn === true) === (resolved.unborn === true);
-      const same = !!stored && sameTarget && sameOid && sameUnborn;
-
-      if (!same) {
-        await store.put("head", resolved);
-      }
-    } catch {}
+    await storeObject(this.ctx, this.env, this.prefix(), oid, zdata);
   }
 
   public async getObjectSize(oid: string): Promise<number | null> {
     await this.ensureAccessAndAlarm();
-    const prefix = this.prefix();
-    const r2key = r2LooseKey(prefix, oid);
-
-    // Try R2 first
-    try {
-      const obj = await this.env.REPO_BUCKET.head(r2key);
-      if (obj) return obj.size;
-    } catch {}
-
-    // Fallback to DO storage
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const data = await store.get(objKey(oid));
-
-    if (!data) return null;
-    return data.byteLength;
-  }
-
-  private async storeObject(oid: string, bytes: Uint8Array): Promise<void> {
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-
-    // Store in DO storage
-    await store.put(objKey(oid), bytes);
-
-    // Best-effort mirror to R2
-    await this.mirrorObjectToR2(oid, bytes);
-  }
-
-  private async mirrorObjectToR2(oid: string, bytes: Uint8Array): Promise<void> {
-    const r2key = r2LooseKey(this.prefix(), oid);
-    try {
-      // Mirrors the compressed loose object to R2 for low-latency reads.
-      // We do not fail the write if mirroring fails; DO storage remains the
-      // source of truth and R2 will be filled by subsequent writes.
-      await this.env.REPO_BUCKET.put(r2key, bytes);
-    } catch {}
-  }
-
-  private async handleReceive(request: Request) {
-    // Delegate to extracted implementation for clarity and testability.
-    this.logger.info("receive:start", {});
-    // Pre-body guard: block when current unpack is running and a next pack is already queued
-    try {
-      const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-      const work = await store.get("unpackWork");
-      const next = await store.get("unpackNext");
-      if (work && next) {
-        this.logger.warn("receive:block-busy", { retryAfter: 10 });
-        return new Response("Repository is busy unpacking; please retry shortly.\n", {
-          status: 503,
-          headers: {
-            "Retry-After": "10",
-            "Content-Type": "text/plain; charset=utf-8",
-          },
-        });
-      }
-    } catch {}
-    const res = await receivePack(this.ctx, this.env, this.prefix(), request);
-    this.logger.info("receive:end", { status: res.status });
-    return res;
-  }
-
-  private prefix() {
-    // Tests and R2 layout expect Durable Object data under the 'do/<id>' prefix
-    return doPrefix(this.ctx.id.toString());
-  }
-
-  private get logger() {
-    return createLogger(this.env.LOG_LEVEL, {
-      service: "RepoDO",
-      doId: this.ctx.id.toString(),
-    });
-  }
-
-  private async runMaintenance(keepPacks: number) {
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    // Ensure packList exists
-    const packList = (await store.get("packList")) ?? [];
-    if (packList.length === 0) return;
-    // Determine which packs to keep.
-    // packList is maintained newest-first (most recent at index 0), so keep the first N.
-    const keep = packList.slice(0, keepPacks);
-    const keepSet = new Set(keep);
-    const removed = packList.filter((k) => !keepSet.has(k));
-    const newList = packList.filter((k) => keepSet.has(k));
-    // Trim packList in storage while preserving additional kept keys
-    if (removed.length > 0) await store.put("packList", newList);
-    // Adjust lastPackKey/lastPackOids if needed
-    const lastPackKey = await store.get("lastPackKey");
-    if (!lastPackKey || !keepSet.has(lastPackKey)) {
-      // Choose the newest kept pack as the latest reference
-      const newest = keep[0];
-      if (newest) {
-        await store.put("lastPackKey", newest);
-        const oids = ((await store.get("lastPackOids")) || []).slice(0, 10000);
-        // Try to load oids for the newest from packOids:<key> if present
-        const alt = await store.get(packOidsKey(newest));
-        await store.put("lastPackOids", alt ?? oids);
-      } else {
-        // No packs remain
-        await store.delete("lastPackKey");
-        await store.delete("lastPackOids");
-      }
-    }
-    // Delete packOids entries for removed packs
-    for (const k of removed) {
-      try {
-        await this.ctx.storage.delete(packOidsKey(k));
-      } catch (e) {
-        this.logger.warn("maintenance:delete-packOids-failed", { key: k, error: String(e) });
-      }
-    }
-    // Proactively delete removed packs (.pack and .idx) by base key
-    for (const base of removed) {
-      try {
-        await this.env.REPO_BUCKET.delete(base);
-      } catch {}
-      try {
-        await this.env.REPO_BUCKET.delete(packIndexKey(base));
-      } catch {}
-    }
-    // Sweep R2 pack files not in keep set
-    try {
-      const prefix = this.prefix();
-      const pfx = r2PackDirPrefix(prefix);
-      let cursor: string | undefined = undefined;
-      const packKeys: string[] = [];
-      do {
-        const res: any = await this.env.REPO_BUCKET.list({ prefix: pfx, cursor });
-        const objects: any[] = (res && res.objects) || [];
-        for (const obj of objects) {
-          const key: string = obj.key;
-          if (isPackKey(key)) packKeys.push(key);
-        }
-        cursor = res && res.truncated ? res.cursor : undefined;
-      } while (cursor);
-      for (const packKey of packKeys) {
-        if (!keepSet.has(packKey)) {
-          try {
-            await this.env.REPO_BUCKET.delete(packKey);
-          } catch {}
-          try {
-            await this.env.REPO_BUCKET.delete(packIndexKey(packKey));
-          } catch {}
-        }
-      }
-    } catch {}
-  }
-
-  private async processUnpackChunk(work: UnpackWork): Promise<void> {
-    const packBytes = await this.loadPackBytes(work.packKey);
-    if (!packBytes) {
-      await this.abortUnpackWork(work.packKey);
-      return;
-    }
-
-    const result = await this.processUnpackBatch(work, packBytes);
-    await this.updateUnpackProgress(work, result);
-  }
-
-  private async loadPackBytes(packKey: string): Promise<Uint8Array | null> {
-    const packObj = await this.env.REPO_BUCKET.get(packKey);
-    if (!packObj) {
-      this.logger.warn("unpack:pack-missing", { packKey });
-      return null;
-    }
-    return new Uint8Array(await packObj.arrayBuffer());
-  }
-
-  private async abortUnpackWork(packKey: string): Promise<void> {
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    await store.delete("unpackWork");
-  }
-
-  private async processUnpackBatch(
-    work: UnpackWork,
-    packBytes: Uint8Array
-  ): Promise<{ processed: number; processedInRun: number; exceededBudget: boolean }> {
-    const cfg = getConfig(this.env);
-    const startTime = Date.now();
-    let processed = work.processedCount;
-    let processedInRunTotal = 0;
-    let loops = 0;
-    let exceededBudget = false;
-
-    this.logger.debug("unpack:begin", {
-      packKey: work.packKey,
-      processed,
-      total: work.oids.length,
-      budgetMs: cfg.unpackMaxMs,
-    });
-
-    while (processed < work.oids.length && !this.isTimeExceeded(startTime, cfg.unpackMaxMs)) {
-      const oidsToProcess = work.oids.slice(processed, processed + cfg.unpackChunkSize);
-      if (oidsToProcess.length === 0) break;
-
-      this.logger.debug("unpack:chunk", {
-        packKey: work.packKey,
-        from: processed,
-        to: processed + oidsToProcess.length,
-        total: work.oids.length,
-        loop: loops,
-      });
-
-      const processedInRun = await this.unpackChunk(packBytes, work.packKey, oidsToProcess);
-      if (processedInRun === 0) break;
-
-      processed += processedInRun;
-      processedInRunTotal += processedInRun;
-      loops++;
-
-      this.logger.debug("unpack:chunk-result", {
-        packKey: work.packKey,
-        processedInRun,
-        processed,
-        total: work.oids.length,
-      });
-    }
-
-    if (this.isTimeExceeded(startTime, cfg.unpackMaxMs)) {
-      exceededBudget = true;
-      this.logger.debug("unpack:budget-exceeded", {
-        packKey: work.packKey,
-        timeMs: Date.now() - startTime,
-        processed,
-        total: work.oids.length,
-        loops,
-      });
-    }
-
-    return { processed, processedInRun: processedInRunTotal, exceededBudget };
-  }
-
-  private isTimeExceeded(startTime: number, maxDuration: number): boolean {
-    return Date.now() - startTime >= maxDuration;
-  }
-
-  private async unpackChunk(
-    packBytes: Uint8Array,
-    packKey: string,
-    oids: string[]
-  ): Promise<number> {
-    try {
-      return await unpackOidsChunkFromPackBytes(
-        packBytes,
-        this.ctx,
-        this.env,
-        this.prefix(),
-        packKey,
-        oids
-      );
-    } catch (e) {
-      this.logger.error("unpack:chunk-error", { error: String(e), packKey });
-      return 0;
-    }
-  }
-
-  private async updateUnpackProgress(
-    work: UnpackWork,
-    result: { processed: number; processedInRun: number; exceededBudget: boolean }
-  ): Promise<void> {
-    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
-    const cfg = getConfig(this.env);
-
-    if (result.processed >= work.oids.length) {
-      // Done unpacking current pack
-      await store.delete("unpackWork");
-      this.logger.info("unpack:done", { packKey: work.packKey, total: work.oids.length });
-
-      // If a next pack is queued, promote it and continue without clearing status
-      const nextKey = await store.get("unpackNext");
-      if (nextKey) {
-        const nextOids = (await store.get(packOidsKey(nextKey))) ?? [];
-        if (nextOids.length > 0) {
-          await store.put("unpackWork", {
-            packKey: nextKey,
-            oids: nextOids,
-            processedCount: 0,
-            startedAt: Date.now(),
-          });
-          await store.delete("unpackNext");
-          // Schedule next alarm soon to continue unpacking
-          await scheduleAlarmIfSooner(this.ctx, this.env, Date.now() + cfg.unpackDelayMs);
-          this.logger.info("queue:promote-next", { packKey: nextKey, total: nextOids.length });
-          return;
-        } else {
-          // No oids recorded for next pack (unexpected); drop it
-          await store.delete("unpackNext");
-          this.logger.warn("queue:next-missing-oids", { packKey: nextKey });
-        }
-      }
-      // No queued work remains: enqueue hydration (deduped) and schedule
-      try {
-        await enqueueHydrationTask(this.ctx, this.env, { dryRun: false, reason: "post-unpack" });
-      } catch (e) {
-        this.logger.error("queue:hydration-failed", { error: String(e) });
-      }
-      await ensureScheduled(this.ctx, this.env);
-    } else {
-      // Update progress and reschedule
-      await store.put("unpackWork", {
-        ...work,
-        processedCount: result.processed,
-      });
-
-      const delay = result.processedInRun === 0 ? cfg.unpackBackoffMs : cfg.unpackDelayMs;
-      await scheduleAlarmIfSooner(this.ctx, this.env, Date.now() + delay);
-
-      const percent = Math.round((result.processed / work.oids.length) * 100);
-      this.logger.debug("unpack:progress", {
-        packKey: work.packKey,
-        processed: result.processed,
-        total: work.oids.length,
-        percent,
-        timeMs: Date.now(),
-        exceededBudget: result.exceededBudget,
-      });
-
-      this.logger.debug("unpack:reschedule", {
-        packKey: work.packKey,
-        processed: result.processed,
-        total: work.oids.length,
-        delay,
-      });
-    }
+    return await getObjectSize(this.ctx, this.env, this.prefix(), oid);
   }
 }
