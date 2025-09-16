@@ -36,9 +36,8 @@ export type HydrationWork = {
     lastPackKey: string | null;
     packList: string[];
     window?: string[];
-    // Optional cached coverage Bloom filter for recent window membership checks.
-    // Serialized form to avoid importing the BloomFilter type here.
-    coverageBloom?: { m: number; k: number; bits: string };
+    // Cached Bloom filter for coverage checks, reused across all stages and slices.
+    bloom?: { m: number; k: number; bits: string };
   };
   stage: HydrationStage;
   progress?: {

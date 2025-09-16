@@ -110,31 +110,6 @@ function buildRecentWindowKeys(
 }
 
 /**
- * Loads a coverage set of object OIDs for a given window of packs.
- * Optionally includes lastPackOids as an extra coverage cache.
- */
-async function buildCoverageForWindow(
-  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
-  window: string[],
-  includeLastPackOids = true
-): Promise<Set<string>> {
-  const covered = new Set<string>();
-  try {
-    const storageKeys = window.map((k) => packOidsKey(k));
-    const fetched = await store.get(storageKeys);
-    for (let i = 0; i < window.length; i++) {
-      const arr = fetched.get(storageKeys[i]);
-      if (Array.isArray(arr)) for (const oid of arr) covered.add(String(oid).toLowerCase());
-    }
-    if (includeLastPackOids) {
-      const last = (await store.get("lastPackOids")) || [];
-      for (const x of last.slice(0, 10000)) covered.add(String(x).toLowerCase());
-    }
-  } catch {}
-  return covered;
-}
-
-/**
  * Creates a logger for hydration work using a doId derived from the pack key/prefix.
  */
 function makeHydrationLogger(env: Env, lastPackKey?: string | null): Logger {
@@ -223,63 +198,119 @@ function buildPhysicalIndex(parsed: { oids: string[]; offsets: number[] }) {
 }
 
 /**
- * Analyze a PACK entry header and decide whether its base should be included for thickening.
+ * Analyze a PACK entry header and collect ALL bases in the delta chain for thickening.
  *
- * Note on delta chains:
- * Hydration emits "thick" packs built from DO loose objects (commit/tree/blob/tag),
- * i.e. we do NOT emit delta objects in hydration segments. Therefore, it is sufficient
- * to include the immediate base object for a delta found in source packs. We do not
- * need to resolve base-of-base chains here: when we include the base object as a full
- * loose object in the hydration segment, it breaks the chain for the dependent delta.
- * The only reason we record bases at all is to reduce cross-pack dependencies and to
- * ensure initial clones can be served from a small recent window without multi-pack
- * traversals.
+ * CRITICAL: We must resolve the FULL delta chain, not just immediate bases.
+ * The hydration system's purpose is to eliminate closure computation during initial clones.
+ * If we only include immediate bases, we still force fetch-time chain resolution.
  *
- * Heuristic: thicken by duplicating bases when they are not in the same pack (to
- * break cross-pack chains) OR when not covered by the recent window.
+ * Example: C (delta) → B (delta) → A (base)
+ * - Old behavior: Only includes B when processing C, missing A
+ * - New behavior: Includes both B and A when processing C
+ *
+ * This ensures initial clones can be served entirely from hydration packs without
+ * any delta chain traversal at fetch time.
  */
-function analyzeDeltaBaseCandidate(
+async function analyzeDeltaChain(
+  env: Env,
+  packKey: string,
   header: PackHeaderEx,
   off: number,
-  idx: { offToIdx: Map<number, number>; oids: string[]; oidsSet: Set<string> },
+  idx: { offToIdx: Map<number, number>; oids: string[]; offsets: number[]; oidsSet: Set<string> },
   coveredHas: (q: string) => boolean
-): string | undefined {
+): Promise<string[]> {
+  const chain: string[] = [];
+  const seen = new Set<string>();
+
+  // Start with the immediate base
   let baseOid: string | undefined;
-  if (header.type === PACK_TYPE_OFS_DELTA /* OFS_DELTA */) {
-    const baseOff = off - (header.baseRel || 0);
-    const baseIdx = idx.offToIdx.get(baseOff);
-    if (baseIdx !== undefined) baseOid = idx.oids[baseIdx];
-  } else if (header.type === PACK_TYPE_REF_DELTA /* REF_DELTA */) {
-    baseOid = header.baseOid;
+  let currentOff = off;
+  let currentHeader = header;
+
+  // Traverse the full delta chain
+  while (true) {
+    baseOid = undefined;
+
+    if (currentHeader.type === PACK_TYPE_OFS_DELTA) {
+      const baseOff = currentOff - (currentHeader.baseRel || 0);
+      const baseIdx = idx.offToIdx.get(baseOff);
+      if (baseIdx !== undefined) {
+        baseOid = idx.oids[baseIdx];
+        currentOff = baseOff;
+      }
+    } else if (currentHeader.type === PACK_TYPE_REF_DELTA) {
+      baseOid = currentHeader.baseOid;
+      // For REF_DELTA, we need to find the offset of the base
+      if (baseOid) {
+        const searchOid = baseOid.toLowerCase();
+        const baseIdx = idx.oids.findIndex((o) => o.toLowerCase() === searchOid);
+        if (baseIdx >= 0) {
+          currentOff = idx.offsets[baseIdx];
+        } else {
+          // Base is not in this pack, include it and stop
+          if (!coveredHas(searchOid) && !seen.has(searchOid)) {
+            chain.push(searchOid);
+          }
+          break;
+        }
+      }
+    }
+
+    if (!baseOid) break;
+
+    const q = baseOid.toLowerCase();
+
+    // Avoid infinite loops
+    if (seen.has(q)) break;
+    seen.add(q);
+
+    // If base is not in same pack or not covered, add to chain
+    if (!idx.oidsSet.has(q) || !coveredHas(q)) {
+      chain.push(q);
+      // If not in this pack, we can't continue traversing
+      if (!idx.oidsSet.has(q)) break;
+    }
+
+    // Read the base's header to continue chain traversal
+    try {
+      const nextHeader = await readPackHeaderEx(env, packKey, currentOff);
+      if (!nextHeader) break;
+
+      // If base is not a delta, we've reached the end
+      if (nextHeader.type !== PACK_TYPE_OFS_DELTA && nextHeader.type !== PACK_TYPE_REF_DELTA) {
+        break;
+      }
+
+      currentHeader = nextHeader;
+    } catch {
+      break;
+    }
   }
-  if (!baseOid) return undefined;
-  const q = baseOid.toLowerCase();
-  if (!idx.oidsSet.has(q) || !coveredHas(q)) return q;
-  return undefined;
+
+  return chain;
 }
 
 /**
- * Build or restore a Bloom filter for coverage membership of the recent window.
- * The filter is serialized onto work.snapshot.coverageBloom to be reused across slices.
+ * Build or restore a Bloom filter for coverage checks, reused across all stages and slices.
+ * The filter is serialized onto work.snapshot.bloom to avoid rebuilding.
+ * @param buildCoverage - Function to build the coverage set when bloom is missing
  */
-async function getOrBuildCoverageBloom(
-  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
+async function getOrBuildBloom(
   work: HydrationWork,
-  window: string[],
-  includeLastPackOids = true
+  buildCoverage: () => Promise<Set<string>>
 ): Promise<BloomFilter> {
   // Restore existing bloom if present
   const snap = work.snapshot || (work.snapshot = { lastPackKey: null, packList: [], window: [] });
-  if (snap.coverageBloom) {
+  if (snap.bloom) {
     try {
-      return BloomFilter.fromJSON(snap.coverageBloom);
+      return BloomFilter.fromJSON(snap.bloom);
     } catch {}
   }
-  // Build once from window coverage set
-  const covered = await buildCoverageForWindow(store, window, includeLastPackOids);
+  // Build once from coverage set
+  const covered = await buildCoverage();
   const bloom = BloomFilter.create(Math.max(1, covered.size), 0.01);
   for (const oid of covered) bloom.add(oid);
-  snap.coverageBloom = bloom.toJSON();
+  snap.bloom = bloom.toJSON();
   return bloom;
 }
 
@@ -366,9 +397,10 @@ export async function clearHydrationState(
 function getHydrConfig(env: Env) {
   // Source common timing knobs from repo-level config for consistency
   const base = getConfig(env);
-  // Hydration window is bounded to a small, recent set of packs to keep scans fast.
-  // We cap it by packListMax and an absolute upper bound of 8.
-  const windowMax = Math.min(base.packListMax, 8);
+  // Hydration window should scan ALL packs to ensure completeness.
+  // Without scanning all packs, we miss objects in older packs that may be
+  // referenced by newer commits, leading to incomplete clones.
+  const windowMax = base.packListMax;
   return {
     unpackMaxMs: base.unpackMaxMs,
     unpackDelayMs: base.unpackDelayMs,
@@ -432,8 +464,8 @@ export async function summarizeHydrationPlan(
   // Build recent window, ensuring lastPackKey is first if present
   const window = buildRecentWindowKeys(lastPackKey, packList, cfg.windowMax);
 
-  // Coverage set from recent packs
-  const covered = await buildCoverageForWindow(store, window, true);
+  // Coverage set from hydration packs only (matches what scan/build stages use)
+  const covered = await buildHydrationCoverageSet(store, cfg);
 
   // Estimate delta base needs by sampling object headers in the window packs.
   // We keep this very lightweight: small per-pack sample, no recursion, and only
@@ -454,8 +486,21 @@ export async function summarizeHydrationPlan(
         const header = await readPackHeaderEx(env, key, off);
         if (!header) continue;
         examinedObjects++;
-        const cand = analyzeDeltaBaseCandidate(header, off, phys, (q) => covered.has(q));
-        if (cand) baseCandidates.add(cand);
+        // For dry-run, just check immediate base (full chain would be too expensive for summary)
+        let baseOid: string | undefined;
+        if (header.type === PACK_TYPE_OFS_DELTA) {
+          const baseOff = off - (header.baseRel || 0);
+          const baseIdx = phys.offToIdx.get(baseOff);
+          if (baseIdx !== undefined) baseOid = phys.oids[baseIdx];
+        } else if (header.type === PACK_TYPE_REF_DELTA) {
+          baseOid = header.baseOid;
+        }
+        if (baseOid) {
+          const q = baseOid.toLowerCase();
+          if (!phys.oidsSet.has(q) || !covered.has(q)) {
+            baseCandidates.add(q);
+          }
+        }
         count++;
       }
     }
@@ -586,9 +631,9 @@ async function handleStagePlan(
   work.pending = work.pending || { needBases: [], needLoose: [] };
   work.progress = { ...(work.progress || {}), packIndex: 0, objCursor: 0 };
 
-  // Precompute coverage Bloom for this window to avoid repeated storage reads
+  // Precompute hydration-only coverage Bloom that scan stages will reuse
   try {
-    await getOrBuildCoverageBloom(store, work, window, true);
+    await getOrBuildBloom(work, () => buildHydrationCoverageSet(store, cfg));
   } catch {}
 
   // Transition to next stage
@@ -751,8 +796,7 @@ async function scanDeltasSlice(
    *
    * Examines pack headers across a recent window to identify immediate delta bases
    * that should be thickened. Work is bounded by `cfg.unpackMaxMs` and slices of
-   * `cfg.chunk` objects per pack. The window and coverage are derived via
-   * `getHydrConfig()` and `buildCoverageForWindow()`.
+   * `cfg.chunk` objects per pack.
    */
   const cfg = getHydrConfig(env);
   const store = asTypedStorage<RepoStateSchema>(state.storage);
@@ -762,8 +806,9 @@ async function scanDeltasSlice(
   const window = work.snapshot?.window || [];
   if (!window || window.length === 0) return "next";
 
-  // Use cached coverage Bloom for membership checks
-  const bloom = await getOrBuildCoverageBloom(store, work, window, true);
+  // Use hydration-only coverage to match what build-segment uses.
+  // Cache the bloom filter across slices to avoid rebuilding it.
+  const bloom = await getOrBuildBloom(work, () => buildHydrationCoverageSet(store, cfg));
 
   const needBasesSet = new Set<string>(
     Array.isArray(work.pending?.needBases)
@@ -817,9 +862,11 @@ async function scanDeltasSlice(
         return "error";
       }
       if (!header) continue;
-      // See analyzeDeltaBaseCandidate() for the detailed thickening rationale.
-      const cand = analyzeDeltaBaseCandidate(header, off, phys, (q) => bloom.has(q));
-      if (cand) needBasesSet.add(cand);
+      // Analyze the full delta chain to ensure complete thickening
+      const chain = await analyzeDeltaChain(env, key, header, off, phys, (q: string) =>
+        bloom.has(q)
+      );
+      for (const oid of chain) needBasesSet.add(oid);
       // stop if time budget exceeded inside loop
       if (nowMs() - start >= cfg.unpackMaxMs || subreq >= SOFT_SUBREQ_LIMIT) {
         objCur = j + 1;
@@ -876,9 +923,9 @@ async function scanLooseSlice(
   const start = nowMs();
   const log = makeHydrationLogger(env, work.snapshot?.lastPackKey || "");
 
-  // Build coverage set (same as in scan-deltas)
-  const window = work.snapshot?.window || [];
-  const bloom = await getOrBuildCoverageBloom(store, work, window, true);
+  // Use hydration-only coverage to match what build-segment uses.
+  // Cache the bloom filter across slices to avoid rebuilding it.
+  const bloom = await getOrBuildBloom(work, () => buildHydrationCoverageSet(store, cfg));
 
   const needLoose = new Set<string>(
     Array.isArray(work.pending?.needLoose)
@@ -986,6 +1033,8 @@ async function buildSegmentSlice(
   // IMPORTANT: Deduplicate ONLY against existing hydration packs so we can thicken
   // across non-hydration packs when needed. This avoids skipping work when older
   // non-hydration packs are pruned or incomplete.
+  // Note: We rebuild here instead of using bloom because new hydration packs may have
+  // been created by previous segment builds in this same hydration run.
   const cfg = getHydrConfig(env);
   const covered = await buildHydrationCoverageSet(store, cfg);
 

@@ -770,14 +770,9 @@ export async function assemblePackFromMultiplePacks(
       body.set(ofsBytes, p);
       p += ofsBytes.length;
     } else if (n.type === 7) {
-      body.set(
-        hexToBytes(
-          nodeMap.get(nodeKey(n))!.base
-            ? nodeMap.get(nodeKey(n))!.base!.m.oids[nodeMap.get(nodeKey(n))!.base!.i]
-            : n.base!.m.oids[n.base!.i]
-        ),
-        p
-      );
+      // REF_DELTA: write the base OID that was properly resolved during node building
+      const baseOid = n.base!.m.oids[n.base!.i];
+      body.set(hexToBytes(baseOid), p);
       p += 20;
     }
     const k2 = nodeKey(n);

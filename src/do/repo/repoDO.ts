@@ -225,17 +225,17 @@ export class RepoDurableObject extends DurableObject {
     return await getUnpackProgress(this.ctx);
   }
 
-  public async debugState(): Promise<any> {
+  public async debugState(): Promise<ReturnType<typeof debugState>> {
     await this.ensureAccessAndAlarm();
     return await debugState(this.ctx, this.env);
   }
 
-  public async debugCheckCommit(commit: string): Promise<any> {
+  public async debugCheckCommit(commit: string): Promise<ReturnType<typeof debugCheckCommit>> {
     await this.ensureAccessAndAlarm();
     return await debugCheckCommit(this.ctx, this.env, commit);
   }
 
-  public async debugCheckOid(oid: string): Promise<any> {
+  public async debugCheckOid(oid: string): Promise<ReturnType<typeof debugCheckOid>> {
     await this.ensureAccessAndAlarm();
     return await debugCheckOid(this.ctx, this.env, oid);
   }
@@ -376,5 +376,48 @@ export class RepoDurableObject extends DurableObject {
   public async getObjectSize(oid: string): Promise<number | null> {
     await this.ensureAccessAndAlarm();
     return await getObjectSize(this.ctx, this.env, this.prefix(), oid);
+  }
+
+  /**
+   * RPC: DANGEROUS - Completely purge this repository.
+   * Deletes all R2 objects and all DO storage.
+   */
+  public async purgeRepo(): Promise<{ deletedR2: number; deletedDO: boolean }> {
+    await this.ensureAccessAndAlarm();
+    const log = createLogger(this.env.LOG_LEVEL, {
+      service: "RepoDO",
+      doId: this.ctx.id.toString(),
+    });
+
+    let deletedR2 = 0;
+    const prefix = this.prefix();
+
+    // Delete all R2 objects for this repo
+    try {
+      // List and delete all objects under do/<id>/
+      let cursor: string | undefined;
+      do {
+        const res = await this.env.REPO_BUCKET.list({ prefix, cursor });
+        const objects = res.objects || [];
+
+        if (objects.length > 0) {
+          // Delete in batches
+          const keys = objects.map((o) => o.key);
+          await this.env.REPO_BUCKET.delete(keys);
+          deletedR2 += keys.length;
+          log.info("purge:deleted-r2-batch", { count: keys.length });
+        }
+
+        cursor = res.truncated ? res.cursor : undefined;
+      } while (cursor);
+    } catch (e) {
+      log.error("purge:r2-delete-error", { error: String(e) });
+    }
+
+    // Delete all DO storage
+    await this.ctx.storage.deleteAll();
+    log.info("purge:deleted-do-storage");
+
+    return { deletedR2, deletedDO: true };
   }
 }

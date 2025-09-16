@@ -87,9 +87,7 @@ export async function getPackOidsBatch(
       }
     }
   } catch (e) {
-    try {
-      logger?.debug("getPackOidsBatch:error", { error: String(e), count: keys?.length || 0 });
-    } catch {}
+    logger?.debug("getPackOidsBatch:error", { error: String(e), count: keys?.length || 0 });
   }
   return out;
 }

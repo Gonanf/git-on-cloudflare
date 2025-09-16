@@ -52,10 +52,19 @@ async function buildUnionNeededForKeys(
   keys: string[],
   limiter: { run<T>(name: string, fn: () => Promise<T>): Promise<T> },
   cacheCtx: CacheContext | undefined,
-  log: Logger
+  log: Logger,
+  wants?: string[]
 ): Promise<string[]> {
   const MAX_UNION = 25000;
   const needSet = new Set<string>();
+
+  // Always include wants in the union to ensure they're in the assembled pack
+  if (wants) {
+    for (const w of wants) {
+      needSet.add(w.toLowerCase());
+    }
+  }
+
   let usedBatch = false;
   try {
     const batchMap = await limiter.run("do:getPackOidsBatch", async () => {
@@ -229,8 +238,8 @@ export async function handleFetchV2(
 
   const stub = getRepoStub(env, repoId);
 
-  // Initial clone fast path: avoid object-by-object closure on first fetch.
-  // Try to assemble a full pack directly from existing R2 packs.
+  // Initial clone fast path: assemble pack from hydration packs which contain full delta chains.
+  // This avoids expensive object-by-object closure computation.
   if (haves.length === 0) {
     try {
       const doId = stub.id.toString();
@@ -239,7 +248,7 @@ export async function handleFetchV2(
       if (Array.isArray(packKeys) && packKeys.length >= 2) {
         const MAX_KEYS = Math.min(packCap, packKeys.length);
         let keys = packKeys.slice(0, MAX_KEYS);
-        let unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
+        let unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log, wants);
         // Quick root-tree coverage guard: if union seems insufficient, expand to full candidate window
         if (unionNeeded.length > 0) {
           try {
@@ -255,7 +264,14 @@ export async function handleFetchV2(
               const moreKeys = packKeys.slice(0, SLICE);
               if (moreKeys.length > keys.length) {
                 keys = moreKeys;
-                unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
+                unionNeeded = await buildUnionNeededForKeys(
+                  stub,
+                  keys,
+                  limiter,
+                  cacheCtx,
+                  log,
+                  wants
+                );
               }
               log.warn("fetch:init-union-missing-roots", { missingRoots, packs: keys.length });
             }
@@ -288,7 +304,14 @@ export async function handleFetchV2(
             log
           );
           if (keys2 && keys2.length > keys.length) {
-            const union2 = await buildUnionNeededForKeys(stub, keys2, limiter, cacheCtx, log);
+            const union2 = await buildUnionNeededForKeys(
+              stub,
+              keys2,
+              limiter,
+              cacheCtx,
+              log,
+              wants
+            );
             if (union2.length > 0) {
               const mp2 = await assemblePackFromMultiplePacks(env, keys2, union2, {
                 signal,
@@ -332,7 +355,14 @@ export async function handleFetchV2(
       if (packKeys.length > 0) {
         const MAX_KEYS = Math.min(packCap, packKeys.length);
         const keys = packKeys.slice(0, MAX_KEYS);
-        const unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
+        const unionNeeded = await buildUnionNeededForKeys(
+          stub,
+          keys,
+          limiter,
+          cacheCtx,
+          log,
+          wants
+        );
         if (keys.length >= 2 && unionNeeded.length > 0) {
           const mp = await assemblePackFromMultiplePacks(env, keys, unionNeeded, {
             signal,

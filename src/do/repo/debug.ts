@@ -36,7 +36,13 @@ export async function debugState(
     hasIndex: boolean;
     indexSize?: number;
   }>;
-  unpackWork: UnpackWork | null;
+  unpackWork: {
+    packKey: string;
+    oidsSample: string[];
+    oidsCount: number;
+    processedCount: number;
+    startedAt: number;
+  } | null;
   unpackNext: string | null;
   looseSample: string[];
   hydration?: {
@@ -126,6 +132,16 @@ export async function debugState(
 
   const prefix = doPrefix(ctx.id.toString());
 
+  // Sanitize unpackWork to avoid huge oids array in output
+  const sanitizedUnpackWork = unpackWork
+    ? {
+        ...unpackWork,
+        oids: undefined, // Remove the full array
+        oidsSample: unpackWork.oids.slice(0, 10), // Show first 10
+        oidsCount: unpackWork.oids.length,
+      }
+    : null;
+
   return {
     meta: { doId: ctx.id.toString(), prefix },
     head,
@@ -136,7 +152,7 @@ export async function debugState(
     packListCount: packList.length,
     packList,
     packStats: packStats.length > 0 ? packStats : undefined,
-    unpackWork: unpackWork || null,
+    unpackWork: sanitizedUnpackWork,
     unpackNext: unpackNext || null,
     looseSample,
     hydration: {

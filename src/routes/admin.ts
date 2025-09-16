@@ -276,4 +276,47 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
       });
     }
   });
+
+  // Admin: DANGEROUS - completely purge repo (all R2 objects + DO storage)
+  router.delete(`/:owner/:repo/admin/purge`, async (request, env: Env) => {
+    const { owner, repo } = request.params as { owner: string; repo: string };
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return new Response("Unauthorized\n", {
+        status: 401,
+        headers: { "WWW-Authenticate": 'Basic realm="Git", charset="UTF-8"' },
+      });
+    }
+
+    // Require explicit confirmation
+    const body: any = await request.json().catch(() => ({}));
+    if (body.confirm !== `purge-${owner}/${repo}`) {
+      return new Response(
+        JSON.stringify({
+          error: "Confirmation required",
+          hint: `Set confirm to "purge-${owner}/${repo}"`,
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+    }
+
+    const stub = getRepoStub(env, repoKey(owner, repo));
+    try {
+      const result = await stub.purgeRepo();
+
+      // Remove from owner registry
+      await removeRepoFromOwner(env, owner, repo);
+
+      return new Response(JSON.stringify({ ok: true, ...result }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (e) {
+      return new Response(JSON.stringify({ ok: false, error: String(e) }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+  });
 }

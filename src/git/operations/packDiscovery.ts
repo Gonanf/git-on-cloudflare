@@ -5,7 +5,7 @@ import { getLimiter, countSubrequest, DEFAULT_SUBREQUEST_BUDGET } from "./limits
 import { createLogger } from "@/common/index.ts";
 
 // ---- local helpers (module-scoped) ----
-function hydrationFirst(list: string[]): string[] {
+function orderPacksByPriority(list: string[]): string[] {
   const hydra: string[] = [];
   const normal: string[] = [];
   for (const k of list) {
@@ -13,6 +13,8 @@ function hydrationFirst(list: string[]): string[] {
     if (base.startsWith("pack-hydr-")) hydra.push(k);
     else normal.push(k);
   }
+  // Return hydration packs first, then normal packs
+  // Hydration packs now contain full delta chains and are optimized for initial clones
   return [...hydra, ...normal];
 }
 
@@ -99,10 +101,10 @@ export async function getPackCandidates(
           const latest = packList[0];
           const i = list.indexOf(latest);
           if (i >= 0) list.splice(i, 1);
-          packList = dedupe([latest, ...hydrationFirst(list)]);
+          packList = dedupe([latest, ...orderPacksByPriority(list)]);
         } else {
-          // No latest: still prefer hydration packs first
-          packList = hydrationFirst(list);
+          // No latest: order by priority (hydration packs first)
+          packList = orderPacksByPriority(list);
         }
       }
     } catch {}
@@ -129,8 +131,8 @@ export async function getPackCandidates(
           cursor = res && res.truncated ? res.cursor : undefined;
         } while (cursor && found.length < MAX);
         if (found.length > 0) {
-          // Prefer hydration packs early for R2 path as well
-          const expanded = hydrationFirst(found);
+          // Order by priority for R2 path as well (hydration packs first)
+          const expanded = orderPacksByPriority(found);
           // If this was an expansion, merge while preserving order and deduping
           if (options?.expandR2 && packList.length > 0) {
             mergeUnique(packList, expanded);
