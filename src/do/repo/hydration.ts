@@ -1075,6 +1075,11 @@ async function buildSegmentSlice(
   let oids: string[] = [];
   try {
     oids = await indexPackOnly(packfile, env, packKey, state, prefix);
+    // Update pack OIDs with actual indexed OIDs (may differ from input OIDs)
+    if (oids.length > 0) {
+      await state.storage.put(packOidsKey(packKey), oids);
+      log.info("build:updated-packOids", { packKey, count: oids.length });
+    }
   } catch (e) {
     log.warn("build:index-failed", { packKey, error: String(e) });
     // Best-effort: continue; the pack is still usable for fetch streaming from R2, but we prefer an idx
