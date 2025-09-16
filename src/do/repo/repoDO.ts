@@ -361,6 +361,12 @@ export class RepoDurableObject extends DurableObject {
     lastPackOidsCount: number;
     packListCount: number;
     packList: string[];
+    packStats?: Array<{
+      key: string;
+      packSize?: number;
+      hasIndex: boolean;
+      indexSize?: number;
+    }>;
     unpackWork: UnpackWork | null;
     unpackNext: string | null;
     looseSample: string[];
@@ -407,6 +413,49 @@ export class RepoDurableObject extends DurableObject {
       for (const k of it.keys()) looseSample.push(String(k).slice(4));
     } catch {}
 
+    // Gather pack statistics
+    const packStats: Array<{
+      key: string;
+      packSize?: number;
+      hasIndex: boolean;
+      indexSize?: number;
+    }> = [];
+
+    for (const packKey of packList.slice(0, 20)) {
+      // Limit to first 20 packs for performance
+      try {
+        const packStat: {
+          key: string;
+          packSize?: number;
+          hasIndex: boolean;
+          indexSize?: number;
+        } = {
+          key: packKey,
+          hasIndex: false,
+        };
+
+        // Get pack file size from R2
+        try {
+          const packHead = await this.env.REPO_BUCKET.head(packKey);
+          if (packHead) {
+            packStat.packSize = packHead.size;
+          }
+        } catch {}
+
+        // Check if index exists and get its size
+        const indexKey = packIndexKey(packKey);
+        try {
+          const indexHead = await this.env.REPO_BUCKET.head(indexKey);
+          if (indexHead) {
+            packStat.hasIndex = true;
+            packStat.indexSize = indexHead.size;
+          }
+        } catch {}
+
+        packStats.push(packStat);
+      } catch {}
+    }
+
     return {
       meta: { doId: this.ctx.id.toString(), prefix: this.prefix() },
       head,
@@ -416,6 +465,7 @@ export class RepoDurableObject extends DurableObject {
       lastPackOidsCount: lastPackOids.length,
       packListCount: packList.length,
       packList,
+      packStats: packStats.length > 0 ? packStats : undefined,
       unpackWork: unpackWork || null,
       unpackNext: unpackNext || null,
       looseSample,
@@ -516,6 +566,58 @@ export class RepoDurableObject extends DurableObject {
       commit: { oid: q, parents, tree },
       presence: { hasLooseCommit, hasLooseTree, hasR2LooseTree },
       membership,
+    };
+  }
+
+  /**
+   * Debug: Check if an OID exists in various storage locations
+   * @param oid - The object ID to check
+   */
+  public async debugCheckOid(oid: string): Promise<{
+    oid: string;
+    presence: {
+      hasLoose: boolean;
+      hasR2Loose: boolean;
+    };
+    inPacks: string[];
+  }> {
+    await this.ensureAccessAndAlarm();
+    if (!isValidOid(oid)) {
+      throw new Error(`Invalid OID: ${oid}`);
+    }
+
+    // Check DO loose storage
+    const hasLoose = !!(await this.ctx.storage.get(objKey(oid)));
+
+    // Check R2 loose storage
+    let hasR2Loose = false;
+    try {
+      const head = await this.env.REPO_BUCKET.head(r2LooseKey(this.prefix(), oid));
+      hasR2Loose = !!head;
+    } catch {}
+
+    // Check which packs contain this OID
+    const inPacks: string[] = [];
+    const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const packList = (await store.get("packList")) || [];
+
+    // Check each pack's OID list
+    for (const packKey of packList) {
+      try {
+        const packOids = (await store.get(packOidsKey(packKey))) || [];
+        if (packOids.includes(oid)) {
+          inPacks.push(packKey);
+        }
+      } catch {}
+    }
+
+    return {
+      oid,
+      presence: {
+        hasLoose,
+        hasR2Loose,
+      },
+      inPacks,
     };
   }
 

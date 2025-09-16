@@ -246,4 +246,34 @@ export function registerAdminRoutes(router: ReturnType<typeof AutoRouter>) {
       });
     }
   });
+
+  // Debug: check if an OID exists in loose, R2 loose, and/or packs
+  router.get(`/:owner/:repo/admin/debug-oid/:oid`, async (request, env: Env) => {
+    const { owner, repo, oid } = request.params as {
+      owner: string;
+      repo: string;
+      oid: string;
+    };
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return new Response("Unauthorized\n", {
+        status: 401,
+        headers: { "WWW-Authenticate": 'Basic realm="Git", charset="UTF-8"' },
+      });
+    }
+    if (!isValidOid(oid)) {
+      return new Response("Invalid OID\n", { status: 400 });
+    }
+    const stub = getRepoStub(env, repoKey(owner, repo));
+    try {
+      const result = await stub.debugCheckOid(oid);
+      return new Response(JSON.stringify(result, null, 2), {
+        headers: { "Content-Type": "application/json" },
+      });
+    } catch (e) {
+      return new Response(JSON.stringify({ error: String(e) }), {
+        headers: { "Content-Type": "application/json" },
+        status: 500,
+      });
+    }
+  });
 }
