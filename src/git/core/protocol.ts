@@ -21,8 +21,8 @@ export async function capabilityAdvertisement(
     chunks.push(pktLine("ls-refs\n"));
     // Advertise fetch and supported features
     chunks.push(pktLine("fetch\n"));
-    // We stream pack data over sideband; advertise sideband-64k for client awareness
-    chunks.push(pktLine("sideband-64k\n"));
+    // We stream pack data over sideband; advertise side-band-64k for client awareness
+    chunks.push(pktLine("side-band-64k\n"));
     chunks.push(pktLine("ofs-delta\n"));
     chunks.push(pktLine(`object-format=sha1\n`));
     chunks.push(flushPkt());

@@ -20,7 +20,7 @@ git pull https://your-domain.com/owner/repo
   - `agent=git-on-cloudflare/0.1`
   - `ls-refs`
   - `fetch`
-  - `sideband-64k`
+  - `side-band-64k`
   - `ofs-delta`
   - `object-format=sha1`
 

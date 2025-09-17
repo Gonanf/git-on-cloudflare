@@ -22,5 +22,5 @@ it("advertises upload-pack v2 over info/refs", async () => {
   expect(textLines.some((l) => l === "fetch\n")).toBe(true);
   // And the features we advertise
   expect(textLines.some((l) => l === "ofs-delta\n")).toBe(true);
-  expect(textLines.some((l) => l === "sideband-64k\n")).toBe(true);
+  expect(textLines.some((l) => l === "side-band-64k\n")).toBe(true);
 });

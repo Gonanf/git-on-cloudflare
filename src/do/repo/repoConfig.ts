@@ -4,10 +4,10 @@ export function getConfig(env: Env) {
   const idleMins = Number(env.REPO_DO_IDLE_MINUTES ?? 30);
   const maintMins = Number(env.REPO_DO_MAINT_MINUTES ?? 60 * 24);
   const keepPacks = Number(env.REPO_KEEP_PACKS ?? 10);
-  const packListMaxRaw = Number(env.REPO_PACKLIST_MAX ?? 25);
-  const unpackChunkSize = Number(env.REPO_UNPACK_CHUNK_SIZE ?? 50);
-  const unpackMaxMs = Number(env.REPO_UNPACK_MAX_MS ?? 5000);
-  const unpackDelayMs = Number(env.REPO_UNPACK_DELAY_MS ?? 100);
+  const packListMaxRaw = Number(env.REPO_PACKLIST_MAX ?? 50);
+  const unpackChunkSize = Number(env.REPO_UNPACK_CHUNK_SIZE ?? 100);
+  const unpackMaxMs = Number(env.REPO_UNPACK_MAX_MS ?? 2000);
+  const unpackDelayMs = Number(env.REPO_UNPACK_DELAY_MS ?? 500);
   const unpackBackoffMs = Number(env.REPO_UNPACK_BACKOFF_MS ?? 1000);
   const clamp = (n: number, min: number, max: number) =>
     Number.isFinite(n) ? Math.max(min, Math.min(max, Math.floor(n))) : min;

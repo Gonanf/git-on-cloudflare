@@ -9,7 +9,7 @@ Host unlimited private Git repositories at the edge with <50ms response times gl
 
 ## Key Features
 
-- **Complete Git Smart HTTP v2 implementation** with pack protocol support (`ls-refs`, `fetch`, sideband-64k, ofs-delta)
+- **Complete Git Smart HTTP v2 implementation** with pack protocol support (`ls-refs`, `fetch`, side-band-64k, ofs-delta)
 - **Strong consistency** via Durable Objects for refs/HEAD (the hard part of distributed Git)
 - **Two-tier caching** reducing latency from 200ms to <50ms for hot paths
 - **Streaming pack assembly** from R2 with range reads for efficient clones
@@ -116,8 +116,8 @@ REPO_DO_IDLE_MINUTES=30      # Cleanup idle repos after 30 min
 REPO_DO_MAINT_MINUTES=1440   # Run maintenance daily
 REPO_KEEP_PACKS=10           # Long-term pack retention
 REPO_PACKLIST_MAX=50         # Max recent packs considered for discovery
-REPO_UNPACK_CHUNK_SIZE=25    # Objects per unpack slice
-REPO_UNPACK_MAX_MS=1000      # Max CPU time per unpack slice
+REPO_UNPACK_CHUNK_SIZE=100   # Objects per unpack slice
+REPO_UNPACK_MAX_MS=2000      # Max CPU time per unpack slice
 REPO_UNPACK_DELAY_MS=500     # Delay between slices (ms)
 REPO_UNPACK_BACKOFF_MS=1000  # Backoff when under load (ms)
 LOG_LEVEL=info               # debug|info|warn|error
