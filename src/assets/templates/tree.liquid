@@ -1,6 +1,6 @@
 {% layout 'layout' %}
 {% block %}
-{% render 'repo_nav', owner: owner, repo: repo, refEnc: refEnc %}
+{% render 'repo_nav', owner: owner, repo: repo, refEnc: refEnc, currentTab: 'browse' %}
 {% render 'progress', progress: progress %}
 <h2>Tree</h2>
 {% if breadcrumbs %}

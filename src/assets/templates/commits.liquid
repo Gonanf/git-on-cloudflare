@@ -1,6 +1,6 @@
 {% layout 'layout' %}
 {% block %}
-{% render 'repo_nav', owner: owner, repo: repo, refEnc: refEnc %}
+{% render 'repo_nav', owner: owner, repo: repo, refEnc: refEnc, currentTab: 'commits' %}
 {% render 'progress', progress: progress %}
 <h2>Commits on {{ ref }}</h2>
 {% if pager %}

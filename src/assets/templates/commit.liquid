@@ -1,6 +1,6 @@
 {% layout 'layout' %}
 {% block %}
-{% render 'repo_nav', owner: owner, repo: repo, refEnc: refEnc %}
+{% render 'repo_nav', owner: owner, repo: repo, refEnc: refEnc, currentTab: 'commits' %}
 <h2>Commit {{ commitShort }}</h2>
 <p>
   <strong>Author:</strong>

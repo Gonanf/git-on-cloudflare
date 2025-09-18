@@ -1,7 +1,23 @@
 @import "tailwindcss";
 
-/* Safelist for JS-toggled Merge badge classes (Tailwind v4) */
-@source inline("bg-sky-100 text-sky-900 dark:bg-sky-500/20 dark:text-sky-300 dark:border dark:border-sky-500/40 bg-amber-200 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200 dark:border dark:border-amber-500/40");
+/* Safelist for JS-toggled classes (Tailwind v4) */
+/* Merge badge toggle classes (commits page) */
+@source inline("bg-sky-100 text-sky-900 dark:bg-sky-500/20 dark:text-sky-300");
+@source inline("dark:border dark:border-sky-500/40");
+@source inline("bg-amber-200 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200");
+@source inline("dark:border-amber-500/40");
+
+/* Refs popover dynamically generated classes */
+@source inline("uppercase px-2 py-1 mt-1 text-xs font-semibold");
+@source inline("text-gray-500 dark:text-gray-400 text-gray-700 dark:text-gray-300");
+@source inline("text-gray-400 dark:text-gray-500");
+@source inline("flex items-center gap-2 w-4 h-4 flex-shrink-0");
+@source inline("block rounded cursor-pointer transition-colors");
+@source inline("px-2 py-1.5 font-medium");
+@source inline("bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800");
+@source inline("text-blue-700 dark:text-blue-300");
+@source inline("hover:bg-gray-100 dark:hover:bg-gray-700");
+@source inline("my-1 border-t border-gray-200 dark:border-gray-700");
 
 @custom-variant dark (&:is(.dark *));
 
@@ -184,6 +200,18 @@
   @apply flex items-center gap-2 text-sm mb-4 p-3 bg-gray-50 dark:bg-gray-800/30 rounded-lg;
 }
 
+@utility subnav {
+  @apply inline-flex items-center gap-1 p-1 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900;
+}
+
+@utility tab {
+  @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm
+         text-gray-600 dark:text-gray-400
+         hover:text-gray-900 dark:hover:text-gray-100
+         hover:bg-gray-100/70 dark:hover:bg-gray-800/40
+         focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/50;
+}
+
 @utility container {
   @apply max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2;
 }
@@ -222,6 +250,10 @@
   .markdown-content pre code {
     font-family: var(--font-mono);
     font-size: 0.875rem; /* text-sm */
+  }
+  /* Active tab styling using aria-current for accessibility */
+  .subnav .tab[aria-current="page"] {
+    @apply font-medium text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20;
   }
 }
 
@@ -307,5 +339,20 @@
 
   code {
     @apply px-1 py-0.5 bg-gray-100 dark:bg-gray-800 rounded-sm text-sm font-mono;
+  }
+
+  /* Refs popover styles */
+  .ref-menu > summary {
+    list-style: none;
+  }
+  .ref-menu > summary::-webkit-details-marker {
+    display: none;
+  }
+  .ref-menu > summary::marker {
+    content: "";
+  }
+  .ref-menu[open] > summary {
+    /* subtle focus ring when menu is open */
+    @apply ring-2 ring-blue-500/30;
   }
 }

@@ -8,49 +8,74 @@
   </div>
   {% if refEnc %}
     <div class="flex items-center gap-3">
-      <nav class="flex items-center gap-4">
+      <nav class="flex items-center gap-3" aria-label="Repository navigation">
         {% if showRefDropdown != false %}
-          <div>
-            <label for="ref-select" class="sr-only">Ref</label>
-            <select
-              id="ref-select"
-              class="px-2 py-1 rounded border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-sm"
-            >
-              <option selected disabled>Loading refs…</option>
-            </select>
+          <div id="ref-menu-root" class="relative">
+            <details id="ref-menu" class="ref-menu relative">
+              <summary class="btn secondary sm">
+                <span id="ref-current-label">
+                  {%- assign refLen = refEnc | size -%}
+                  {%- if refLen == 40 -%}
+                    {{- refEnc | slice: 0, 7 }}…
+                  {%- else -%}
+                    {{- refEnc | default: '…' -}}
+                  {%- endif -%}
+                </span>
+              </summary>
+              <div class="fixed sm:absolute inset-x-0 sm:inset-x-auto sm:right-0 sm:left-auto z-20 mt-2 mx-3 sm:mx-0 sm:w-72 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-3 sm:p-2 shadow-xl sm:shadow-lg">
+                <input
+                  id="ref-filter"
+                  type="text"
+                  placeholder="Filter branches/tags"
+                  class="w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-700 rounded-md bg-white dark:bg-gray-900"
+                  autocomplete="off"
+                >
+                <div
+                  id="ref-list"
+                  class="mt-2 max-h-48 sm:max-h-64 overflow-y-auto no-scrollbar text-sm"
+                >
+                  <div class="muted px-2 py-2">Loading…</div>
+                </div>
+              </div>
+            </details>
           </div>
         {% endif %}
-        <a
-          href="/{{ owner }}/{{ repo }}/tree?ref={{ refEnc }}"
-          class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
-          >Browse</a
-        >
-        <a
-          href="/{{ owner }}/{{ repo }}/commits?ref={{ refEnc }}"
-          class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
-          >Commits</a
-        >
-        {% if currentTab == 'admin' %}
+        <div class="subnav">
+          <a
+            href="/{{ owner }}/{{ repo }}/tree?ref={{ refEnc }}"
+            class="tab"
+            {% if currentTab == 'browse' %}
+              aria-current="page"
+            {% endif %}
+            >Browse</a
+          >
+          <a
+            href="/{{ owner }}/{{ repo }}/commits?ref={{ refEnc }}"
+            class="tab"
+            {% if currentTab == 'commits' %}
+              aria-current="page"
+            {% endif %}
+            >Commits</a
+          >
           <a
             href="/{{ owner }}/{{ repo }}/admin"
-            class="text-blue-600 dark:text-blue-400 font-medium"
-            >🔧 Admin</a
+            class="tab"
+            {% if currentTab == 'admin' %}
+              aria-current="page"
+            {% endif %}
           >
-        {% else %}
-          <a
-            href="/{{ owner }}/{{ repo }}/admin"
-            class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
-            >🔧 Admin</a
-          >
-        {% endif %}
+            <svg viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4" aria-hidden="true">
+              <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"></path>
+            </svg>
+            <span>Admin</span>
+          </a>
+        </div>
       </nav>
     </div>
     {% if showRefDropdown != false %}
       <script>
         (function () {
           try {
-            var sel = document.getElementById('ref-select');
-            if (!sel) return;
             var api = '/{{ owner }}/{{ repo }}/api/refs';
             var currentRef = new URL(window.location.href).searchParams.get('ref');
             if (!currentRef) {
@@ -60,14 +85,21 @@
                 currentRef = '{{ refEnc }}';
               }
             }
-            // Populate options from API (no optgroup to avoid left padding in options)
+
+            // Fetch refs data and populate popover
             fetch(api, { credentials: 'same-origin' })
               .then(function (r) {
                 return r.ok ? r.json() : null;
               })
               .then(function (data) {
                 if (!data) return;
-                var opts = [];
+                function dec(s) {
+                  try {
+                    return decodeURIComponent(s);
+                  } catch {
+                    return s;
+                  }
+                }
 
                 // Check if currentRef is an OID (40 hex chars) and not a branch/tag
                 var isOid = /^[0-9a-f]{40}$/i.test(currentRef);
@@ -76,7 +108,8 @@
                 // Check if current ref exists in branches or tags
                 if (data.branches) {
                   for (var k = 0; k < data.branches.length; k++) {
-                    if (data.branches[k].name === currentRef) {
+                    var decoded = dec(data.branches[k].name);
+                    if (decoded === currentRef) {
                       foundInRefs = true;
                       break;
                     }
@@ -84,56 +117,185 @@
                 }
                 if (!foundInRefs && data.tags) {
                   for (var l = 0; l < data.tags.length; l++) {
-                    if (data.tags[l].name === currentRef) {
+                    var decoded = dec(data.tags[l].name);
+                    if (decoded === currentRef) {
                       foundInRefs = true;
                       break;
                     }
                   }
                 }
 
-                // If current ref is not in branches/tags, show it as a special option
-                if (!foundInRefs && currentRef) {
-                  var displayRef = isOid
-                    ? 'Commit: ' + currentRef.substring(0, 7) + '…'
-                    : currentRef;
-                  opts.push(
-                    '<option value="' + currentRef + '" selected>' + displayRef + '</option>'
-                  );
-                  if ((data.branches && data.branches.length) || (data.tags && data.tags.length)) {
-                    opts.push('<option value="" disabled>—————————</option>');
-                  }
-                }
+                // Populate the searchable ref popover menu
+                try {
+                  var refMenu = document.getElementById('ref-menu');
+                  var refFilter = document.getElementById('ref-filter');
+                  var refList = document.getElementById('ref-list');
+                  var refLabel = document.getElementById('ref-current-label');
 
-                if (data.branches && data.branches.length) {
-                  opts.push('<option value="" disabled>— Branches —</option>');
-                  for (var i = 0; i < data.branches.length; i++) {
-                    var b = data.branches[i];
-                    var selAttr = b.name === currentRef ? ' selected' : '';
-                    opts.push(
-                      '<option value="' + b.name + '"' + selAttr + '>' + b.displayName + '</option>'
-                    );
+                  // Update current label to a human-friendly value
+                  if (refLabel) {
+                    var label = currentRef || '';
+                    if (isOid && label) label = label.substring(0, 7) + '…';
+                    try {
+                      refLabel.textContent = decodeURIComponent(label);
+                    } catch {
+                      refLabel.textContent = label;
+                    }
                   }
-                }
-                if (data.tags && data.tags.length) {
-                  opts.push('<option value="" disabled>— Tags —</option>');
-                  for (var j = 0; j < data.tags.length; j++) {
-                    var t = data.tags[j];
-                    var selT = t.name === currentRef ? ' selected' : '';
-                    opts.push(
-                      '<option value="' + t.name + '"' + selT + '>' + t.displayName + '</option>'
+
+                  if (refList) {
+                    var pieces = [];
+                    function addSection(title, arr, isBranch) {
+                      if (!arr || !arr.length) return;
+                      pieces.push(
+                        '<div class="uppercase px-2 py-1 mt-1 text-xs font-semibold text-gray-500 dark:text-gray-400">' +
+                          title +
+                          '</div>'
+                      );
+                      // Icons for branches and tags
+                      var branchIcon =
+                        '<svg class="w-4 h-4 flex-shrink-0 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>';
+                      var tagIcon =
+                        '<svg class="w-4 h-4 flex-shrink-0 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>';
+                      var typeIcon = isBranch ? branchIcon : tagIcon;
+
+                      for (var i = 0; i < arr.length; i++) {
+                        var it = arr[i];
+                        var raw = dec(it.name);
+                        // data-ref stores the raw ref name (decoded)
+                        var isCurrentRef = raw === currentRef;
+                        if (isCurrentRef) {
+                          pieces.push(
+                            '<span class="flex items-center gap-2 px-2 py-1.5 rounded bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300">' +
+                              '<svg class="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">' +
+                              '<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>' +
+                              '</svg>' +
+                              typeIcon +
+                              '<span class="font-medium">' +
+                              it.displayName +
+                              '</span>' +
+                              '</span>'
+                          );
+                        } else {
+                          pieces.push(
+                            '<a data-ref="' +
+                              raw +
+                              '" class="flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">' +
+                              '<span class="w-4 h-4 flex-shrink-0"></span>' + // Spacer for check alignment
+                              typeIcon +
+                              '<span>' +
+                              it.displayName +
+                              '</span>' +
+                              '</a>'
+                          );
+                        }
+                      }
+                    }
+                    if (!foundInRefs && currentRef) {
+                      var currDisp = isOid
+                        ? 'Commit: ' + currentRef.substring(0, 7) + '…'
+                        : currentRef;
+                      pieces.push(
+                        '<div class="uppercase px-2 py-1 text-xs text-gray-500 dark:text-gray-400">Current</div>'
+                      );
+                      pieces.push(
+                        '<span class="flex items-center gap-2 px-2 py-1.5 rounded bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300">' +
+                          '<svg class="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">' +
+                          '<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>' +
+                          '</svg>' +
+                          '<span class="font-medium">' +
+                          currDisp +
+                          '</span>' +
+                          '</span>'
+                      );
+                      pieces.push(
+                        '<div class="my-1 border-t border-gray-200 dark:border-gray-700"></div>'
+                      );
+                    }
+                    addSection('Branches', data.branches || [], true);
+                    addSection('Tags', data.tags || [], false);
+                    if (pieces.length === 0)
+                      pieces.push('<div class="muted px-2 py-2">No refs</div>');
+                    refList.innerHTML = pieces.join('');
+
+                    // Click to navigate: replace ref= query parameter on current URL
+                    refList.addEventListener(
+                      'click',
+                      function (e) {
+                        var a = e.target.closest('a[data-ref]');
+                        if (!a) return;
+                        e.preventDefault();
+                        try {
+                          var v = a.getAttribute('data-ref') || '';
+                          var u2 = new URL(window.location.href);
+                          u2.searchParams.set('ref', v);
+                          window.location.href = u2.toString();
+                        } catch {}
+                      },
+                      { passive: false }
                     );
+
+                    // Filter behavior
+                    if (refFilter) {
+                      refFilter.addEventListener('input', function () {
+                        var q = refFilter.value.trim().toLowerCase();
+                        var items = refList.querySelectorAll('a[data-ref], span.flex');
+                        var headers = refList.querySelectorAll('div.uppercase');
+
+                        // Filter items
+                        for (var i = 0; i < items.length; i++) {
+                          var txt = (items[i].textContent || '').toLowerCase();
+                          var show = !q || txt.indexOf(q) >= 0;
+                          items[i].style.display = show ? 'flex' : 'none';
+                        }
+
+                        // Hide headers if all items in section are hidden
+                        for (var j = 0; j < headers.length; j++) {
+                          var header = headers[j];
+                          var hasVisible = false;
+                          var next = header.nextElementSibling;
+                          while (
+                            next &&
+                            !next.classList.contains('uppercase') &&
+                            !next.classList.contains('border-t')
+                          ) {
+                            if (next.style.display !== 'none') {
+                              hasVisible = true;
+                              break;
+                            }
+                            next = next.nextElementSibling;
+                          }
+                          header.style.display = hasVisible ? '' : 'none';
+                        }
+                      });
+                      refFilter.addEventListener('keydown', function (e) {
+                        if (e.key === 'Escape' && refMenu) {
+                          refMenu.open = false;
+                        }
+                      });
+                    }
+
+                    // Focus input when opened and close on outside click
+                    if (refMenu) {
+                      refMenu.addEventListener('toggle', function () {
+                        if (refMenu.open && refFilter)
+                          setTimeout(function () {
+                            try {
+                              refFilter.focus();
+                              refFilter.select && refFilter.select();
+                            } catch {}
+                          }, 0);
+                      });
+                      var root = document.getElementById('ref-menu-root');
+                      document.addEventListener('click', function (ev) {
+                        if (!refMenu.open || !root) return;
+                        if (!root.contains(ev.target)) refMenu.open = false;
+                      });
+                    }
                   }
-                }
-                sel.innerHTML = opts.join('');
+                } catch {}
               })
               .catch(function () {});
-            sel.addEventListener('change', function () {
-              try {
-                var u = new URL(window.location.href);
-                u.searchParams.set('ref', sel.value);
-                window.location.href = u.toString();
-              } catch {}
-            });
           } catch {}
         })();
       </script>
