@@ -9,4 +9,4 @@ trigger: always_on
    KV: https://developers.cloudflare.com/kv/llms-full.txt
    Durable Object: https://developers.cloudflare.com/durable-objects/llms-full.txt
    R2: https://developers.cloudflare.com/r2/llms-full.txt
-4. Although in `wrangler.jsonc` we have `nodejs_compat` enabled, prefer Web standard APIs where possible. Cloudflare Workers may provide extensions to the API, such as `crypto.digestStream()`. Refer to the official documentations.
+4. Although in `wrangler.jsonc` we have `nodejs_compat` enabled, prefer Web standard APIs where possible. Cloudflare Workers may provide extensions to the API, such as `crypto.DigestStream()`. Refer to the official documentations.

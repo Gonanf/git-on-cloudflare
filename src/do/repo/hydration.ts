@@ -4,7 +4,7 @@ import type { Logger } from "@/common/logger.ts";
 
 import { asTypedStorage, packOidsKey, objKey } from "./repoState.ts";
 import { createLogger, BloomFilter } from "@/common/index.ts";
-import { loadIdxParsed } from "@/git/pack/assembler.ts";
+import { loadIdxParsed } from "@/git/pack/idxCache.ts";
 import { inflateAndParseHeader } from "@/git/core/index.ts";
 import { r2PackKey, packIndexKey, getDoIdFromPath } from "@/keys.ts";
 import { getConfig } from "./repoConfig.ts";

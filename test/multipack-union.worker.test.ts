@@ -3,7 +3,15 @@ import { env, SELF } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import * as git from "isomorphic-git";
 import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
-import { concatChunks, createMemPackFs, delimPkt, encodeObjHeader, flushPkt, pktLine } from "@/git";
+import {
+  concatChunks,
+  createMemPackFs,
+  delimPkt,
+  encodeObjHeader,
+  flushPkt,
+  pktLine,
+  decodePktLines,
+} from "@/git";
 import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
 import { deflate, inflate } from "@/common/index.ts";
 
@@ -74,11 +82,11 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
   const id = env.REPO_DO.idFromName(repoId);
   const getStub = () => env.REPO_DO.get(id) as DurableObjectStub<RepoDurableObject>;
 
-  // Seed DO repo with a commit + empty tree via runInDurableObject
+  // Seed DO repo with a commit + empty tree as loose objects only
   const { commitOid, treeOid } = await runDOWithRetry(
     getStub,
     async (instance: RepoDurableObject) => {
-      return instance.seedMinimalRepo();
+      return instance.seedMinimalRepo(false); // Don't create a pack
     }
   );
 
@@ -121,60 +129,49 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
     await store.put(`packOids:${keyB}`, [treeOid]);
   });
 
-  // Issue fetch for the commit; server should assemble from both packs
-  const body = buildFetchBody({ wants: [commitOid] });
+  // Streaming v2: two-phase fetch. First negotiate (done=false)
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
+  const negotiate = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-git-upload-pack-request",
+      "Git-Protocol": "version=2",
+    },
+    body: buildFetchBody({ wants: [commitOid], done: false }),
+  } as any);
+  expect(negotiate.status).toBe(200);
+  const negoText = new TextDecoder().decode(new Uint8Array(await negotiate.arrayBuffer()));
+  expect(negoText.includes("acknowledgments\n")).toBe(true);
+  expect(negoText.includes("packfile\n")).toBe(false);
+
+  // Final fetch (done=true) returns only packfile section
   const res = await SELF.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",
       "Git-Protocol": "version=2",
     },
-    body,
+    body: buildFetchBody({ wants: [commitOid], done: true }),
   } as any);
   expect(res.status).toBe(200);
   const bytes = new Uint8Array(await res.arrayBuffer());
 
-  // Extract sideband pack data after the 'packfile' pkt-line
-  const td = new TextDecoder();
-  let off = 0;
-  function readHdr(): number {
-    const s = td.decode(bytes.subarray(off, off + 4));
-    off += 4;
-    return parseInt(s, 16);
-  }
-  // Skip acknowledgments section (unknown size), find delim 0001 then 'packfile' line
-  while (off + 4 <= bytes.length) {
-    const hdr = td.decode(bytes.subarray(off, off + 4));
-    if (hdr === "0001") {
-      off += 4;
-      break;
-    }
-    if (hdr === "0000") {
-      off += 4;
-    } else {
-      const n = parseInt(hdr, 16);
-      off += n;
-    }
-  }
-  const len = readHdr();
-  const line = td.decode(bytes.subarray(off, off + (len - 4)));
-  off += len - 4;
-  expect(line).toBe("packfile\n");
-
-  // Gather subsequent band-1 chunks until flush
+  // Extract sideband-encoded pack after the 'packfile' pkt-line
+  const lines = decodePktLines(bytes);
   const packChunks: Uint8Array[] = [];
-  while (off + 4 <= bytes.length) {
-    const hdr = td.decode(bytes.subarray(off, off + 4));
-    off += 4;
-    if (hdr === "0000") break;
-    const n = parseInt(hdr, 16);
-    const payload = bytes.subarray(off, off + (n - 4));
-    off += n - 4;
-    if (payload[0] === 0x01) packChunks.push(payload.subarray(1));
+  let inPackfile = false;
+  for (const line of lines) {
+    if (line.type === "line" && line.text === "packfile\n") {
+      inPackfile = true;
+      continue;
+    }
+    if (inPackfile && line.type === "line" && line.raw && line.raw[0] === 0x01) {
+      packChunks.push(line.raw.subarray(1));
+    }
   }
   const packOut = concatChunks(packChunks);
   // Basic checks on assembled pack
+  const td = new TextDecoder();
   expect(td.decode(packOut.subarray(0, 4))).toBe("PACK");
   const dv = new DataView(packOut.buffer, packOut.byteOffset, packOut.byteLength);
   expect(dv.getUint32(4, false)).toBe(2);

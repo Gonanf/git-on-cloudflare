@@ -109,6 +109,7 @@ it("fetch works from R2 while unpacking is pending", async () => {
     pktLine("command=fetch\n"),
     delimPkt(),
     pktLine(`want ${commitOid}\n`),
+    pktLine("done\n"),
     flushPkt(),
   ]);
   const resp = await SELF.fetch(fetchUrl, {

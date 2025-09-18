@@ -28,15 +28,17 @@ The DO also records metadata to help fetch:
 1. Client sends capability advertisement request: `GET /:owner/:repo/info/refs?service=git-upload-pack`
 2. For `POST /:owner/:repo/git-upload-pack` with a v2 body:
    - `ls-refs` command: reads the DO via RPC (`getHead()` and `listRefs()`) and responds with HEAD + refs
-   - `fetch` command:
-     - Parses wants/haves and computes a minimal closure of needed OIDs
+   - `fetch` command (now using streaming by default):
+     - Parses wants/haves and computes minimal closure using frontier-subtract approach with stop sets
      - Discovers candidate packs via `src/git/operations/packDiscovery.ts#getPackCandidates()` (DO metadata first, then best‑effort R2 listing), memoized per request with limiter + soft budget
-     - Attempts to assemble from R2 using `.idx` range reads:
-       - Single-pack: `assemblePackFromR2()` (skipped for initial clones when coverage guard detects missing root trees)
-       - Multi-pack union: `assemblePackFromMultiplePacks()`
-     - If the closure traversal times out, tries a safe multi-pack union based on recent packs; otherwise returns `503` with `Retry-After` rather than sending a partial/thin pack
-     - As a last resort for non-initial clones, reads loose objects and builds a thick pack; if any needed object is unavailable in loose mode, returns `503` to avoid partial packs
-     - Responds with sidebanded `packfile` chunks
+     - **Streaming pack assembly** (no buffering):
+       - Single-pack: `streamPackFromR2()` streams directly from R2 with backpressure
+       - Multi-pack union: `streamPackFromMultiplePacks()` with proper delta resolution
+       - Uses `crypto.DigestStream` for incremental SHA-1 computation
+       - Emits sideband-64k with progress messages on channel 2
+     - If repository has no packs (loose-only), returns `503` with `Retry-After: 5` and message about objects being packed
+     - If closure traversal times out, tries a safe multi-pack union based on recent packs
+     - Legacy buffered mode still available with `X-Git-Streaming: false` header (deprecated)
 
 ## Web UI blob views
 

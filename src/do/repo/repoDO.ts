@@ -4,8 +4,15 @@ import type { UnpackProgress } from "@/common/index.ts";
 import { DurableObject } from "cloudflare:workers";
 import { asTypedStorage, objKey } from "./repoState.ts";
 import { doPrefix } from "@/keys.ts";
-import { encodeGitObjectAndDeflate, receivePack } from "@/git/index.ts";
-import { text, createLogger, isValidOid } from "@/common/index.ts";
+import {
+  encodeGitObjectAndDeflate,
+  receivePack,
+  buildPackV2,
+  parseGitObject,
+  indexPackOnly,
+} from "@/git/index.ts";
+import { text, createLogger, isValidOid, bytesToHex, createInflateStream } from "@/common/index.ts";
+import { r2PackKey, packIndexKey } from "@/keys.ts";
 import {
   enqueueHydrationTask,
   processHydrationSlice,
@@ -335,8 +342,12 @@ export class RepoDurableObject extends DurableObject {
   /**
    * RPC: Seed a minimal repository with an empty tree and a single commit pointing to it.
    * Used by tests to initialize a valid repo state without using HTTP fetch routes.
+   *
+   * @param withPack - If true, creates a pack file instead of loose objects (default: true for streaming compatibility)
    */
-  public async seedMinimalRepo(): Promise<{ commitOid: string; treeOid: string }> {
+  public async seedMinimalRepo(
+    withPack: boolean = true
+  ): Promise<{ commitOid: string; treeOid: string }> {
     await this.ensureAccessAndAlarm();
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
     // Build empty tree object (content is empty)
@@ -354,9 +365,51 @@ export class RepoDurableObject extends DurableObject {
       new TextEncoder().encode(commitPayload)
     );
 
-    // Store objects and update refs
-    await store.put(objKey(treeOid), treeZ);
-    await store.put(objKey(commitOid), commitZ);
+    if (withPack) {
+      // Create a real pack file in R2 containing the tree and commit
+      // This ensures streaming fetch operations will work correctly
+
+      // First, decompress the objects to get their raw payloads
+      const treeStream = new Blob([treeZ]).stream().pipeThrough(createInflateStream());
+      const treeRaw = new Uint8Array(await new Response(treeStream).arrayBuffer());
+      const treeParsed = parseGitObject(treeRaw);
+
+      const commitStream = new Blob([commitZ]).stream().pipeThrough(createInflateStream());
+      const commitRaw = new Uint8Array(await new Response(commitStream).arrayBuffer());
+      const commitParsed = parseGitObject(commitRaw);
+
+      // Build a pack file with these objects
+      const packData = await buildPackV2([
+        { type: treeParsed.type, payload: treeParsed.payload },
+        { type: commitParsed.type, payload: commitParsed.payload },
+      ]);
+
+      // Generate pack key with proper R2 prefix
+      const packFileName = `pack-test-${Date.now()}.pack`;
+      const packKey = r2PackKey(this.prefix(), packFileName);
+
+      // Store the actual pack file in R2
+      await this.env.REPO_BUCKET.put(packKey, packData);
+
+      // Create and store the index file
+      const packOids = await indexPackOnly(packData, this.env, packKey, this.ctx, this.prefix());
+
+      // Store pack metadata in DO storage (use full R2 key like receive.ts does)
+      await store.put("lastPackKey", packKey); // Store the full R2 key
+      await store.put("lastPackOids", packOids);
+      await store.put("packList", [packKey]);
+      await store.put(`packOids:${packKey}`, packOids);
+
+      // Also store objects as loose in DO for direct access
+      await store.put(objKey(treeOid), treeZ);
+      await store.put(objKey(commitOid), commitZ);
+    } else {
+      // Store as loose objects only (legacy behavior)
+      await store.put(objKey(treeOid), treeZ);
+      await store.put(objKey(commitOid), commitZ);
+    }
+
+    // Update refs
     await store.put("refs", [{ name: "refs/heads/main", oid: commitOid }]);
     await store.put("head", { target: "refs/heads/main" });
 

@@ -23,7 +23,7 @@ function buildFetchBody({
   return concatChunks(chunks);
 }
 
-it("upload-pack fetch returns acknowledgments and packfile", async () => {
+it("upload-pack fetch returns acknowledgments then packfile (two-phase)", async () => {
   const owner = "o";
   const repo = uniqueRepoId("r");
   const repoId = `${owner}/${repo}`;
@@ -34,21 +34,38 @@ it("upload-pack fetch returns acknowledgments and packfile", async () => {
     async (instance: RepoDurableObject) => instance.seedMinimalRepo()
   );
 
-  const body = buildFetchBody({ wants: [commitOid] });
   const url = `https://example.com/${owner}/${repo}/git-upload-pack`;
-  const res = await SELF.fetch(url, {
+
+  // Phase 1: negotiation (done=false) should return only acknowledgments
+  const negotiateBody = buildFetchBody({ wants: [commitOid], done: false });
+  const negotiateRes = await SELF.fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/x-git-upload-pack-request",
       "Git-Protocol": "version=2",
     },
-    body,
+    body: negotiateBody,
   } as any);
-  expect(res.status).toBe(200);
-  expect(res.headers.get("Content-Type") || "").toContain("git-upload-pack-result");
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  // Basic sanity: response should contain acknowledgments, then packfile
-  const text = new TextDecoder().decode(bytes);
-  expect(text.includes("acknowledgments\n")).toBe(true);
-  expect(text.includes("packfile\n")).toBe(true);
+  expect(negotiateRes.status).toBe(200);
+  const negotiateBytes = new Uint8Array(await negotiateRes.arrayBuffer());
+  const negotiateText = new TextDecoder().decode(negotiateBytes);
+  expect(negotiateText.includes("acknowledgments\n")).toBe(true);
+  expect(negotiateText.includes("packfile\n")).toBe(false);
+
+  // Phase 2: final fetch (done=true) should return packfile without acknowledgments
+  const fetchBody = buildFetchBody({ wants: [commitOid], done: true });
+  const fetchRes = await SELF.fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-git-upload-pack-request",
+      "Git-Protocol": "version=2",
+    },
+    body: fetchBody,
+  } as any);
+  expect(fetchRes.status).toBe(200);
+  expect(fetchRes.headers.get("Content-Type") || "").toContain("git-upload-pack-result");
+  const fetchBytes = new Uint8Array(await fetchRes.arrayBuffer());
+  const fetchText = new TextDecoder().decode(fetchBytes);
+  expect(fetchText.includes("acknowledgments\n")).toBe(false);
+  expect(fetchText.includes("packfile\n")).toBe(true);
 });

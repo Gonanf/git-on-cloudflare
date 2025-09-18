@@ -1,53 +1,12 @@
-import type { IdxParsed } from "@/git/pack/packMeta.ts";
-
 import { packIndexKey } from "@/keys.ts";
-import { hexToBytes, bytesToHex, createLogger } from "@/common/index.ts";
-import { parseIdxV2, readPackHeaderEx, readPackRange } from "@/git/pack/packMeta.ts";
-
-// --- In-process LRU cache for parsed .idx files (ephemeral per isolate) ---
-const IDX_CACHE_MAX = 64;
-const idxCache = new Map<string, IdxParsed>(); // key: packKey
-
-function touchIdxCache(key: string, value: IdxParsed) {
-  if (idxCache.has(key)) idxCache.delete(key);
-  idxCache.set(key, value);
-  if (idxCache.size > IDX_CACHE_MAX) {
-    const first = idxCache.keys().next().value;
-    if (first) idxCache.delete(first);
-  }
-}
-
-export async function loadIdxParsed(
-  env: Env,
-  packKey: string,
-  options?: {
-    limiter?: { run<T>(label: string, fn: () => Promise<T>): Promise<T> };
-    countSubrequest?: (n?: number) => void;
-    signal?: AbortSignal;
-  }
-): Promise<IdxParsed | undefined> {
-  const cached = idxCache.get(packKey);
-  if (cached) {
-    // Touch for LRU
-    touchIdxCache(packKey, cached);
-    return cached;
-  }
-  const idxKey = packIndexKey(packKey);
-  if (options?.signal?.aborted) return undefined;
-  const run = async () => await env.REPO_BUCKET.get(idxKey);
-  const idxObj = options?.limiter
-    ? await options.limiter.run("r2:get-idx", async () => {
-        options.countSubrequest?.();
-        return await run();
-      })
-    : await run();
-  if (!idxObj) return undefined;
-  const idxBuf = new Uint8Array(await idxObj.arrayBuffer());
-  const parsed = parseIdxV2(idxBuf);
-  if (!parsed) return undefined;
-  touchIdxCache(packKey, parsed);
-  return parsed;
-}
+import { hexToBytes, createLogger } from "@/common/index.ts";
+import {
+  encodeOfsDeltaDistance,
+  readPackHeaderEx,
+  readPackHeaderExFromBuf,
+  readPackRange,
+} from "@/git/pack/packMeta.ts";
+import { loadIdxParsed } from "./idxCache.ts";
 
 // Utility: simple concurrency-limited mapper
 async function mapWithConcurrency<T, R>(
@@ -69,13 +28,16 @@ async function mapWithConcurrency<T, R>(
 }
 
 /**
- * Assemble a minimal PACK from a single R2 pack+idx that covers all needed OIDs.
- * Uses idx to locate object offsets and range-reads payloads from the pack.
+ * @deprecated This function is deprecated in favor of streamPackFromR2 from assemblerStream.ts.
+ * The streaming implementation reduces memory usage and supports backpressure.
+ * This buffered implementation will be removed in a future version.
  *
- * @param env Worker environment (provides `REPO_BUCKET` and logging level)
- * @param packKey R2 key for the `.pack` file
- * @param neededOids List of object IDs the output pack must contain
- * @returns PACK bytes with trailing SHA-1, or `undefined` if the single pack can't cover all OIDs
+ * Assembles a pack from a single pack file in R2.
+ * @param env - Worker environment
+ * @param packKey - R2 key for the .pack file
+ * @param neededOids - List of object IDs the output pack must contain
+ * @param options - Signal, limiter, and subrequest counter
+ * @returns Assembled pack bytes
  */
 export async function assemblePackFromR2(
   env: Env,
@@ -402,14 +364,16 @@ export async function assemblePackFromR2(
 }
 
 /**
- * Assembles a minimal PACK from multiple source packs that covers all needed OIDs.
- * Handles both OFS_DELTA and REF_DELTA objects, rewriting offsets as needed.
- * Supports topologically valid ordering for delta chains.
- * @param env - Worker environment (provides REPO_BUCKET and logging level)
+ * @deprecated This function is deprecated in favor of streamPackFromMultiplePacks from assemblerStream.ts.
+ * The streaming implementation reduces memory usage and supports backpressure.
+ * This buffered implementation will be removed in a future version.
+ *
+ * Assembles a pack from multiple pack files in R2.
+ * @param env - Worker environment
  * @param packKeys - Array of R2 pack keys to use as sources
  * @param neededOids - List of object IDs the output pack must contain
- * @param signal - Optional AbortSignal for cancellation
- * @returns PACK bytes with trailing SHA-1, or undefined if coverage is not possible
+ * @param options - Signal, limiter, and subrequest counter
+ * @returns Assembled pack bytes
  */
 export async function assemblePackFromMultiplePacks(
   env: Env,
@@ -835,93 +799,3 @@ export async function assemblePackFromMultiplePacks(
   });
   return out;
 }
-
-/**
- * Parse a PACK entry header from an in-memory pack buffer at the given offset.
- * Mirrors the behavior of readPackHeaderEx but avoids R2 range reads.
- */
-function readPackHeaderExFromBuf(
-  buf: Uint8Array,
-  offset: number
-):
-  | {
-      type: number;
-      sizeVarBytes: Uint8Array;
-      headerLen: number;
-      baseOid?: string;
-      baseRel?: number;
-    }
-  | undefined {
-  let p = offset;
-  if (p >= buf.length) return undefined;
-  const start = p;
-  let c = buf[p++];
-  const type = (c >> 4) & 0x07;
-  // collect size varint bytes
-  while (c & 0x80) {
-    if (p >= buf.length) return undefined;
-    c = buf[p++];
-  }
-  const sizeVarBytes = buf.subarray(start, p);
-  if (type === 7) {
-    // REF_DELTA
-    if (p + 20 > buf.length) return undefined;
-    const baseOid = bytesToHex(buf.subarray(p, p + 20));
-    const headerLen = sizeVarBytes.length + 20;
-    return { type, sizeVarBytes, headerLen, baseOid };
-  }
-  if (type === 6) {
-    // OFS_DELTA
-    const ofsStart = p;
-    if (p >= buf.length) return undefined;
-    let x = 0;
-    let b = buf[p++];
-    x = b & 0x7f;
-    while (b & 0x80) {
-      if (p >= buf.length) return undefined;
-      b = buf[p++];
-      x = ((x + 1) << 7) | (b & 0x7f);
-    }
-    const headerLen = sizeVarBytes.length + (p - ofsStart);
-    return { type, sizeVarBytes, headerLen, baseRel: x };
-  }
-  return { type, sizeVarBytes, headerLen: sizeVarBytes.length };
-}
-
-/**
- * Encodes OFS_DELTA distance using Git's varint-with-add-one scheme.
- * Inverse of the decoding implemented in this module.
- * @param rel - Distance from delta object to its base in bytes (newOffset - baseOffset)
- * @returns Varint bytes encoding the relative distance
- */
-export function encodeOfsDeltaDistance(rel: number): Uint8Array {
-  // Correct inverse of the decoder used above:
-  // Given X, produce groups g_k..g_0 such that:
-  //   X = (((g_0 + 1) << 7 | g_1) + 1 << 7 | g_2) ... | g_k
-  // We compute g_k first by peeling off low 7 bits, then iterate
-  // with: prev = ((cur - g) >> 7) - 1 until prev < 0, finally reverse.
-  if (rel <= 0) return new Uint8Array([0]);
-  let cur = rel >>> 0;
-  const groups: number[] = [];
-  while (true) {
-    const g = cur & 0x7f;
-    groups.push(g);
-    cur = ((cur - g) >>> 7) - 1;
-    if (cur < 0) break;
-  }
-  // Now groups = [g_k, g_{k-1}, ..., g_0]; emit in order g_0..g_k,
-  // setting MSB on all but the final (least-significant) group.
-  groups.reverse();
-  for (let i = 0; i < groups.length - 1; i++) groups[i] |= 0x80;
-  return new Uint8Array(groups);
-}
-
-/**
- * Parses a Git pack index v2/v3 file.
- * Extracts object IDs and their offsets within the pack file.
- * Handles both 32-bit and 64-bit offsets.
- * @param buf - Raw index file bytes
- * @returns Parsed index with OIDs and offsets, or undefined if invalid
- */
-// parseIdxV2 moved to packMeta.ts
-// readPackRange moved to packMeta.ts

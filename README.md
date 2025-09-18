@@ -57,7 +57,7 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 - **Response times**: <50ms for cached paths, <100ms globally for cold requests
 - **Pack assembly**: Streaming from R2 using `.idx` range reads, with heuristics to load whole packs when beneficial
 - **Centralized pack discovery**: Per-request coalesced discovery (DO metadata + best-effort R2 listing) reduces upstream calls
-- **Memory efficiency**: Multi-pack-index support avoids expensive repack operations
+- **Memory efficiency**: Streaming implementation with crypto.DigestStream for incremental SHA-1 computation
 
 ### Implementation Details
 

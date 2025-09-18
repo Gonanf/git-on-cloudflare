@@ -198,3 +198,83 @@ export async function readPackRange(
   }
   return await run();
 }
+
+/**
+ * Parse a PACK entry header from an in-memory pack buffer at the given offset.
+ * Mirrors the behavior of readPackHeaderEx but avoids R2 range reads.
+ */
+export function readPackHeaderExFromBuf(
+  buf: Uint8Array,
+  offset: number
+):
+  | {
+      type: number;
+      sizeVarBytes: Uint8Array;
+      headerLen: number;
+      baseOid?: string;
+      baseRel?: number;
+    }
+  | undefined {
+  let p = offset;
+  if (p >= buf.length) return undefined;
+  const start = p;
+  let c = buf[p++];
+  const type = (c >> 4) & 0x07;
+  // collect size varint bytes
+  while (c & 0x80) {
+    if (p >= buf.length) return undefined;
+    c = buf[p++];
+  }
+  const sizeVarBytes = buf.subarray(start, p);
+  if (type === 7) {
+    // REF_DELTA
+    if (p + 20 > buf.length) return undefined;
+    const baseOid = bytesToHex(buf.subarray(p, p + 20));
+    const headerLen = sizeVarBytes.length + 20;
+    return { type, sizeVarBytes, headerLen, baseOid };
+  }
+  if (type === 6) {
+    // OFS_DELTA
+    const ofsStart = p;
+    if (p >= buf.length) return undefined;
+    let x = 0;
+    let b = buf[p++];
+    x = b & 0x7f;
+    while (b & 0x80) {
+      if (p >= buf.length) return undefined;
+      b = buf[p++];
+      x = ((x + 1) << 7) | (b & 0x7f);
+    }
+    const headerLen = sizeVarBytes.length + (p - ofsStart);
+    return { type, sizeVarBytes, headerLen, baseRel: x };
+  }
+  return { type, sizeVarBytes, headerLen: sizeVarBytes.length };
+}
+
+/**
+ * Encodes OFS_DELTA distance using Git's varint-with-add-one scheme.
+ * Inverse of the decoding implemented in this module.
+ * @param rel - Distance from delta object to its base in bytes (newOffset - baseOffset)
+ * @returns Varint bytes encoding the relative distance
+ */
+export function encodeOfsDeltaDistance(rel: number): Uint8Array {
+  // Correct inverse of the decoder used above:
+  // Given X, produce groups g_k..g_0 such that:
+  //   X = (((g_0 + 1) << 7 | g_1) + 1 << 7 | g_2) ... | g_k
+  // We compute g_k first by peeling off low 7 bits, then iterate
+  // with: prev = ((cur - g) >> 7) - 1 until prev < 0, finally reverse.
+  if (rel <= 0) return new Uint8Array([0]);
+  let cur = rel >>> 0;
+  const groups: number[] = [];
+  while (true) {
+    const g = cur & 0x7f;
+    groups.push(g);
+    cur = ((cur - g) >>> 7) - 1;
+    if (cur < 0) break;
+  }
+  // Now groups = [g_k, g_{k-1}, ..., g_0]; emit in order g_0..g_k,
+  // setting MSB on all but the final (least-significant) group.
+  groups.reverse();
+  for (let i = 0; i < groups.length - 1; i++) groups[i] |= 0x80;
+  return new Uint8Array(groups);
+}

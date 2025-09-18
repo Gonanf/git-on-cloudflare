@@ -1,105 +1,22 @@
 import type { GitObjectType } from "@/git/core/index.ts";
 import type { Logger } from "@/common/index.ts";
 import type { CacheContext } from "@/cache/index.ts";
-import type { RepoDurableObject } from "@/do/repo/repoDO.ts";
+import type { RepoDurableObject } from "@/index.ts";
 
-import { pktLine, flushPkt, delimPkt, concatChunks, decodePktLines } from "@/git/core/index.ts";
+import { pktLine, flushPkt, delimPkt, concatChunks } from "@/git/core/index.ts";
 import { getRepoStub, createLogger, createInflateStream } from "@/common/index.ts";
+import { assemblePackFromMultiplePacks, assemblePackFromR2 } from "@/git/pack/assembler.ts";
 import { readLooseObjectRaw } from "./read.ts";
-import { assemblePackFromR2, assemblePackFromMultiplePacks } from "@/git/pack/assembler.ts";
 import { getPackCandidates } from "./packDiscovery.ts";
 import { getLimiter, countSubrequest } from "./limits.ts";
 import { beginClosurePhase, endClosurePhase } from "./heavyMode.ts";
 import { buildPackV2 } from "@/git/pack/index.ts";
-
-export function parseFetchArgs(body: Uint8Array) {
-  const items = decodePktLines(body);
-  const wantSet = new Set<string>();
-  const haves: string[] = [];
-  let done = false;
-  let afterDelim = false;
-  for (const it of items) {
-    if (it.type === "delim") {
-      afterDelim = true;
-      continue;
-    }
-    if (it.type !== "line") continue;
-    const line = it.text.replace(/\r?\n$/, "");
-    if (!afterDelim) {
-      // capability lines ignored for now
-      continue;
-    }
-    if (line.startsWith("want ")) wantSet.add(line.slice(5, 45));
-    else if (line.startsWith("have ")) haves.push(line.slice(5, 45));
-    else if (line === "done") done = true;
-  }
-  return { wants: Array.from(wantSet), haves, done };
-}
-
-/**
- * Builds a capped union of object OIDs across the given pack keys using DO RPCs.
- * Prefers the batch API `getPackOidsBatch(keys)` and falls back to per-key RPCs on error.
- * This union is intended to drive a multi-pack assembly that produces a thick pack
- * without computing object closure (used for initial clone and timeout fallback).
- * @param stub - Repo DO stub exposing getPackOidsBatch/getPackOids
- * @param keys - Recent pack keys to union (already capped by caller)
- * @param limiter - Per-request limiter wrapper
- * @param cacheCtx - Optional CacheContext for subrequest accounting
- * @param log - Logger-like object for debug logging
- */
-async function buildUnionNeededForKeys(
-  stub: DurableObjectStub<RepoDurableObject>,
-  keys: string[],
-  limiter: { run<T>(name: string, fn: () => Promise<T>): Promise<T> },
-  cacheCtx: CacheContext | undefined,
-  log: Logger,
-  wants?: string[]
-): Promise<string[]> {
-  const MAX_UNION = 25000;
-  const needSet = new Set<string>();
-
-  // Always include wants in the union to ensure they're in the assembled pack
-  if (wants) {
-    for (const w of wants) {
-      needSet.add(w.toLowerCase());
-    }
-  }
-
-  let usedBatch = false;
-  try {
-    const batchMap = await limiter.run("do:getPackOidsBatch", async () => {
-      countSubrequest(cacheCtx);
-      return await stub.getPackOidsBatch(keys);
-    });
-    for (const k of keys) {
-      const oids = (batchMap.get ? batchMap.get(k) : undefined) || [];
-      for (const oid of oids) {
-        needSet.add(String(oid).toLowerCase());
-        if (needSet.size >= MAX_UNION) break;
-      }
-      if (needSet.size >= MAX_UNION) break;
-    }
-    usedBatch = true;
-  } catch (e) {
-    log.debug("fetch:union:getPackOidsBatch:error", { error: String(e) });
-  }
-  if (!usedBatch) {
-    for (const k of keys) {
-      try {
-        const oids = await limiter.run("do:getPackOids", async () => {
-          countSubrequest(cacheCtx);
-          return await stub.getPackOids(k);
-        });
-        for (const oid of oids) {
-          needSet.add(String(oid).toLowerCase());
-          if (needSet.size >= MAX_UNION) break;
-        }
-      } catch {}
-      if (needSet.size >= MAX_UNION) break;
-    }
-  }
-  return Array.from(needSet);
-}
+import { parseFetchArgs } from "./args.ts";
+import {
+  findCommonHaves,
+  buildUnionNeededForKeys,
+  countMissingRootTreesFromWants,
+} from "./closure.ts";
 
 // Helper: expand candidate packs via R2 and return an expanded sliced list up to packCap.
 async function expandCandidates(
@@ -127,29 +44,6 @@ function getPackCapFromEnv(env: Env): number {
   const raw = Number(env.REPO_PACKLIST_MAX ?? 20);
   const n = Number.isFinite(raw) ? Math.floor(raw) : 20;
   return Math.max(1, Math.min(100, n));
-}
-
-// Helper: compute how many wanted commits have a root tree missing from a membership set.
-// Used by both the initial union guard and the post-closure coverage guard.
-async function countMissingRootTreesFromWants(
-  env: Env,
-  repoId: string,
-  wants: string[],
-  cacheCtx: CacheContext | undefined,
-  has: Set<string>
-): Promise<number> {
-  const td = new TextDecoder();
-  const CHECK_MAX = Math.min(wants.length, 32);
-  let missingRoots = 0;
-  for (let i = 0; i < CHECK_MAX; i++) {
-    const want = wants[i];
-    const obj = await readLooseObjectRaw(env, repoId, want, cacheCtx);
-    if (!obj || obj.type !== "commit") continue;
-    const text = td.decode(obj.payload);
-    const m = text.match(/^tree ([0-9a-f]{40})/m);
-    if (m && !has.has(m[1])) missingRoots++;
-  }
-  return missingRoots;
 }
 
 // Helper: try assembling from a single pack (first key, then others) with logging.
@@ -196,6 +90,10 @@ async function tryAssembleSinglePackPath(
 }
 
 /**
+ * @deprecated This function is deprecated in favor of the streaming implementation.
+ * Use handleFetchV2Streaming from uploadStream.ts instead.
+ * This buffered implementation will be removed in a future version.
+ *
  * Handles Git fetch protocol v2 requests.
  * Optimizations:
  * - Initial clone union-first fast path: directly assemble a thick pack by unioning across recent packs,
@@ -248,7 +146,7 @@ export async function handleFetchV2(
       if (Array.isArray(packKeys) && packKeys.length >= 2) {
         const MAX_KEYS = Math.min(packCap, packKeys.length);
         let keys = packKeys.slice(0, MAX_KEYS);
-        let unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log, wants);
+        let unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
         // Quick root-tree coverage guard: if union seems insufficient, expand to full candidate window
         if (unionNeeded.length > 0) {
           try {
@@ -264,14 +162,7 @@ export async function handleFetchV2(
               const moreKeys = packKeys.slice(0, SLICE);
               if (moreKeys.length > keys.length) {
                 keys = moreKeys;
-                unionNeeded = await buildUnionNeededForKeys(
-                  stub,
-                  keys,
-                  limiter,
-                  cacheCtx,
-                  log,
-                  wants
-                );
+                unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
               }
               log.warn("fetch:init-union-missing-roots", { missingRoots, packs: keys.length });
             }
@@ -304,14 +195,7 @@ export async function handleFetchV2(
             log
           );
           if (keys2 && keys2.length > keys.length) {
-            const union2 = await buildUnionNeededForKeys(
-              stub,
-              keys2,
-              limiter,
-              cacheCtx,
-              log,
-              wants
-            );
+            const union2 = await buildUnionNeededForKeys(stub, keys2, limiter, cacheCtx, log);
             if (union2.length > 0) {
               const mp2 = await assemblePackFromMultiplePacks(env, keys2, union2, {
                 signal,
@@ -355,14 +239,7 @@ export async function handleFetchV2(
       if (packKeys.length > 0) {
         const MAX_KEYS = Math.min(packCap, packKeys.length);
         const keys = packKeys.slice(0, MAX_KEYS);
-        const unionNeeded = await buildUnionNeededForKeys(
-          stub,
-          keys,
-          limiter,
-          cacheCtx,
-          log,
-          wants
-        );
+        const unionNeeded = await buildUnionNeededForKeys(stub, keys, limiter, cacheCtx, log);
         if (keys.length >= 2 && unionNeeded.length > 0) {
           const mp = await assemblePackFromMultiplePacks(env, keys, unionNeeded, {
             signal,
@@ -376,7 +253,7 @@ export async function handleFetchV2(
               packs: keys.length,
               union: unionNeeded.length,
             });
-            const ackOids = done ? [] : await findCommonHaves(env, repoId, haves);
+            const ackOids = done ? [] : await findCommonHaves(env, repoId, haves, cacheCtx);
             return respondWithPackfile(mp, done, ackOids, signal);
           }
         } else if (keys.length === 1 && unionNeeded.length > 0) {
@@ -393,7 +270,7 @@ export async function handleFetchV2(
             });
             if (single) {
               log.info("fetch:timeout-fallback:path-single", { key: k });
-              const ackOids = done ? [] : await findCommonHaves(env, repoId, haves);
+              const ackOids = done ? [] : await findCommonHaves(env, repoId, haves, cacheCtx);
               return respondWithPackfile(single, done, ackOids, signal);
             }
           } catch (e) {
@@ -440,7 +317,7 @@ export async function handleFetchV2(
 
   // For non-done requests with haves, send only acknowledgments
   if (!done && haves.length > 0) {
-    const ackOids = await findCommonHaves(env, repoId, haves);
+    const ackOids = await findCommonHaves(env, repoId, haves, cacheCtx);
     log.debug("fetch:negotiation", { haves: haves.length, acks: ackOids.length });
 
     const chunks: Uint8Array[] = [pktLine("acknowledgments\n")];
@@ -464,7 +341,7 @@ export async function handleFetchV2(
   }
 
   // Compute set of common haves we can ACK (limit for perf)
-  const ackOids = done ? [] : await findCommonHaves(env, repoId, haves);
+  const ackOids = done ? [] : await findCommonHaves(env, repoId, haves, cacheCtx);
   if (signal?.aborted) return new Response("client aborted\n", { status: 499 });
 
   // Try to assemble from R2 packs (single-pack first, then multi-pack union)
@@ -672,6 +549,10 @@ export async function handleFetchV2(
 }
 
 /**
+ * @deprecated This function is deprecated in favor of the streaming implementation.
+ * Use the streaming response builder from uploadStream.ts instead.
+ * This buffered implementation will be removed in a future version.
+ *
  * Constructs a Git protocol v2 response with packfile data.
  * Formats the response with proper pkt-line encoding and acknowledgments.
  * @param packfile - The assembled pack data
@@ -687,6 +568,8 @@ export function respondWithPackfile(
   signal?: AbortSignal
 ) {
   const chunks: Uint8Array[] = [];
+  // Only include acknowledgments block when continuing negotiation (!done)
+  // The protocol expects acknowledgments only during negotiation, not for initial clones with done=true
   if (!done) {
     chunks.push(pktLine("acknowledgments\n"));
     if (ackOids && ackOids.length > 0) {
@@ -701,7 +584,9 @@ export function respondWithPackfile(
     chunks.push(delimPkt());
   }
   chunks.push(pktLine("packfile\n"));
-  const maxChunk = 65500;
+  // Max pkt-line payload for sideband-64k: 65536 - 4 (pkt-line header) - 1 (sideband byte) = 65531
+  // Use 65515 for safety margin
+  const maxChunk = 65515;
   for (let off = 0; off < packfile.byteLength; off += maxChunk) {
     if (signal?.aborted) return new Response("client aborted\n", { status: 499 });
     const slice = packfile.subarray(off, Math.min(off + maxChunk, packfile.byteLength));
@@ -976,11 +861,15 @@ async function collectClosure(
 }
 
 /**
- * Computes the minimal set of objects needed for a fetch.
- * Includes all objects reachable from wants but not from haves.
+ * @deprecated This function is deprecated in favor of computeNeededFast from uploadStream.ts.
+ * The new implementation uses frontier-subtract approach for better performance.
+ * This buffered implementation will be removed in a future version.
+ *
+ * Computes the minimal set of objects needed by the client.
+ * Uses closure calculation to find all objects reachable from wants but not from haves.
  * @param env - Worker environment
  * @param repoId - Repository identifier
- * @param wants - Requested commit OIDs
+ * @param wants - Client's wanted commit OIDs
  * @param haves - Client's existing commit OIDs
  * @returns Array of object OIDs needed by the client
  */
@@ -999,80 +888,3 @@ export async function computeNeeded(
   }
   return Array.from(wantSet);
 }
-
-async function findCommonHaves(env: Env, repoId: string, haves: string[]): Promise<string[]> {
-  const stub = getRepoStub(env, repoId);
-  const limiter = getLimiter(undefined);
-  const limit = 128;
-  const sample = haves.slice(0, limit);
-
-  // Try batch RPC if available
-  try {
-    const batch: boolean[] = await limiter.run("do:hasLooseBatch", async () => {
-      countSubrequest();
-      return await stub.hasLooseBatch(sample);
-    });
-    if (Array.isArray(batch) && batch.length === sample.length) {
-      const out: string[] = [];
-      for (let i = 0; i < sample.length; i++) if (batch[i]) out.push(sample[i]);
-      // De-duplicate while preserving order
-      const seen = new Set<string>();
-      const uniq: string[] = [];
-      for (const o of out)
-        if (!seen.has(o)) {
-          seen.add(o);
-          uniq.push(o);
-        }
-      return uniq;
-    }
-  } catch {}
-
-  // Fallback: reduce RPCs using batched probes
-  const out: string[] = [];
-  const CHUNK = 64;
-  for (let i = 0; i < sample.length; i += CHUNK) {
-    const part = sample.slice(i, i + CHUNK);
-    try {
-      const flags = await limiter.run("do:hasLooseBatch", async () => {
-        countSubrequest();
-        return await stub.hasLooseBatch(part);
-      });
-      for (let j = 0; j < flags.length; j++) if (flags[j]) out.push(part[j]);
-    } catch {
-      // If even batch fails, fallback to a few individual calls with tiny concurrency
-      const conc = 4;
-      let idx = 0;
-      const f = new Array(part.length).fill(false) as boolean[];
-      const workers: Promise<void>[] = [];
-      const run = async () => {
-        while (idx < part.length) {
-          const k = idx++;
-          try {
-            f[k] = await limiter.run("do:hasLoose", async () => {
-              countSubrequest();
-              return await stub.hasLoose(part[k]);
-            });
-          } catch (e) {
-            // Minimal debug log to track failures without spamming
-            const log = createLogger(env.LOG_LEVEL, { service: "FindCommonHaves", repoId });
-            log.debug("findCommonHaves:hasLoose:error", { error: String(e) });
-            f[k] = false;
-          }
-        }
-      };
-      for (let c = 0; c < conc; c++) workers.push(run());
-      await Promise.all(workers);
-      for (let j = 0; j < f.length; j++) if (f[j]) out.push(part[j]);
-    }
-  }
-  const seen = new Set<string>();
-  const uniq: string[] = [];
-  for (const o of out)
-    if (!seen.has(o)) {
-      seen.add(o);
-      uniq.push(o);
-    }
-  return uniq;
-}
-
-// buildPackV2 is shared from src/git/pack/build.ts via pack/index.ts

@@ -12,6 +12,7 @@ import {
   inflateAndParseHeader,
   parseTagTarget,
 } from "@/git";
+import { handleFetchV2Streaming } from "@/git/operations/uploadStream.ts";
 import { getRepoStub } from "@/common";
 import { repoKey } from "@/keys";
 import { verifyAuth } from "@/auth";
@@ -145,7 +146,16 @@ async function handleUploadPackPOST(
   }
 
   if (command === "fetch") {
-    return handleFetchV2(env, repoId, body, request.signal, { req: request, ctx });
+    // Use streaming by default, allow opt-out with X-Git-Streaming: false
+    // The buffered implementation is deprecated and will be removed in a future version
+    const forceBuffered = request.headers.get("X-Git-Streaming") === "false";
+
+    if (forceBuffered) {
+      // Deprecated: buffered mode is only kept for emergency fallback
+      return handleFetchV2(env, repoId, body, request.signal, { req: request, ctx });
+    } else {
+      return handleFetchV2Streaming(env, repoId, body, request.signal, { req: request, ctx });
+    }
   }
 
   return new Response("Unsupported command or malformed request\n", { status: 400 });
