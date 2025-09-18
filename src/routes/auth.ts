@@ -1,17 +1,21 @@
 import { AutoRouter } from "itty-router";
-import { renderViewStream, renderPage } from "@/web";
+import { renderView, renderPage } from "@/web";
 import { getAuthStub, getBearerToken, unauthorizedBearer, tooManyAttempts, json } from "@/common";
 
 export function registerAuthRoutes(router: ReturnType<typeof AutoRouter>) {
   // Auth UI page
   router.get(`/auth`, async (request, env: Env) => {
     try {
-      const stream = await renderViewStream(env, "auth", {});
-      return new Response(stream, {
+      const html = await renderView(env, "auth", {});
+      if (!html) {
+        const body = `<h1>Auth</h1><p>Auth page asset missing.</p>`;
+        return renderPage(env, request, "Auth · git-on-cloudflare", body);
+      }
+      return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid-stream",
+          "X-Page-Renderer": "liquid",
         },
       });
     } catch {

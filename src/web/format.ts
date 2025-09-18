@@ -68,7 +68,7 @@ export function bytesToText(bytes: Uint8Array): string {
   }
   // Default to UTF-8
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
   } catch {
     return "(binary content)";
   }

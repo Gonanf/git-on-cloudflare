@@ -1,10 +1,8 @@
 import type { FS } from "liquidjs";
-import type { Readable as NodeReadable } from "node:stream";
 
 import { Liquid } from "liquidjs";
 import { escapeHtml } from "./format";
 import { isHttpError } from "./http";
-import { Readable } from "node:stream";
 
 /**
  * LiquidJS engine configured to load templates from Wrangler ASSETS.
@@ -108,14 +106,13 @@ function getEngine(env: Env): Liquid {
 }
 
 /**
- * Non-stream render for a body view (no DOCTYPE), e.g. "owner", "overview", etc.
+ * Render a body view (no DOCTYPE), e.g. "owner", "overview", etc.
  * Returns null if the template cannot be loaded/rendered.
  *
  * Usage guidance:
- * - Prefer this in error paths and fallback pages so the template is fully buffered
- *   and exceptions are caught before sending any bytes.
- * - For normal UI pages, `renderViewStream` is generally preferred for lower TTFB
- *   and memory usage, as long as the rendering path is stable.
+ * - Used for all template rendering in the application
+ * - Returns the complete rendered HTML as a string
+ * - Exceptions are caught before sending any bytes
  */
 export async function renderView(
   env: Env,
@@ -125,29 +122,6 @@ export async function renderView(
   const engine = getEngine(env);
   // We expect templates under src/assets/templates/<name>.liquid
   return await engine.renderFile(name, data);
-}
-
-/**
- * Stream render for a body view (no DOCTYPE).
- *
- * Notes:
- * - Do NOT use in error handlers. If a template or partial fails mid-stream,
- *   you may produce partial output with no way to recover. Our `handleError`
- *   intentionally uses `renderView` (non-stream) for robustness.
- * - The Liquid Node build returns a Node.js Readable stream; we convert it to
- *   a DOM ReadableStream via `Readable.toWeb(...)`.
- */
-export async function renderViewStream(
-  env: Env,
-  name: string,
-  data: Record<string, unknown>
-): Promise<ReadableStream<Uint8Array>> {
-  const engine = getEngine(env);
-  // Liquid's type for renderFileToNodeStream isn't specific to the Node build,
-  // so we cast to the Node stream.Readable that Readable.toWeb expects.
-  const nodeStream = (await engine.renderFileToNodeStream(name, data)) as unknown as NodeReadable;
-  const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream<Uint8Array>;
-  return webStream;
 }
 
 /**

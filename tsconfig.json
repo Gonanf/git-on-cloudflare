@@ -1,14 +1,14 @@
 {
   "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
+    "target": "es2022",
+    "module": "es2022",
+    "moduleResolution": "bundler",
     "jsx": "react-jsx",
     "strict": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "types": ["./worker-configuration.d.ts", "node"],
-    "lib": ["ES2022", "WebWorker"],
+    "types": ["./worker-configuration.d.ts"],
+    "lib": ["ES2022"],
     "skipLibCheck": true,
     "allowJs": false,
     "forceConsistentCasingInFileNames": true,
@@ -17,5 +17,6 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*", "test/**/*"]
+  "exclude": ["node_modules"],
+  "include": ["src", "./worker-configuration.d.ts"]
 }

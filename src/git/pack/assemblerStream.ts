@@ -8,23 +8,6 @@ import {
 } from "@/git/pack/packMeta.ts";
 import { loadIdxParsed } from "./idxCache.ts";
 
-// TypeScript declarations for Cloudflare Workers crypto extensions
-declare global {
-  interface DigestStream extends WritableStream<ArrayBuffer | ArrayBufferView> {
-    readonly digest: Promise<ArrayBuffer>;
-  }
-
-  interface Crypto {
-    DigestStream: {
-      new (algorithm: string | SubtleCryptoHashAlgorithm): DigestStream;
-    };
-  }
-
-  interface SubtleCryptoHashAlgorithm {
-    name: string;
-  }
-}
-
 /**
  * Creates a streaming pack assembler that emits pack bytes on-the-fly.
  * This is now a simple wrapper around streamPackFromMultiplePacks for a single pack.

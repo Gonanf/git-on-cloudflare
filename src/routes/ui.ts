@@ -18,7 +18,6 @@ import {
   bytesToText,
   formatWhen,
   renderView,
-  renderViewStream,
   getMarkdownHighlightLangs,
   getHighlightLangsForBlobSmart,
   isValidOwnerRepo,
@@ -52,16 +51,19 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       return badRequest(env, "Invalid owner", "Owner contains invalid characters or length");
     }
     const repos = await listReposForOwner(env, owner);
-    const stream = await renderViewStream(env, "owner", {
+    const html = await renderView(env, "owner", {
       title: `${owner} · Repositories`,
       owner,
       repos,
     });
-    return new Response(stream, {
+    if (!html) {
+      return new Response("Failed to render template", { status: 500 });
+    }
+    return new Response(html, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "liquid-stream",
+        "Cache-Control": "public, max-age=60",
+        "X-Page-Renderer": "liquid",
       },
     });
   });
@@ -159,12 +161,12 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     // Check unpacking progress (shared helper)
     const progress = await getUnpackProgress(env, repoId);
 
-    const stream = await renderViewStream(env, "overview", {
+    const html = await renderView(env, "overview", {
       title: `${owner}/${repo}`,
       owner,
       repo,
       refShort,
-      refEnc: refEnc,
+      refEnc,
       branches: branchesData,
       tags: tagsData,
       readmeMd,
@@ -174,11 +176,14 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       highlightLangs: readmeMd ? getMarkdownHighlightLangs() : [],
       progress,
     });
-    return new Response(stream, {
+    if (!html) {
+      return new Response("Failed to render template", { status: 500 });
+    }
+    return new Response(html, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "liquid-stream",
+        "X-Page-Renderer": "liquid",
       },
     });
   });
@@ -314,7 +319,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
             ? `/${owner}/${repo}/tree?ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(parts.slice(0, -1).join("/"))}`
             : null;
         const progress = await getUnpackProgress(env, repoId);
-        const stream = await renderViewStream(env, "tree", {
+        const html = await renderView(env, "tree", {
           title: `${path || "root"} · ${owner}/${repo}`,
           owner,
           repo,
@@ -324,11 +329,14 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           parentHref,
           entries,
         });
-        return new Response(stream, {
+        if (!html) {
+          return new Response("Failed to render template", { status: 500 });
+        }
+        return new Response(html, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Page-Renderer": "liquid-stream",
+            "X-Page-Renderer": "liquid",
           },
         });
       } else {
@@ -339,7 +347,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         // Infer language and load only what we need (use smart inference with content)
         const langs = getHighlightLangsForBlobSmart(title, text);
         const codeLang = langs[0] || null;
-        const stream = await renderViewStream(env, "blob", {
+        const html = await renderView(env, "blob", {
           title: `${title} · ${owner}/${repo}`,
           owner,
           repo,
@@ -355,11 +363,14 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           needsHighlight: true,
           highlightLangs: langs,
         });
-        return new Response(stream, {
+        if (!html) {
+          return new Response("Failed to render template", { status: 500 });
+        }
+        return new Response(html, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Page-Renderer": "liquid-stream",
+            "X-Page-Renderer": "liquid",
           },
         });
       }
@@ -410,7 +421,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         const sizeStr = formatSize(result.size || 0);
         const viewRawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&view=1&name=${encodeURIComponent(fileName)}`;
         const rawHref = `/${owner}/${repo}/raw?oid=${encodeURIComponent(result.oid)}&download=1&name=${encodeURIComponent(fileName)}`;
-        const stream = await renderViewStream(env, "blob", {
+        const html = await renderView(env, "blob", {
           title: `${fileName} · ${owner}/${repo}`,
           owner,
           repo,
@@ -421,11 +432,14 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           viewRawHref,
           rawHref,
         });
-        return new Response(stream, {
+        if (!html) {
+          return new Response("Failed to render template", { status: 500 });
+        }
+        return new Response(html, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Page-Renderer": "liquid-stream",
+            "X-Page-Renderer": "liquid",
           },
         });
       }
@@ -491,12 +505,15 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         }
       }
 
-      const stream = await renderViewStream(env, "blob", templateData);
-      return new Response(stream, {
+      const html = await renderView(env, "blob", templateData);
+      if (!html) {
+        return new Response("Failed to render template", { status: 500 });
+      }
+      return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid-stream",
+          "X-Page-Renderer": "liquid",
         },
       });
     } catch (e: any) {
@@ -595,7 +612,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
             : undefined,
       };
       const progress = await getUnpackProgress(env, repoId);
-      const stream = await renderViewStream(env, "commits", {
+      const html = await renderView(env, "commits", {
         title: `Commits on ${ref} · ${owner}/${repo}`,
         owner,
         repo,
@@ -605,11 +622,14 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         pager,
         progress,
       });
-      return new Response(stream, {
+      if (!html) {
+        return new Response("Failed to render template", { status: 500 });
+      }
+      return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid-stream",
+          "X-Page-Renderer": "liquid",
         },
       });
     } catch (e: any) {
@@ -664,14 +684,17 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           authorName: c.author?.name || "",
           when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
         }));
-        const stream = await renderViewStream(env, "commit_rows", {
+        const html = await renderView(env, "commit_rows", {
           owner,
           repo,
           commits,
           compact: true,
           mergeOf: oid,
         });
-        return new Response(stream, {
+        if (!html) {
+          return new Response("Failed to render template", { status: 500 });
+        }
+        return new Response(html, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
@@ -707,7 +730,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       const c = await readCommitInfo(env, repoId, oid, cacheCtx);
       const when = c.author ? formatWhen(c.author.when, c.author.tz) : "";
       const parents = (c.parents || []).map((p) => ({ oid: p, short: p.slice(0, 7) }));
-      const stream = await renderViewStream(env, "commit", {
+      const html = await renderView(env, "commit", {
         title: `${c.oid.slice(0, 7)} · ${owner}/${repo}`,
         owner,
         repo,
@@ -720,11 +743,14 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         treeShort: (c.tree || "").slice(0, 7),
         message: c.message || "",
       });
-      return new Response(stream, {
+      if (!html) {
+        return new Response("Failed to render template", { status: 500 });
+      }
+      return new Response(html, {
         headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Cache-Control": "no-store, no-cache, must-revalidate",
-          "X-Page-Renderer": "liquid-stream",
+          "X-Page-Renderer": "liquid",
         },
       });
     } catch (e: any) {
@@ -950,7 +976,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     const defaultBranch = head?.target?.replace(/^refs\/(heads|tags)\//, "") || "main";
     const refEnc = encodeURIComponent(defaultBranch);
 
-    const stream = await renderViewStream(env, "admin", {
+    const html = await renderView(env, "admin", {
       title: `Admin · ${owner}/${repo}`,
       owner,
       repo,
@@ -967,12 +993,14 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       hydrationData,
       progress,
     });
-
-    return new Response(stream, {
+    if (!html) {
+      return new Response("Failed to render template", { status: 500 });
+    }
+    return new Response(html, {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": "no-store, no-cache, must-revalidate",
-        "X-Page-Renderer": "liquid-stream",
+        "X-Page-Renderer": "liquid",
       },
     });
   });
