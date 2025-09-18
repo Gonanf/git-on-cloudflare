@@ -1,0 +1,498 @@
+{% layout 'layout' %}
+{% block %}
+{% render 'repo_nav',
+  owner: owner,
+  repo: repo,
+  refEnc: refEnc,
+  showRefDropdown: false,
+  currentTab: 'admin'
+%}
+{% if progress %}
+  {% render 'progress', progress: progress %}
+{% endif %}
+<div class="space-y-6">
+  <div class="alert alert-warn">
+    <strong>⚠️ Admin Area</strong> - Actions here can permanently modify repository data
+  </div>
+
+  <!-- Repository Overview -->
+  <div class="card p-6">
+    <h2 class="text-xl font-semibold mb-4">Repository Overview</h2>
+    <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-3">
+      <div>
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+          Storage
+        </div>
+        <div class="font-mono text-sm">{{ storageSize | default: '0 bytes' }}</div>
+      </div>
+      <div>
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+          Packs
+        </div>
+        <div class="font-mono text-sm">
+          {{ packCount | default: 0 }}
+          {% assign hydrationPacks = 0 %}
+          {% for pack in packList %}
+            {% if pack contains 'pack-hydr-' %}
+              {% assign hydrationPacks = hydrationPacks | plus: 1 %}
+            {% endif %}
+          {% endfor %}
+          {% if hydrationPacks > 0 %}
+            <span class="text-xs text-gray-500">({{ hydrationPacks }} hydrated)</span>
+          {% endif %}
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+          HEAD
+        </div>
+        <div class="font-mono text-sm">
+          {% if head.target %}
+            {{ head.target | replace: 'refs/heads/', '' | replace: 'refs/tags/', '' }}
+          {% else %}
+            <span class="text-gray-500">unborn</span>
+          {% endif %}
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+          Branches/Tags
+        </div>
+        <div class="font-mono text-sm">
+          {% assign branches = 0 %}
+          {% assign tags = 0 %}
+          {% for ref in refs %}
+            {% if ref.name contains 'refs/heads/' %}
+              {% assign branches = branches | plus: 1 %}
+            {% elsif ref.name contains 'refs/tags/' %}
+              {% assign tags = tags | plus: 1 %}
+            {% endif %}
+          {% endfor %}
+          {{ branches }}/{{ tags }}
+        </div>
+      </div>
+      {% if state.unpackWork or state.unpackNext %}
+        <div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+            Unpacking
+          </div>
+          <div class="font-mono text-sm text-amber-600 dark:text-amber-400">
+            {% if state.unpackWork %}
+              {{ state.unpackWork.oidsCount }} objects
+            {% else %}
+              Scheduled
+            {% endif %}
+          </div>
+        </div>
+      {% endif %}
+      {% if hydrationData and hydrationData.running %}
+        <div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+            Hydration
+          </div>
+          <div class="font-mono text-sm text-blue-600 dark:text-blue-400">
+            {{ hydrationData.stage }}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Hydration Management -->
+  <div class="card p-6">
+    <h2 class="text-xl font-semibold mb-4">Pack Hydration</h2>
+    <p class="text-gray-600 dark:text-gray-400 mb-4">
+      Hydration optimizes pack files for better performance by reorganizing and consolidating
+      objects.
+    </p>
+    {% if hydrationData.running %}
+      <div class="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
+        <div class="text-sm">
+          <strong>🔄 Running:</strong> {{ hydrationData.stage | capitalize }}
+          {% if hydrationData.progress.packIndex %}
+            • Pack {{ hydrationData.progress.packIndex }}/{{ packList.size }}
+          {% endif %}
+          {% if hydrationData.progress.producedBytes %}
+            • {{ hydrationData.progress.producedBytes | divided_by: 1048576.0 | round: 1 }} MB
+            produced
+          {% endif %}
+          {% if hydrationData.progress.segmentSeq %}
+            • Segment #{{ hydrationData.progress.segmentSeq }}
+          {% endif %}
+        </div>
+      </div>
+    {% elsif hydrationStatus contains 'Completed' %}
+      <div class="mb-4 p-3 bg-green-50 dark:bg-green-900/20 rounded-lg text-sm">
+        <strong>✓ Hydration complete</strong> - Repository is optimized
+      </div>
+    {% endif %}
+    <div class="space-y-4">
+      <div class="flex flex-wrap gap-3">
+        <button id="hydration-dry-run" class="btn" onclick="adminActions.triggerHydration(true)">
+          🔍 Dry Run Analysis
+        </button>
+        <button id="hydration-start" class="btn" onclick="adminActions.triggerHydration(false)">
+          ▶️ Start Hydration
+        </button>
+        <button id="hydration-clear" class="btn secondary" onclick="adminActions.clearHydration()">
+          🗑️ Clear Hydration State
+        </button>
+      </div>
+      <div id="hydration-result" class="hidden">
+        <pre class="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg text-sm overflow-x-auto"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pack Files -->
+  {% if state.packStats and state.packStats.size > 0 %}
+    <div class="card p-6">
+      <h2 class="text-xl font-semibold mb-4">Pack Files ({{ packCount }} total)</h2>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-gray-200 dark:border-gray-700">
+              <th class="text-left py-2">Pack Name</th>
+              <th class="text-left py-2">Type</th>
+              <th class="text-right py-2">Pack Size</th>
+              <th class="text-right py-2">Index Size</th>
+              <th class="text-center py-2">Index</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for packStat in state.packStats %}
+              <tr class="border-b border-gray-100 dark:border-gray-800">
+                <td class="py-2 font-mono text-xs">
+                  {% assign packName = packStat.key | split: '/' | last %}
+                  <span title="{{ packName }}">
+                    {{ packName | slice: 0, 35 -}}
+                    {%- if packName.size > 35 %}...{% endif %}
+                  </span>
+                </td>
+                <td class="py-2">
+                  {% assign packName = packStat.key | split: '/' | last %}
+                  {% if packName contains 'pack-hydr-' %}
+                    <span class="text-xs px-2 py-1 bg-blue-100 dark:bg-blue-900 rounded"
+                      >hydration</span
+                    >
+                  {% elsif packName contains 'pack-test-' %}
+                    <span class="text-xs px-2 py-1 bg-yellow-100 dark:bg-yellow-900 rounded"
+                      >test</span
+                    >
+                  {% else %}
+                    <span class="text-xs px-2 py-1 bg-green-100 dark:bg-green-900 rounded"
+                      >upload</span
+                    >
+                  {% endif %}
+                </td>
+                <td class="py-2 text-right font-mono text-xs">
+                  {% if packStat.packSize %}
+                    {% assign mb = packStat.packSize | divided_by: 1048576.0 %}
+                    {% if mb >= 1 %}
+                      {{ mb | round: 2 }} MB
+                    {% else %}
+                      {% assign kb = packStat.packSize | divided_by: 1024.0 %}
+                      {{ kb | round: 1 }} KB
+                    {% endif %}
+                  {% else %}
+                    -
+                  {% endif %}
+                </td>
+                <td class="py-2 text-right font-mono text-xs">
+                  {% if packStat.indexSize %}
+                    {% assign kb = packStat.indexSize | divided_by: 1024.0 %}
+                    {{ kb | round: 1 }} KB
+                  {% else %}
+                    -
+                  {% endif %}
+                </td>
+                <td class="py-2 text-center">
+                  {% if packStat.hasIndex %}
+                    <span class="text-green-600 dark:text-green-400">✓</span>
+                  {% else %}
+                    <span class="text-red-600 dark:text-red-400">✗</span>
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+            {% if packCount > state.packStats.size %}
+              <tr>
+                <td colspan="5" class="py-2 text-gray-500 italic text-center">
+                  Showing first {{ state.packStats.size }} of {{ packCount }} packs
+                </td>
+              </tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  {% elsif packCount > 0 %}
+    <div class="card p-6">
+      <h2 class="text-xl font-semibold mb-4">Pack Files</h2>
+      <p class="text-gray-600 dark:text-gray-400">
+        {{ packCount }} pack files exist but size information not loaded
+      </p>
+    </div>
+  {% endif %}
+
+  <!-- References -->
+  <div class="card p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-xl font-semibold">References</h2>
+      <button class="btn btn-sm" onclick="location.reload()">🔄 Refresh All</button>
+    </div>
+    <div id="refs-container">
+      {% if refs and refs.size > 0 %}
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-200 dark:border-gray-700">
+                <th class="text-left py-2">Reference Name</th>
+                <th class="text-left py-2">Target OID</th>
+                <th class="text-left py-2">Type</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for ref in refs %}
+                <tr class="border-b border-gray-100 dark:border-gray-800">
+                  <td class="py-2 font-mono text-xs">
+                    {{ ref.name | replace: 'refs/heads/', '' | replace: 'refs/tags/', '' }}
+                  </td>
+                  <td class="py-2 font-mono text-xs text-gray-600 dark:text-gray-400">
+                    <span title="{{ ref.oid }}">{{ ref.oid | slice: 0, 12 }}...</span>
+                  </td>
+                  <td class="py-2">
+                    {% if ref.name contains 'refs/heads/' %}
+                      <span class="text-xs px-2 py-1 bg-blue-100 dark:bg-blue-900 rounded"
+                        >branch</span
+                      >
+                    {% elsif ref.name contains 'refs/tags/' %}
+                      <span class="text-xs px-2 py-1 bg-green-100 dark:bg-green-900 rounded"
+                        >tag</span
+                      >
+                    {% else %}
+                      <span class="text-xs px-2 py-1 bg-gray-100 dark:bg-gray-800 rounded">
+                        {{- ref.name | split: '/' | first -}}
+                      </span>
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="text-gray-500 italic">No references found</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Debug Tools -->
+  <div class="card p-6">
+    <h2 class="text-xl font-semibold mb-4">Debug Tools</h2>
+    <div class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium mb-2">Check Object ID Existence</label>
+        <div class="flex gap-2">
+          <input
+            type="text"
+            id="debug-oid"
+            placeholder="Enter 40-character SHA-1 hash"
+            class="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 focus:ring-2 focus:ring-blue-500 font-mono text-sm"
+            pattern="[a-f0-9]{40}"
+          >
+          <button class="btn" onclick="adminActions.checkOid()">Check OID</button>
+        </div>
+        <div id="oid-result" class="mt-2 hidden">
+          <pre class="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg text-sm overflow-x-auto"></pre>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium mb-2">Repository State Dump</label>
+        <button class="btn" onclick="adminActions.dumpState()">📊 View DO State</button>
+        <div id="state-dump" class="mt-2 hidden">
+          <pre class="bg-gray-100 dark:bg-gray-800 p-4 rounded-lg text-sm overflow-x-auto"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Danger Zone -->
+  <details class="card p-6 border-2 border-red-500 dark:border-red-600">
+    <summary class="cursor-pointer font-bold text-red-600 dark:text-red-500">
+      ⚠️ Danger Zone - Irreversible Actions
+    </summary>
+    <div class="mt-6 space-y-4">
+      <div class="alert alert-error">
+        <strong>Warning:</strong> These actions cannot be undone. All repository data will be
+        permanently deleted.
+      </div>
+      <p class="text-sm text-gray-600 dark:text-gray-400">
+        This will delete all objects, packs, references, and metadata associated with this
+        repository. The repository will be removed from the owner's registry.
+      </p>
+      <button
+        class="btn"
+        style="background-color: #dc2626; color: white;"
+        onclick="adminActions.confirmPurge()"
+      >
+        🗑️ Permanently Delete Repository
+      </button>
+    </div>
+  </details>
+</div>
+
+<script>
+  // Admin actions for the page
+  window.adminActions = {
+    owner: '{{ owner }}',
+    repo: '{{ repo }}',
+
+    async triggerHydration(dryRun) {
+      const btn = dryRun
+        ? document.getElementById('hydration-dry-run')
+        : document.getElementById('hydration-start');
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Processing...';
+
+      try {
+        const res = await fetch(`/${this.owner}/${this.repo}/admin/hydrate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dryRun }),
+        });
+
+        const data = await res.json();
+        const resultDiv = document.getElementById('hydration-result');
+        const pre = resultDiv.querySelector('pre');
+
+        if (res.ok) {
+          pre.textContent = JSON.stringify(data, null, 2);
+          resultDiv.classList.remove('hidden');
+
+          if (!dryRun) {
+            // Reload page after a delay to show updated status
+            setTimeout(() => location.reload(), 2000);
+          }
+        } else {
+          pre.textContent = `Error: ${data.error || 'Unknown error'}`;
+          resultDiv.classList.remove('hidden');
+        }
+      } catch (error) {
+        alert(`Error: ${error.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    },
+
+    async clearHydration() {
+      if (!confirm('Clear all hydration state and hydration-generated packs?')) return;
+
+      const btn = document.getElementById('hydration-clear');
+      const originalText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Clearing...';
+
+      try {
+        const res = await fetch(`/${this.owner}/${this.repo}/admin/hydrate`, {
+          method: 'DELETE',
+        });
+
+        const data = await res.json();
+
+        if (data.ok) {
+          alert('Hydration state cleared successfully');
+          location.reload();
+        } else {
+          alert(`Error: ${data.error || 'Unknown error'}`);
+        }
+      } catch (error) {
+        alert(`Error: ${error.message}`);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    },
+
+    async checkOid() {
+      const input = document.getElementById('debug-oid');
+      const oid = input.value.trim();
+
+      if (!/^[a-f0-9]{40}$/i.test(oid)) {
+        alert('Please enter a valid 40-character SHA-1 hash');
+        return;
+      }
+
+      try {
+        const res = await fetch(`/${this.owner}/${this.repo}/admin/debug-oid/${oid}`);
+        const data = await res.json();
+
+        const resultDiv = document.getElementById('oid-result');
+        const pre = resultDiv.querySelector('pre');
+        pre.textContent = JSON.stringify(data, null, 2);
+        resultDiv.classList.remove('hidden');
+      } catch (error) {
+        alert(`Error: ${error.message}`);
+      }
+    },
+
+    async dumpState() {
+      try {
+        const res = await fetch(`/${this.owner}/${this.repo}/admin/debug-state`);
+        const data = await res.json();
+
+        const dumpDiv = document.getElementById('state-dump');
+        const pre = dumpDiv.querySelector('pre');
+        pre.textContent = JSON.stringify(data, null, 2);
+        dumpDiv.classList.remove('hidden');
+      } catch (error) {
+        alert(`Error: ${error.message}`);
+      }
+    },
+
+    async refreshRefs() {
+      location.reload();
+    },
+
+    async confirmPurge() {
+      const confirmText = prompt(
+        `This action will PERMANENTLY DELETE all repository data.\n\n` +
+          `To confirm, type exactly: purge-${this.owner}/${this.repo}`
+      );
+
+      if (confirmText !== `purge-${this.owner}/${this.repo}`) {
+        if (confirmText !== null) {
+          alert('Confirmation text did not match. Action cancelled.');
+        }
+        return;
+      }
+
+      if (!confirm('Final confirmation: Delete this repository forever?')) {
+        return;
+      }
+
+      try {
+        const res = await fetch(`/${this.owner}/${this.repo}/admin/purge`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirm: confirmText }),
+        });
+
+        const data = await res.json();
+
+        if (data.ok) {
+          alert('Repository has been permanently deleted');
+          window.location.href = `/${this.owner}`;
+        } else {
+          alert(`Error: ${data.error || 'Unknown error'}`);
+        }
+      } catch (error) {
+        alert(`Error: ${error.message}`);
+      }
+    },
+  };
+</script>
+{% endblock %}

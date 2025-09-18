@@ -30,6 +30,19 @@
           class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
           >Commits</a
         >
+        {% if currentTab == 'admin' %}
+          <a
+            href="/{{ owner }}/{{ repo }}/admin"
+            class="text-blue-600 dark:text-blue-400 font-medium"
+            >🔧 Admin</a
+          >
+        {% else %}
+          <a
+            href="/{{ owner }}/{{ repo }}/admin"
+            class="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100"
+            >🔧 Admin</a
+          >
+        {% endif %}
       </nav>
     </div>
     {% if showRefDropdown != false %}

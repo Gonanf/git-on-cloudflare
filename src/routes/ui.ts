@@ -1,5 +1,6 @@
 import type { TreeEntry } from "@/git";
 import type { CacheContext } from "@/cache";
+import type { debugState } from "@/do/repo/debug";
 
 import { AutoRouter } from "itty-router";
 import {
@@ -30,7 +31,8 @@ import {
 import { listReposForOwner } from "@/registry";
 import { buildCacheKeyFrom, cacheOrLoadJSON, cacheOrLoadJSONWithTTL } from "@/cache";
 import { handleError } from "@/web/templates";
-import { getUnpackProgress } from "@/common";
+import { getUnpackProgress, getRepoStub } from "@/common";
+import { verifyAuth } from "@/auth";
 
 // Shorthand for 400 Bad Request using the shared error handler
 async function badRequest(
@@ -877,5 +879,101 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         }
       );
     }
+  });
+
+  // Admin dashboard for repository management
+  router.get(`/:owner/:repo/admin`, async (request, env: Env, ctx: ExecutionContext) => {
+    const { owner, repo } = request.params;
+
+    // Validate parameters
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
+    }
+
+    // Check authentication - admin access required
+    if (!(await verifyAuth(env, owner, request, true))) {
+      return new Response("Unauthorized\n", {
+        status: 401,
+        headers: { "WWW-Authenticate": 'Basic realm="Git Admin", charset="UTF-8"' },
+      });
+    }
+
+    const repoId = repoKey(owner, repo);
+    const stub = getRepoStub(env, repoId);
+
+    // Type definition for debug state return
+    type DebugState = Awaited<ReturnType<typeof debugState>>;
+
+    // Gather admin data in parallel for performance
+    const [state, refs, head, progress] = await Promise.all([
+      stub.debugState().catch(() => ({}) as Partial<DebugState>),
+      stub.listRefs().catch(() => []),
+      stub.getHead().catch(() => null),
+      getUnpackProgress(env, repoId),
+    ]);
+
+    // Calculate storage metrics from pack stats
+    let totalStorageBytes = 0;
+    if (state.packStats) {
+      for (const pack of state.packStats) {
+        if (pack.packSize) totalStorageBytes += pack.packSize;
+        if (pack.indexSize) totalStorageBytes += pack.indexSize;
+      }
+    }
+    const storageSize = formatSize(totalStorageBytes);
+    const packCount = state.packListCount || 0;
+    const packList = state.packList || [];
+
+    // Extract hydration information with proper type checking
+    const hydrationData = state.hydration;
+    let hydrationStatus = "Not Started";
+    let hydrationStartedAt: string | null = null;
+
+    // Check for active or queued hydration
+    if (hydrationData?.running) {
+      hydrationStatus = `Running: ${hydrationData.stage || "unknown"}`;
+      if (hydrationData.startedAt) {
+        hydrationStartedAt = new Date(hydrationData.startedAt).toLocaleString();
+      }
+    } else if (hydrationData?.stage === "done") {
+      hydrationStatus = "Completed";
+    } else if (hydrationData && hydrationData.queued > 0) {
+      hydrationStatus = `Queued (${hydrationData.queued} pending)`;
+    }
+    // If no active hydration, check if packs exist to infer completion
+    else if (packCount > 0 && packList.some((p) => p.includes("pack-hydr-"))) {
+      // Infer hydration was done if we have hydration packs (pack-hydr-TIMESTAMP-SEQ.pack)
+      hydrationStatus = "Completed (inferred from packs)";
+    }
+
+    // Extract default branch from HEAD
+    const defaultBranch = head?.target?.replace(/^refs\/(heads|tags)\//, "") || "main";
+    const refEnc = encodeURIComponent(defaultBranch);
+
+    const stream = await renderViewStream(env, "admin", {
+      title: `Admin · ${owner}/${repo}`,
+      owner,
+      repo,
+      refEnc,
+      head,
+      refs,
+      storageSize,
+      packCount,
+      packList,
+      state,
+      defaultBranch,
+      hydrationStatus,
+      hydrationStartedAt,
+      hydrationData,
+      progress,
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate",
+        "X-Page-Renderer": "liquid-stream",
+      },
+    });
   });
 }
