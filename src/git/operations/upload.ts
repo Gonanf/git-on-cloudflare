@@ -120,8 +120,6 @@ export async function handleFetchV2(
   // Worker-side cap for how many candidate packs we union/assemble across.
   // Clamp to [1,100] and default to 20 when unset, mirroring DO-side config bounds.
   const packCap = getPackCapFromEnv(env);
-  // Enter heavy closure phase: avoid cache reads and cap loader calls
-  beginClosurePhase(cacheCtx, { loaderCap: 400, doBatchBudget: 20 });
   if (wants.length === 0) {
     // No wants: respond with ack-only
     const chunks = [pktLine("acknowledgments\n"), pktLine("NAK\n"), flushPkt()];
@@ -133,6 +131,39 @@ export async function handleFetchV2(
       },
     });
   }
+
+  // Per Git fetch v2: if negotiation is not complete (done=false), respond with
+  // acknowledgments only and do NOT include any other sections in the same response.
+  // This allows the client to continue negotiation or send a follow-up request with 'done'.
+  if (!done) {
+    const chunks: Uint8Array[] = [pktLine("acknowledgments\n")];
+    if (haves.length > 0) {
+      const ackOids = await findCommonHaves(env, repoId, haves, cacheCtx);
+      log.debug("fetch:negotiation", { haves: haves.length, acks: ackOids.length });
+      if (ackOids.length > 0) {
+        for (let i = 0; i < ackOids.length; i++) {
+          const suffix = i === ackOids.length - 1 ? "ready" : "common";
+          chunks.push(pktLine(`ACK ${ackOids[i]} ${suffix}\n`));
+        }
+      } else {
+        chunks.push(pktLine("NAK\n"));
+      }
+    } else {
+      // No haves provided: send NAK to indicate no common base identified yet
+      chunks.push(pktLine("NAK\n"));
+    }
+    chunks.push(flushPkt());
+    return new Response(concatChunks(chunks), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-result",
+        "Cache-Control": "no-cache",
+      },
+    });
+  }
+
+  // Enter heavy closure phase only when we are going to compute closure or assemble a pack
+  beginClosurePhase(cacheCtx, { loaderCap: 400, doBatchBudget: 20 });
 
   const stub = getRepoStub(env, repoId);
 
@@ -180,7 +211,7 @@ export async function handleFetchV2(
             log.info("fetch:path:init-union", { packs: keys.length, union: unionNeeded.length });
             // Exit heavy mode before streaming
             endClosurePhase(cacheCtx);
-            // No haves in initial clones: acknowledgments block will emit NAK when done === false
+            // For done=true, send packfile immediately; ack section is omitted in respondWithPackfile
             return respondWithPackfile(mp, done, [], signal);
           }
           // One-time expand-on-miss using R2 to pull in a few more candidates and retry
@@ -315,30 +346,7 @@ export async function handleFetchV2(
     }
   }
 
-  // For non-done requests with haves, send only acknowledgments
-  if (!done && haves.length > 0) {
-    const ackOids = await findCommonHaves(env, repoId, haves, cacheCtx);
-    log.debug("fetch:negotiation", { haves: haves.length, acks: ackOids.length });
-
-    const chunks: Uint8Array[] = [pktLine("acknowledgments\n")];
-    if (ackOids.length > 0) {
-      for (let i = 0; i < ackOids.length; i++) {
-        const suffix = i === ackOids.length - 1 ? "ready" : "common";
-        chunks.push(pktLine(`ACK ${ackOids[i]} ${suffix}\n`));
-      }
-    } else {
-      chunks.push(pktLine("NAK\n"));
-    }
-    chunks.push(flushPkt()); // Important: send flush after acknowledgments only
-
-    return new Response(concatChunks(chunks), {
-      status: 200,
-      headers: {
-        "Content-Type": "application/x-git-upload-pack-result",
-        "Cache-Control": "no-cache",
-      },
-    });
-  }
+  // From here on, done === true; proceed to assemble a pack
 
   // Compute set of common haves we can ACK (limit for perf)
   const ackOids = done ? [] : await findCommonHaves(env, repoId, haves, cacheCtx);

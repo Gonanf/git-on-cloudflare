@@ -2,30 +2,12 @@ import { packIndexKey } from "@/keys.ts";
 import { hexToBytes, createLogger } from "@/common/index.ts";
 import {
   encodeOfsDeltaDistance,
+  mapWithConcurrency,
   readPackHeaderEx,
   readPackHeaderExFromBuf,
   readPackRange,
 } from "@/git/pack/packMeta.ts";
 import { loadIdxParsed } from "./idxCache.ts";
-
-// Utility: simple concurrency-limited mapper
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  limit: number,
-  fn: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-  const out: R[] = new Array(items.length) as R[];
-  let i = 0;
-  const workers = new Array(Math.min(limit, items.length)).fill(0).map(async () => {
-    while (true) {
-      const idx = i++;
-      if (idx >= items.length) break;
-      out[idx] = await fn(items[idx], idx);
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
 
 /**
  * @deprecated This function is deprecated in favor of streamPackFromR2 from assemblerStream.ts.
@@ -403,7 +385,7 @@ export async function assemblePackFromMultiplePacks(
   };
   const metas: Meta[] = [];
   const CONC = 6;
-  const WHOLE_PACK_MAX = 16 * 1024 * 1024; // 16 MiB threshold for whole-pack preload
+  const WHOLE_PACK_MAX = 8 * 1024 * 1024; // 8 MiB threshold for whole-pack preload
   const metaResults = await mapWithConcurrency(packKeys, CONC, async (key) => {
     if (options?.signal?.aborted) return undefined;
     const parsed = await loadIdxParsed(env, key, options);

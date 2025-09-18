@@ -4,6 +4,7 @@ import {
   readPackRange,
   readPackHeaderExFromBuf,
   encodeOfsDeltaDistance,
+  mapWithConcurrency,
 } from "@/git/pack/packMeta.ts";
 import { loadIdxParsed } from "./idxCache.ts";
 
@@ -139,16 +140,13 @@ export async function streamPackFromMultiplePacks(
   };
 
   const metas: Meta[] = [];
-  const WHOLE_PACK_MAX = 16 * 1024 * 1024;
-
-  // Parallel metadata loading with concurrency limit
   const CONC = 6;
-  const metaWorkers: Promise<Meta | undefined>[] = [];
-  let metaIdx = 0;
+  const WHOLE_PACK_MAX = 8 * 1024 * 1024; // 8 MiB threshold for whole-pack preload
 
-  const loadOneMeta = async (): Promise<Meta | undefined> => {
-    while (metaIdx < packKeys.length) {
-      const key = packKeys[metaIdx++];
+  const metaResults = await mapWithConcurrency<string, Meta | undefined>(
+    packKeys,
+    CONC,
+    async (key) => {
       if (options?.signal?.aborted) return undefined;
 
       const parsed = await loadIdxParsed(env, key, options);
@@ -161,7 +159,7 @@ export async function streamPackFromMultiplePacks(
 
       if (!parsed || !head) {
         log.debug("stream:multi:missing-pack-or-idx", { key, idx: !!parsed, head: !!head });
-        continue;
+        return undefined;
       }
 
       const oidToIndex = new Map<string, number>();
@@ -193,7 +191,7 @@ export async function streamPackFromMultiplePacks(
         } catch {}
       }
 
-      return {
+      const meta: Meta = {
         key,
         oids: parsed.oids,
         offsets: parsed.offsets,
@@ -203,15 +201,10 @@ export async function streamPackFromMultiplePacks(
         nextOffset,
         wholePack,
       };
+      return meta;
     }
-    return undefined;
-  };
+  );
 
-  for (let c = 0; c < Math.min(CONC, packKeys.length); c++) {
-    metaWorkers.push(loadOneMeta());
-  }
-
-  const metaResults = await Promise.all(metaWorkers);
   for (const m of metaResults) if (m) metas.push(m);
 
   if (metas.length === 0) {
