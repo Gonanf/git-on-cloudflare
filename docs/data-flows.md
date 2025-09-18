@@ -29,6 +29,7 @@ The DO also records metadata to help fetch:
 2. For `POST /:owner/:repo/git-upload-pack` with a v2 body:
    - `ls-refs` command: reads the DO via RPC (`getHead()` and `listRefs()`) and responds with HEAD + refs
    - `fetch` command (now using streaming by default):
+     - Negotiation phase (`done=false`): server returns an acknowledgments block only (ACK/NAK), no `packfile` section
      - Parses wants/haves and computes minimal closure using frontier-subtract approach with stop sets
      - Discovers candidate packs via `src/git/operations/packDiscovery.ts#getPackCandidates()` (DO metadata first, then best‑effort R2 listing), memoized per request with limiter + soft budget
      - **Streaming pack assembly** (no buffering):

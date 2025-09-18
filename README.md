@@ -105,7 +105,7 @@ With auth enabled:
 - Manage tokens at `/auth` or via API
 - Tokens use PBKDF2-SHA256 with 100k iterations
 
-Admin endpoints for hydration and repository management are protected via owner Basic auth and the admin bearer token for `/auth/api/*`.
+Admin endpoints for hydration and repository management are protected via owner Basic auth and the admin bearer token for `/auth/api/*`. An admin dashboard is available at `/:owner/:repo/admin`.
 
 ## Configuration
 
@@ -139,6 +139,7 @@ See `wrangler.jsonc` for the complete configuration.
 - 30s CPU limit per request on the main fetch paths (unpack runs in alarm-driven slices)
 - HTTP(S) only, no SSH protocol support
 - No server-side hooks yet
+- Thin-pack is not advertised; clients receive thick packs (side-band-64k, ofs-delta)
 
 ## Development
 

@@ -72,6 +72,16 @@ The codebase is organized into focused modules with `index.ts` export files:
 - **Pack discovery and memoization**: `src/git/operations/packDiscovery.ts#getPackCandidates()` coalesces per-request discovery using DO metadata (latest + list) with a best‑effort R2 listing fallback. Results are memoized in `RequestMemo`.
 - **Per-request limiter and soft budget**: All DO/R2 calls in read and upload paths use a concurrency limiter and a soft subrequest budget to avoid hitting platform limits.
 
+### Static assets and templates (env.ASSETS + Liquid)
+
+- Templates and assets are served via Wrangler's assets binding `env.ASSETS` (see `wrangler.jsonc` → `assets`).
+- LiquidJS engine is configured in `src/web/templates.ts` to load templates from `src/assets/templates/` and partials from `src/assets/templates/partials/` using a custom FS adapter that fetches through `env.ASSETS`.
+- Important settings:
+  - `outputEscape: "escape"` to HTML-escape `{{ var }}` by default
+  - `cache: true` to enable Liquid's LRU parse cache
+  - Streaming render uses Node's `Readable` converted to Web `ReadableStream` via `Readable.toWeb()`
+- Assets config uses `html_handling: "none"` so the Worker controls routes like `/auth` without the assets layer intercepting them.
+
 ## Background processing and alarms
 
 - The repo DO `alarm()` performs multiple duties:

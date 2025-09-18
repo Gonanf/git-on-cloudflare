@@ -24,8 +24,14 @@ git pull https://your-domain.com/owner/repo
   - `ofs-delta`
   - `object-format=sha1`
 
+  Note: `thin-pack` is not advertised.
+
 - **`POST /:owner/:repo/git-upload-pack`**  
   Fetch objects (clone/pull). Handles pack negotiation and object transfer.
+
+  Notes:
+  - Default streaming with side-band-64k progress. Set header `X-Git-Streaming: false` to force the legacy buffered path (deprecated).
+  - During negotiation (`done=false`), the server returns an acknowledgments section only (no `packfile` section).
 
 ### Push Operations
 
@@ -88,6 +94,12 @@ git push https://owner:token@your-domain.com/owner/repo main
   - Best-effort `Content-Type` is derived from the file extension for inline rendering
   - Requires a same-origin `Referer` header (hotlink protection). Requests from other origins will be rejected with 403.
 
+### Web UI JSON
+
+- **`GET /:owner/:repo/api/refs`**  
+  Returns branch/tag refs for UI dropdowns (JSON).  
+  Caching: `Cache-Control: public, max-age=60`.
+
 ## Authentication Management
 
 ### Web UI
@@ -114,6 +126,11 @@ git push https://owner:token@your-domain.com/owner/repo main
 ## Admin Endpoints
 
 All admin endpoints require authentication with owner tokens.
+
+### Admin UI
+
+- **`GET /:owner/:repo/admin`**  
+  Admin dashboard (HTML) showing refs/HEAD, hydration status, and pack stats.
 
 ### Repository Management
 
@@ -164,6 +181,14 @@ All admin endpoints require authentication with owner tokens.
   Clear hydration state and remove hydration-generated packs.  
   Returns counts of cleared items.
 
+### Dangerous Operations
+
+- **`DELETE /:owner/:repo/admin/purge`**  
+  Purge all repository data (R2 objects and DO state).  
+  Body: `{ "confirm": "purge-<owner>/<repo>" }`  
+  Returns: JSON result.  
+  Warning: Destructive. Requires explicit confirmation.
+
 ## Response Formats
 
 ### Git Protocol
@@ -186,6 +211,7 @@ All JSON endpoints return:
 
 ```
 401 Unauthorized - Missing or invalid authentication
+429 Too Many Requests - Rate limited (Retry-After header)
 404 Not Found - Repository or resource not found
 400 Bad Request - Invalid request parameters
 500 Internal Server Error - Server-side error
