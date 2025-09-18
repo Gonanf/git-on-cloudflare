@@ -1,4 +1,10 @@
-import type { RepoStateSchema, HydrationTask, HydrationWork, HydrationStage } from "./repoState.ts";
+import type {
+  RepoStateSchema,
+  HydrationTask,
+  HydrationWork,
+  HydrationStage,
+  HydrationReason,
+} from "./repoState.ts";
 import type { GitObjectType } from "@/git/core/index.ts";
 import type { Logger } from "@/common/logger.ts";
 
@@ -14,8 +20,8 @@ import { indexPackOnly, readPackHeaderEx, buildPackV2 } from "@/git/pack/index.t
 // File-wide constants to avoid magic numbers across stages
 const HYDR_SAMPLE_PER_PACK = 128; // sample items per pack during planning
 const HYDR_SOFT_SUBREQ_LIMIT = 800; // soft cap on subrequests per slice
-const HYDR_LOOSE_LIST_PAGE = 500; // DO storage list page size
-const HYDR_SEG_MAX_BYTES = 32 * 1024 * 1024; // 32 MiB per hydration segment
+const HYDR_LOOSE_LIST_PAGE = 250; // DO storage list page size
+const HYDR_SEG_MAX_BYTES = 8 * 1024 * 1024; // 8 MiB per hydration segment
 const HYDR_MAX_OBJS_PER_SEGMENT = 2000; // conservative cap to fit budgets
 const HYDR_EST_COMPRESSION_RATIO = 0.6; // rough compression ratio estimate
 const PACK_TYPE_OFS_DELTA = 6 as const;
@@ -417,7 +423,7 @@ function getHydrConfig(env: Env) {
 export async function enqueueHydrationTask(
   state: DurableObjectState,
   env: Env,
-  options?: { dryRun?: boolean; reason?: "post-unpack" | "admin" }
+  options?: { dryRun?: boolean; reason?: HydrationReason }
 ): Promise<{ queued: boolean; workId: string; queueLength: number }> {
   const store = asTypedStorage<RepoStateSchema>(state.storage);
   const log = createLogger(env.LOG_LEVEL, { service: "Hydration" });

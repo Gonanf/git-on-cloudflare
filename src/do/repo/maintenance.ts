@@ -12,6 +12,7 @@ import { asTypedStorage, packOidsKey } from "./repoState.ts";
 import { r2PackDirPrefix, isPackKey, packIndexKey, doPrefix } from "@/keys.ts";
 import { ensureScheduled } from "./scheduler.ts";
 import { getConfig } from "./repoConfig.ts";
+import { enqueueHydrationTask } from "./hydration.ts";
 
 /**
  * Handles idle cleanup and periodic maintenance tasks
@@ -289,4 +290,14 @@ async function runMaintenance(
       }
     }
   } catch {}
+
+  // Enqueue a hydration job after pruning to re-thicken within the kept window.
+  // This ensures streaming fetch remains safe without loose fallback.
+  if (removed.length > 0) {
+    try {
+      await enqueueHydrationTask(ctx, env, { reason: "post-maint" });
+    } catch (e) {
+      logger?.warn?.("maintenance:enqueue-hydration-failed", { error: String(e) });
+    }
+  }
 }

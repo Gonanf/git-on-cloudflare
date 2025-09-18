@@ -15,10 +15,12 @@ export type UnpackWork = {
 };
 
 export type HydrationTask = {
-  reason: "post-unpack" | "admin";
+  reason: HydrationReason;
   createdAt: number;
   options?: { dryRun?: boolean };
 };
+
+export type HydrationReason = "post-unpack" | "post-maint" | "admin";
 
 export type HydrationStage =
   | "plan"

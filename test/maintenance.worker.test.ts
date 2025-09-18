@@ -100,3 +100,64 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS", async (
     expect(p1, "packOidsKey(keys[1]) should exist").toEqual(["b"]);
   });
 });
+
+it("maintenance: enqueues hydration with reason post-maint after pruning", async () => {
+  const repoId = makeRepoId("post-maint");
+  const id = env.REPO_DO.idFromName(repoId);
+  const getStub = () => env.REPO_DO.get(id);
+
+  // Determine DO prefix for R2 keys
+  const { prefix } = await runDOWithRetry(
+    getStub as any,
+    async (_instance: any, state: DurableObjectState) => {
+      return { prefix: `do/${state.id.toString()}` };
+    }
+  );
+
+  // Create synthetic pack+idx files in R2 (ensure some will be pruned)
+  const keys: string[] = [];
+  for (let i = 1; i <= 12; i++) {
+    const key = `${prefix}/objects/pack/pack-${i}.pack`;
+    keys.push(key);
+    await env.REPO_BUCKET.put(key, new Uint8Array([i]));
+    await env.REPO_BUCKET.put(key.replace(/\.pack$/, ".idx"), new Uint8Array([i, i]));
+  }
+  // Add a hydration pack to satisfy prune safety
+  const hydrKey = `${prefix}/objects/pack/pack-hydr-999.pack`;
+  await env.REPO_BUCKET.put(hydrKey, new Uint8Array([9, 9, 9]));
+  await env.REPO_BUCKET.put(hydrKey.replace(/\.pack$/, ".idx"), new Uint8Array([9, 9]));
+
+  // Seed DO storage: packList includes the hydration pack so pruning is allowed
+  await runDOWithRetry(getStub as any, async (_instance: any, state: DurableObjectState) => {
+    const store = asTypedStorage<RepoStateSchema>(state.storage);
+    await store.put("packList", [...keys, hydrKey]);
+    await store.put("lastPackKey", keys[keys.length - 1]);
+    // Force maintenance due
+    await store.put("lastMaintenanceMs", 0);
+  });
+
+  // Schedule the alarm and run it (will perform maintenance and enqueue hydration)
+  await runDOWithRetry(getStub as any, async (_instance: any, state: DurableObjectState) => {
+    await state.storage.setAlarm(Date.now() + 1_000);
+  });
+  const ran = await (async () => {
+    try {
+      return await runDurableObjectAlarm(getStub());
+    } catch (e) {
+      const msg = String(e || "");
+      if (msg.includes("invalidating this Durable Object"))
+        return await runDurableObjectAlarm(getStub());
+      throw e;
+    }
+  })();
+  expect(ran, "alarm should run").toBe(true);
+
+  // Verify hydration was enqueued with reason post-maint
+  await runDOWithRetry(getStub as any, async (_instance: any, state: DurableObjectState) => {
+    const store = asTypedStorage<RepoStateSchema>(state.storage);
+    const q = (await store.get("hydrationQueue")) as any[] | undefined;
+    expect(Array.isArray(q), "hydrationQueue should be an array").toBe(true);
+    const hasPostMaint = (q || []).some((t) => t && t.reason === "post-maint");
+    expect(hasPostMaint, "should enqueue a post-maint hydration task").toBe(true);
+  });
+});
