@@ -9,10 +9,7 @@ import type { RepoStateSchema, UnpackWork } from "./repoState.ts";
 import type { UnpackProgress } from "@/common/index.ts";
 
 import { asTypedStorage } from "./repoState.ts";
-import { getDb } from "./db/client.ts";
-import { eq } from "drizzle-orm";
-import { packObjects } from "./db/schema.ts";
-import { getPackOidsSlice } from "./db/dal.ts";
+import { getDb, getPackOidsSlice, getPackObjectCount } from "./db/index.ts";
 import { unpackOidsChunkFromPackBytes } from "@/git/index.ts";
 import { scheduleAlarmIfSooner, ensureScheduled } from "./scheduler.ts";
 import { getConfig } from "./repoConfig.ts";
@@ -289,7 +286,7 @@ async function updateUnpackProgress(
     const nextKey = await store.get("unpackNext");
     if (nextKey) {
       // Count OIDs from SQLite for next pack
-      const count = await db.$count(packObjects, eq(packObjects.packKey, nextKey));
+      const count = await getPackObjectCount(db, nextKey);
       if (count > 0) {
         await store.put("unpackWork", {
           packKey: nextKey,

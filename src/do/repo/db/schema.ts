@@ -2,7 +2,10 @@ import { sql } from "drizzle-orm";
 import { sqliteTable, text, primaryKey, index, check } from "drizzle-orm/sqlite-core";
 
 // Table: pack_objects
-// Stores exact membership of OIDs per pack key
+// Stores exact membership of OIDs per pack key.
+// NOTE: pack_key stores only the pack basename (e.g., "pack-12345.pack"),
+// not the full R2 path. See DAL normalizePackKey() and migration that
+// rewrites legacy full paths to basenames to reduce storage usage.
 export const packObjects = sqliteTable(
   "pack_objects",
   {

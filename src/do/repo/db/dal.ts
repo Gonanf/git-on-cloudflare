@@ -4,7 +4,7 @@
 
 import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 
-import { eq, inArray, and } from "drizzle-orm";
+import { eq, inArray, and, sql } from "drizzle-orm";
 import { packObjects, hydrCover, hydrPending } from "./schema.ts";
 
 /**
@@ -17,6 +17,16 @@ const SAFE_ROWS_2COL = 45; // 2 columns per row -> 90 params (< 100)
 const SAFE_ROWS_3COL = 30; // 3 columns per row -> 90 params (< 100)
 
 /**
+ * Normalize a pack key to its basename (e.g. "pack-123.pack").
+ * We persist only basenames in SQLite to reduce storage amplification.
+ */
+export function normalizePackKey(key: string): string {
+  if (!key) return key;
+  const i = key.lastIndexOf("/");
+  return i >= 0 ? key.slice(i + 1) : key;
+}
+
+/**
  * Check if an OID exists in any pack
  * Uses the index on oid column for efficient lookup
  */
@@ -27,6 +37,59 @@ export async function oidExistsInPacks(db: DrizzleSqliteDODatabase, oid: string)
     .where(eq(packObjects.oid, oid.toLowerCase()))
     .limit(1);
   return result.length > 0;
+}
+
+/**
+ * Get the number of objects recorded for a pack key.
+ * The input may be a full path; counting uses the normalized basename.
+ */
+export async function getPackObjectCount(
+  db: DrizzleSqliteDODatabase,
+  packKey: string
+): Promise<number> {
+  const key = normalizePackKey(packKey);
+  const count = await db.$count(packObjects, eq(packObjects.packKey, key));
+  return count;
+}
+
+/**
+ * One-time SQL normalization: rewrite any rows whose pack_key includes a '/'
+ * to store only the basename. Safe to run multiple times.
+ */
+export async function normalizePackKeysInPlace(
+  db: DrizzleSqliteDODatabase,
+  logger?: {
+    debug?: (m: string, d?: any) => void;
+    info?: (m: string, d?: any) => void;
+    warn?: (m: string, d?: any) => void;
+  }
+): Promise<{ checked: number; updated: number }> {
+  // Select distinct pack keys that appear to be full paths
+  const rows = await db
+    .select({ packKey: packObjects.packKey })
+    .from(packObjects)
+    .where(sql`instr(${packObjects.packKey}, '/') > 0`)
+    .groupBy(packObjects.packKey);
+
+  let updated = 0;
+  for (const r of rows) {
+    const oldKey = r.packKey as string;
+    const newKey = normalizePackKey(oldKey);
+    if (newKey !== oldKey) {
+      try {
+        await db
+          .update(packObjects)
+          .set({ packKey: newKey })
+          .where(eq(packObjects.packKey, oldKey));
+        updated++;
+      } catch (e) {
+        logger?.warn?.("normalize:packKey:update-failed", { oldKey, newKey, error: String(e) });
+      }
+    }
+  }
+  if (updated > 0) logger?.info?.("normalize:packKey:updated", { updated, checked: rows.length });
+  else logger?.debug?.("normalize:packKey:noop", { checked: rows.length });
+  return { checked: rows.length, updated };
 }
 
 /**
@@ -80,10 +143,11 @@ export async function filterOidsInPacks(
  * Uses the primary key index efficiently
  */
 export async function getPackOids(db: DrizzleSqliteDODatabase, packKey: string): Promise<string[]> {
+  const key = normalizePackKey(packKey);
   const rows = await db
     .select({ oid: packObjects.oid })
     .from(packObjects)
-    .where(eq(packObjects.packKey, packKey));
+    .where(eq(packObjects.packKey, key));
   return rows.map((r) => r.oid);
 }
 
@@ -98,10 +162,11 @@ export async function getPackOidsSlice(
   limit: number
 ): Promise<string[]> {
   if (limit <= 0) return [];
+  const key = normalizePackKey(packKey);
   const rows = await db
     .select({ oid: packObjects.oid })
     .from(packObjects)
-    .where(eq(packObjects.packKey, packKey))
+    .where(eq(packObjects.packKey, key))
     .orderBy(packObjects.oid)
     .limit(limit)
     .offset(offset);
@@ -117,29 +182,45 @@ export async function getPackOidsBatch(
   packKeys: string[]
 ): Promise<Map<string, string[]>> {
   if (packKeys.length === 0) return new Map();
-
+  // Prepare output map keyed by original input keys
   const result = new Map<string, string[]>();
+  for (const orig of packKeys) result.set(orig, []);
 
-  // Initialize all keys with empty arrays
-  for (const key of packKeys) {
-    result.set(key, []);
+  // Build normalized lookup set and mapping back to original keys
+  const normToOriginals = new Map<string, string[]>();
+  for (const orig of packKeys) {
+    const norm = normalizePackKey(orig);
+    const list = normToOriginals.get(norm) || [];
+    list.push(orig);
+    normToOriginals.set(norm, list);
   }
+  const uniqueNorms = Array.from(normToOriginals.keys());
 
   // Cloudflare platform limits allow up to 100 bound parameters per query.
   // Since this IN() uses 1 param per key, keep a conservative batch size.
   const BATCH = 80;
-  for (let i = 0; i < packKeys.length; i += BATCH) {
-    const batch = packKeys.slice(i, i + BATCH);
+  for (let i = 0; i < uniqueNorms.length; i += BATCH) {
+    const batch = uniqueNorms.slice(i, i + BATCH);
     const rows = await db
       .select({ packKey: packObjects.packKey, oid: packObjects.oid })
       .from(packObjects)
       .where(inArray(packObjects.packKey, batch));
 
-    // Group by pack key
+    // Group by normalized key
+    const grouped = new Map<string, string[]>();
     for (const row of rows) {
-      const existing = result.get(row.packKey) || [];
-      existing.push(row.oid);
-      result.set(row.packKey, existing);
+      const arr = grouped.get(row.packKey) || [];
+      arr.push(row.oid);
+      grouped.set(row.packKey, arr);
+    }
+
+    // Fan out to original keys that normalized to this key
+    for (const norm of batch) {
+      const arr = grouped.get(norm) || [];
+      const originals = normToOriginals.get(norm) || [];
+      for (const orig of originals) {
+        result.set(orig, arr.slice(0));
+      }
     }
   }
 
@@ -155,10 +236,11 @@ export async function insertPackOids(
   oids: readonly string[]
 ): Promise<void> {
   if (!oids || oids.length === 0) return;
+  const key = normalizePackKey(packKey);
   for (let i = 0; i < oids.length; i += SAFE_ROWS_2COL) {
     const part = oids
       .slice(i, i + SAFE_ROWS_2COL)
-      .map((oid) => ({ packKey, oid: String(oid).toLowerCase() }));
+      .map((oid) => ({ packKey: key, oid: String(oid).toLowerCase() }));
     if (part.length > 0) await db.insert(packObjects).values(part).onConflictDoNothing();
   }
 }
@@ -170,7 +252,8 @@ export async function deletePackObjects(
   db: DrizzleSqliteDODatabase,
   packKey: string
 ): Promise<void> {
-  await db.delete(packObjects).where(eq(packObjects.packKey, packKey));
+  const key = normalizePackKey(packKey);
+  await db.delete(packObjects).where(eq(packObjects.packKey, key));
 }
 
 /**

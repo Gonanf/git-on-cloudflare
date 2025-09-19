@@ -1,10 +1,8 @@
 import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 import type { Logger } from "@/common/logger.ts";
 
-import { eq } from "drizzle-orm";
 import { packOidsKey, asTypedStorage, type RepoStateSchema } from "../repoState.ts";
-import { packObjects } from "./schema.ts";
-import { insertPackOids } from "./dal.ts";
+import { insertPackOids, getPackObjectCount, normalizePackKeysInPlace } from "./dal.ts";
 
 /**
  * Best-effort one-time migration: backfill pack memberships from KV (packOids:* keys)
@@ -22,9 +20,16 @@ export async function migrateKvToSql(
     return;
   }
 
-  // Fast path: if there are oids for the last pack, that means we already done the migration
+  // First normalize any existing rows in place so subsequent counts match by basename
+  try {
+    await normalizePackKeysInPlace(db, logger);
+  } catch (e) {
+    logger?.warn("kv->sqlite:normalize-initial:error", { error: String(e) });
+  }
+
+  // Fast path: if there are oids for the last (oldest) pack, we already migrated
   const oldestPackKey = list[list.length - 1];
-  const count = await db.$count(packObjects, eq(packObjects.packKey, oldestPackKey));
+  const count = await getPackObjectCount(db, oldestPackKey);
   if (count > 0) {
     logger?.debug("kv->sqlite:skip", { reason: "oldest packKey contains oids" });
     return;
@@ -34,8 +39,8 @@ export async function migrateKvToSql(
   let migrated = 0;
   for (const packKey of list) {
     try {
-      const count = await db.$count(packObjects, eq(packObjects.packKey, packKey));
-      if (count > 0) {
+      const pc = await getPackObjectCount(db, packKey);
+      if (pc > 0) {
         logger?.debug("kv->sqlite:skip", { packKey, reason: "already migrated" });
         continue; // already migrated
       }
@@ -46,7 +51,7 @@ export async function migrateKvToSql(
         continue;
       }
 
-      // Parameter-limit-safe insert via centralized helper
+      // Parameter-limit-safe insert via centralized helper (stores basename)
       await insertPackOids(db, packKey, arr);
 
       // After successful insert, delete KV key to reduce storage
@@ -57,4 +62,11 @@ export async function migrateKvToSql(
     }
   }
   if (migrated > 0) logger?.info("kv->sqlite:migrated", { packs: migrated });
+
+  // Final normalization pass (idempotent)
+  try {
+    await normalizePackKeysInPlace(db, logger);
+  } catch (e) {
+    logger?.warn("kv->sqlite:normalize-final:error", { error: String(e) });
+  }
 }
