@@ -7,7 +7,13 @@
 
 import type { RepoStateSchema, Head, UnpackWork } from "./repoState.ts";
 
-import { asTypedStorage, objKey, packOidsKey } from "./repoState.ts";
+import { asTypedStorage, objKey } from "./repoState.ts";
+import {
+  findPacksContainingOid,
+  getDb,
+  getHydrPendingCounts,
+  getHydrPendingOids,
+} from "./db/index.ts";
 import { r2LooseKey, doPrefix, packIndexKey } from "@/keys.ts";
 import { isValidOid } from "@/common/index.ts";
 import { readCommitFromStore } from "./storage.ts";
@@ -38,8 +44,7 @@ export async function debugState(
   }>;
   unpackWork: {
     packKey: string;
-    oidsSample: string[];
-    oidsCount: number;
+    totalCount: number;
     processedCount: number;
     startedAt: number;
   } | null;
@@ -87,6 +92,19 @@ export async function debugState(
     for (const k of it.keys()) looseSample.push(String(k).slice(4));
   } catch {}
 
+  // Get hydration pending counts from SQLite if there's active work
+  let hydrPendingCounts = { bases: 0, loose: 0 };
+  let hydrBaseSample: string[] = [];
+  let hydrLooseSample: string[] = [];
+  if (hydrationWork?.workId) {
+    try {
+      const db = getDb(ctx.storage);
+      hydrPendingCounts = await getHydrPendingCounts(db, hydrationWork.workId);
+      hydrBaseSample = await getHydrPendingOids(db, hydrationWork.workId, "base", 10);
+      hydrLooseSample = await getHydrPendingOids(db, hydrationWork.workId, "loose", 10);
+    } catch {}
+  }
+
   // Gather pack statistics
   const packStats: Array<{
     key: string;
@@ -132,13 +150,13 @@ export async function debugState(
 
   const prefix = doPrefix(ctx.id.toString());
 
-  // Sanitize unpackWork to avoid huge oids array in output
+  // Sanitize unpackWork (no large arrays stored anymore)
   const sanitizedUnpackWork = unpackWork
     ? {
-        ...unpackWork,
-        oids: undefined, // Remove the full array
-        oidsSample: unpackWork.oids.slice(0, 10), // Show first 10
-        oidsCount: unpackWork.oids.length,
+        packKey: unpackWork.packKey,
+        totalCount: (unpackWork as any).totalCount || 0,
+        processedCount: unpackWork.processedCount,
+        startedAt: unpackWork.startedAt,
       }
     : null;
 
@@ -160,12 +178,8 @@ export async function debugState(
       stage: hydrationWork?.stage,
       segmentSeq: hydrationWork?.progress?.segmentSeq,
       queued: Array.isArray(hydrationQueue) ? hydrationQueue.length : 0,
-      needBasesCount: Array.isArray(hydrationWork?.pending?.needBases)
-        ? hydrationWork.pending.needBases.length
-        : undefined,
-      needLooseCount: Array.isArray(hydrationWork?.pending?.needLoose)
-        ? hydrationWork.pending.needLoose.length
-        : undefined,
+      needBasesCount: hydrPendingCounts.bases > 0 ? hydrPendingCounts.bases : undefined,
+      needLooseCount: hydrPendingCounts.loose > 0 ? hydrPendingCounts.loose : undefined,
       packIndex: hydrationWork?.progress?.packIndex,
       objCursor: hydrationWork?.progress?.objCursor,
       workId: hydrationWork?.workId,
@@ -177,12 +191,8 @@ export async function debugState(
       window: Array.isArray(hydrationWork?.snapshot?.window)
         ? hydrationWork.snapshot.window.slice(0, 6)
         : undefined,
-      needBasesSample: Array.isArray(hydrationWork?.pending?.needBases)
-        ? hydrationWork.pending.needBases.slice(0, 10)
-        : undefined,
-      needLooseSample: Array.isArray(hydrationWork?.pending?.needLoose)
-        ? hydrationWork.pending.needLoose.slice(0, 10)
-        : undefined,
+      needBasesSample: hydrBaseSample.length > 0 ? hydrBaseSample : undefined,
+      needLooseSample: hydrLooseSample.length > 0 ? hydrLooseSample : undefined,
       error: hydrationWork?.error
         ? {
             message: hydrationWork.error.message,
@@ -218,15 +228,23 @@ export async function debugCheckCommit(
   }
 
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  const db = getDb(ctx.storage);
   const packList = (await store.get("packList")) ?? [];
   const membership: Record<string, { hasCommit: boolean; hasTree: boolean }> = {};
 
-  for (const key of packList) {
-    try {
-      const oids = (await store.get(packOidsKey(key))) ?? [];
-      const set = new Set(oids.map((x) => x.toLowerCase()));
-      membership[key] = { hasCommit: set.has(q), hasTree: false };
-    } catch {}
+  // Check which packs contain the commit - query by OID directly
+  try {
+    const commitPacks = await findPacksContainingOid(db, q);
+    const commitPackSet = new Set(commitPacks);
+    for (const key of packList) {
+      membership[key] = { hasCommit: commitPackSet.has(key), hasTree: false };
+    }
+  } catch {}
+  // Initialize all packs as not having the commit if query fails
+  if (Object.keys(membership).length === 0) {
+    for (const key of packList) {
+      membership[key] = { hasCommit: false, hasTree: false };
+    }
   }
 
   const prefix = doPrefix(ctx.id.toString());
@@ -252,13 +270,14 @@ export async function debugCheckCommit(
       hasR2LooseTree = !!head;
     } catch {}
 
-    for (const key of Object.keys(membership)) {
-      try {
-        const oids = (await store.get(packOidsKey(key))) ?? [];
-        const set = new Set(oids.map((x) => x.toLowerCase()));
-        membership[key].hasTree = !!tree && set.has(tree);
-      } catch {}
-    }
+    // Check which packs contain the tree - query by OID directly
+    try {
+      const treePacks = await findPacksContainingOid(db, tree);
+      const treePackSet = new Set(treePacks);
+      for (const key of Object.keys(membership)) {
+        membership[key].hasTree = treePackSet.has(key);
+      }
+    } catch {}
   }
 
   return {
@@ -304,19 +323,13 @@ export async function debugCheckOid(
   } catch {}
 
   // Check which packs contain this OID
-  const inPacks: string[] = [];
-  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
-  const packList = (await store.get("packList")) || [];
+  let inPacks: string[] = [];
 
-  // Check each pack's OID list
-  for (const packKey of packList) {
-    try {
-      const packOids = (await store.get(packOidsKey(packKey))) || [];
-      if (packOids.includes(oid)) {
-        inPacks.push(packKey);
-      }
-    } catch {}
-  }
+  // Check which packs contain this OID - query by OID directly
+  const db = getDb(ctx.storage);
+  try {
+    inPacks = await findPacksContainingOid(db, oid);
+  } catch {}
 
   return {
     oid,

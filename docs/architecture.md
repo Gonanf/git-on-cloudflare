@@ -49,7 +49,7 @@ The codebase is organized into focused modules with `index.ts` export files:
   - `getPackLatest()`, `getPacks()`, `getPackOids()`, `getPackOidsBatch()`
   - `getUnpackProgress()` — unpacking status/progress for UI gating (includes `queuedCount` and `currentPackKey`)
 - Push flow: raw `.pack` is written to R2, a fast index-only step writes `.idx`, and unpack is queued for background processing on the DO alarm in small time-budgeted chunks.
-- Maintains pack metadata (`lastPackKey`, `lastPackOids`, `packList`, `packOids:<key>`) used by fetch assembly.
+- Maintains pack metadata (`lastPackKey`, `lastPackOids`, `packList`). Exact pack membership lives in SQLite (`pack_objects`), not in KV.
 
 #### Receive-pack queueing
 
@@ -71,6 +71,20 @@ The codebase is organized into focused modules with `index.ts` export files:
 - **Object Cache**: Immutable Git objects cached for 1 year
 - **Pack discovery and memoization**: `src/git/operations/packDiscovery.ts#getPackCandidates()` coalesces per-request discovery using DO metadata (latest + list) with a best‑effort R2 listing fallback. Results are memoized in `RequestMemo`.
 - **Per-request limiter and soft budget**: All DO/R2 calls in read and upload paths use a concurrency limiter and a soft subrequest budget to avoid hitting platform limits.
+
+### Durable Objects SQLite (drizzle-orm)
+
+- The Repository DO maintains a small SQLite database using `drizzle-orm/durable-sqlite` for metadata that benefits from indexed lookups and batch queries.
+- Migrations run during DO initialization via `migrate(db, migrations)` and Wrangler `new_sqlite_classes` (see `wrangler.jsonc` and `drizzle.config.ts`).
+- Tables:
+  - `pack_objects(pack_key, oid)` — exact membership of OIDs per pack; indexed by `oid` for fast lookups and batched IN queries.
+  - `hydr_cover(work_id, oid)` — hydration coverage set per work id to build thick packs.
+  - `hydr_pending(work_id, kind, oid)` — pending OIDs for hydration work; `kind` ∈ {`base`, `loose`}; PK `(work_id, kind, oid)` and index on `(work_id, kind)`.
+- Access policy: all SQLite operations must go through the DAL (`src/do/repo/db/dal.ts`). Avoid raw drizzle queries outside the DAL.
+- Usage highlights:
+  - `getPackOidsBatch()` efficiently loads OID membership for multiple packs in one call.
+  - Hydration stores coverage in SQLite and emits thick packs (no deltas) while persisting pack membership immediately for robust coverage.
+- Registry note: owner→repo registry still uses Workers KV (`OWNER_REGISTRY`) for the web UI owner listing. Pack discovery and membership no longer use KV.
 
 ### Static assets and templates (env.ASSETS + Liquid)
 
@@ -105,4 +119,4 @@ See also:
 
 - [Storage model](./storage.md)
 - [Data flows](./data-flows.md)
-- For troubleshooting, see the "How to debug" section in the top-level README.
+- Top-level `README.md` for development and testing commands.

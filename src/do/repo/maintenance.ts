@@ -8,7 +8,9 @@
 import type { RepoStateSchema } from "./repoState.ts";
 import type { Logger } from "@/common/logger.ts";
 
-import { asTypedStorage, packOidsKey } from "./repoState.ts";
+import { asTypedStorage } from "./repoState.ts";
+import { getDb } from "./db/client.ts";
+import { deletePackObjects, getPackOids as getPackOidsHelper } from "./db/index.ts";
 import { r2PackDirPrefix, isPackKey, packIndexKey, doPrefix } from "@/keys.ts";
 import { ensureScheduled } from "./scheduler.ts";
 import { getConfig } from "./repoConfig.ts";
@@ -199,6 +201,7 @@ async function runMaintenance(
   logger?: Logger
 ): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  const db = getDb(ctx.storage);
 
   // Ensure packList exists
   const packList = (await store.get("packList")) ?? [];
@@ -233,10 +236,9 @@ async function runMaintenance(
     const newest = keep[0];
     if (newest) {
       await store.put("lastPackKey", newest);
-      const oids = ((await store.get("lastPackOids")) || []).slice(0, 10000);
-      // Try to load oids for the newest from packOids:<key> if present
-      const alt = await store.get(packOidsKey(newest));
-      await store.put("lastPackOids", alt ?? oids);
+      // Load OIDs from SQLite for the newest pack via DAL
+      const oids = await getPackOidsHelper(db, newest);
+      await store.put("lastPackOids", oids.slice(0, 10000));
     } else {
       // No packs remain
       await store.delete("lastPackKey");
@@ -244,12 +246,12 @@ async function runMaintenance(
     }
   }
 
-  // Delete packOids entries for removed packs
+  // Delete pack_objects entries for removed packs from SQLite
   for (const k of removed) {
     try {
-      await ctx.storage.delete(packOidsKey(k));
+      await deletePackObjects(db, k);
     } catch (e) {
-      logger?.warn("maintenance:delete-packOids-failed", { key: k, error: String(e) });
+      logger?.warn("maintenance:delete-packObjects-failed", { key: k, error: String(e) });
     }
   }
 

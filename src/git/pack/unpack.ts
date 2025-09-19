@@ -1,7 +1,8 @@
 import type { RepoStateSchema } from "@/do/repo/repoState.ts";
 
 import * as git from "isomorphic-git";
-import { asTypedStorage, objKey, packOidsKey } from "@/do/repo/repoState.ts";
+import { asTypedStorage, objKey } from "@/do/repo/repoState.ts";
+import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
 import {
   doPrefix,
   r2LooseKey,
@@ -93,6 +94,7 @@ export async function unpackPackToLoose(
 ) {
   const log = createLogger(env.LOG_LEVEL, { service: "Unpack", repoId: prefix });
   const store = asTypedStorage<RepoStateSchema>(state.storage);
+  const db = getDb(state.storage);
   const files = new Map<string, Uint8Array>();
 
   // Create a loader for existing loose objects (needed for thin packs)
@@ -147,7 +149,8 @@ export async function unpackPackToLoose(
   }
   if (packKey) {
     try {
-      await store.put(packOidsKey(packKey), oids);
+      // Store pack OIDs in SQLite
+      await insertPackOids(db, packKey, oids);
       // maintain recent list (dedup + unshift)
       const list = ((await store.get("packList")) || []).filter((k: string) => k !== packKey);
       list.unshift(packKey);

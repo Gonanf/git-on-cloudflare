@@ -17,11 +17,15 @@ This document describes the primary data flows of the server: pushing (receive-p
 
 Concurrency: relies on Durable Object single-threaded execution, plus a one-deep receive-pack queue on the DO (`unpackWork` + `unpackNext`). A third concurrent push is rejected with HTTP 503 (also guarded within the DO pre-body) to avoid unbounded queuing.
 
-The DO also records metadata to help fetch:
+The DO maintains metadata to help fetch:
 
-- `lastPackKey` and `lastPackOids`
-- `packList` (recent packs)
-- `packOids:<packKey>` oids per pack
+- DO state: `lastPackKey` and `packList` (recent packs)
+- SQLite tables (embedded in the DO):
+  - `pack_objects(pack_key, oid)` — exact pack membership, indexed by `oid`
+  - `hydr_cover(work_id, oid)` — coverage set for hydration segments
+  - `hydr_pending(work_id, kind, oid)` — pending OIDs to build hydration segments; `kind` ∈ {`base`, `loose`}
+
+Pack membership is persisted immediately during hydration/segment builds and referenced during fetch to compute union coverage efficiently. Hydration is resumable across alarms; pending sets and coverage live in SQLite to survive restarts.
 
 ## Fetch (git-upload-pack v2)
 

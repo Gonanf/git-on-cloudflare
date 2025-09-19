@@ -16,6 +16,15 @@
   "limits": {
     "cpu_ms": 300000
   },
+  "rules": [
+    {
+      "type": "Text",
+      "globs": [
+        "**/*.sql"
+      ],
+      "fallthrough": true
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

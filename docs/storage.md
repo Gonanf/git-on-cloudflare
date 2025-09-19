@@ -12,6 +12,19 @@ This project uses a hybrid storage approach to balance strong consistency for re
 - Access patterns:
   - Always consistent; great for writes and cache-like reads
 
+### SQLite metadata in Durable Objects
+
+- A small SQLite database is embedded in each Repository DO using `drizzle-orm/durable-sqlite`.
+- Purpose: store indexed metadata that benefits fetch and hydration flows.
+- Tables:
+  - `pack_objects(pack_key, oid)` — exact per-pack membership; indexed by `oid` for fast lookups.
+  - `hydr_cover(work_id, oid)` — coverage set for hydration segments.
+  - `hydr_pending(work_id, kind, oid)` — pending OIDs for hydration work; `kind` ∈ {`base`, `loose`}; primary key `(work_id, kind, oid)` and index on `(work_id, kind)`.
+- Migrations run during DO initialization via `migrate(db, migrations)` and Wrangler `new_sqlite_classes` (see `wrangler.jsonc` and `drizzle.config.ts`).
+- Enables efficient batch queries such as `getPackOidsBatch()` and robust coverage checks.
+
+Note: All SQLite access goes through the data access layer (DAL) in `src/do/repo/db/dal.ts`. Avoid raw drizzle queries outside the DAL.
+
 ## R2 storage
 
 - Large, cheap object store

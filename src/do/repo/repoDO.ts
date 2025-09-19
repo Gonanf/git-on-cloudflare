@@ -2,6 +2,7 @@ import type { RepoStateSchema, Head } from "./repoState.ts";
 import type { UnpackProgress } from "@/common/index.ts";
 
 import { DurableObject } from "cloudflare:workers";
+import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 import { asTypedStorage, objKey } from "./repoState.ts";
 import { doPrefix } from "@/keys.ts";
 import {
@@ -12,7 +13,7 @@ import {
   indexPackOnly,
 } from "@/git/index.ts";
 import { text, createLogger, isValidOid, bytesToHex, createInflateStream } from "@/common/index.ts";
-import { r2PackKey, packIndexKey } from "@/keys.ts";
+import { r2PackKey } from "@/keys.ts";
 import {
   enqueueHydrationTask,
   processHydrationSlice,
@@ -21,7 +22,7 @@ import {
 } from "./hydration.ts";
 import { ensureScheduled, scheduleAlarmIfSooner } from "./scheduler.ts";
 import { getConfig } from "./repoConfig.ts";
-
+import { purgeRepo, removePack } from "./packOperations.ts";
 import {
   getObjectStream,
   getObject,
@@ -37,6 +38,10 @@ import { getRefs, setRefs, resolveHead, setHead, getHeadAndRefs } from "./refs.t
 import { handleUnpackWork, getUnpackProgress } from "./unpack.ts";
 import { handleIdleAndMaintenance } from "./maintenance.ts";
 import { debugState, debugCheckCommit, debugCheckOid } from "./debug.ts";
+import { migrate } from "drizzle-orm/durable-sqlite/migrator";
+import { getDb, insertPackOids } from "./db/index.ts";
+import { migrateKvToSql } from "./db/migrate.ts";
+import migrations from "@/drizzle/migrations";
 
 /**
  * Repository Durable Object (per-repo authority)
@@ -75,11 +80,15 @@ export class RepoDurableObject extends DurableObject {
   declare env: Env;
   // Throttle lastAccessMs writes to storage to reduce per-request write amplification
   private lastAccessMemMs: number | undefined;
+  private db: DrizzleSqliteDODatabase<any> | undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.blockConcurrencyWhile(async () => {
       this.lastAccessMemMs = await ctx.storage.get("lastAccessMs");
+      this.db = getDb(ctx.storage);
+      await migrate(this.db, migrations);
+      await migrateKvToSql(this.ctx, this.db, this.logger);
       await this.ensureAccessAndAlarm();
     });
   }
@@ -350,6 +359,7 @@ export class RepoDurableObject extends DurableObject {
   ): Promise<{ commitOid: string; treeOid: string }> {
     await this.ensureAccessAndAlarm();
     const store = asTypedStorage<RepoStateSchema>(this.ctx.storage);
+    const db = getDb(this.ctx.storage);
     // Build empty tree object (content is empty)
     const treeContent = new Uint8Array(0);
     const { oid: treeOid, zdata: treeZ } = await encodeGitObjectAndDeflate("tree", treeContent);
@@ -398,7 +408,11 @@ export class RepoDurableObject extends DurableObject {
       await store.put("lastPackKey", packKey); // Store the full R2 key
       await store.put("lastPackOids", packOids);
       await store.put("packList", [packKey]);
-      await store.put(`packOids:${packKey}`, packOids);
+
+      // Also persist pack membership into SQLite for consistency with runtime paths
+      try {
+        await insertPackOids(db, packKey, packOids);
+      } catch {}
 
       // Also store objects as loose in DO for direct access
       await store.put(objKey(treeOid), treeZ);
@@ -437,40 +451,20 @@ export class RepoDurableObject extends DurableObject {
    */
   public async purgeRepo(): Promise<{ deletedR2: number; deletedDO: boolean }> {
     await this.ensureAccessAndAlarm();
-    const log = createLogger(this.env.LOG_LEVEL, {
-      service: "RepoDO",
-      doId: this.ctx.id.toString(),
-    });
+    return await purgeRepo(this.ctx, this.env);
+  }
 
-    let deletedR2 = 0;
-    const prefix = this.prefix();
-
-    // Delete all R2 objects for this repo
-    try {
-      // List and delete all objects under do/<id>/
-      let cursor: string | undefined;
-      do {
-        const res = await this.env.REPO_BUCKET.list({ prefix, cursor });
-        const objects = res.objects || [];
-
-        if (objects.length > 0) {
-          // Delete in batches
-          const keys = objects.map((o) => o.key);
-          await this.env.REPO_BUCKET.delete(keys);
-          deletedR2 += keys.length;
-          log.info("purge:deleted-r2-batch", { count: keys.length });
-        }
-
-        cursor = res.truncated ? res.cursor : undefined;
-      } while (cursor);
-    } catch (e) {
-      log.error("purge:r2-delete-error", { error: String(e) });
-    }
-
-    // Delete all DO storage
-    await this.ctx.storage.deleteAll();
-    log.info("purge:deleted-do-storage");
-
-    return { deletedR2, deletedDO: true };
+  /**
+   * RPC: Remove a specific pack file and its associated data
+   * @param packKey - The pack key to remove
+   */
+  public async removePack(packKey: string): Promise<{
+    removed: boolean;
+    deletedPack: boolean;
+    deletedIndex: boolean;
+    deletedMetadata: boolean;
+  }> {
+    await this.ensureAccessAndAlarm();
+    return await removePack(this.ctx, this.env, packKey);
   }
 }

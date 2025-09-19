@@ -8,14 +8,29 @@ import type {
 import type { GitObjectType } from "@/git/core/index.ts";
 import type { Logger } from "@/common/logger.ts";
 
-import { asTypedStorage, packOidsKey, objKey } from "./repoState.ts";
-import { createLogger, BloomFilter } from "@/common/index.ts";
-import { loadIdxParsed } from "@/git/pack/idxCache.ts";
+import { indexPackOnly, readPackHeaderEx, buildPackV2 } from "@/git/pack/index.ts";
 import { inflateAndParseHeader } from "@/git/core/index.ts";
 import { r2PackKey, packIndexKey, getDoIdFromPath } from "@/keys.ts";
+import { createLogger } from "@/common/index.ts";
+import { asTypedStorage, objKey } from "./repoState.ts";
+import { loadIdxParsed } from "@/git/pack/idxCache.ts";
 import { getConfig } from "./repoConfig.ts";
 import { ensureScheduled } from "./scheduler.ts";
-import { indexPackOnly, readPackHeaderEx, buildPackV2 } from "@/git/pack/index.ts";
+import {
+  getDb,
+  insertPackOids,
+  insertHydrCoverOids,
+  insertHydrPendingOids,
+  getHydrPendingOids,
+  getHydrPendingCounts,
+  deleteHydrPendingOids,
+  clearHydrPending,
+  deletePackObjects,
+  clearHydrCover,
+  hasHydrCoverForWork,
+  filterUncoveredAgainstHydrCover,
+  getPackOids,
+} from "./db/index.ts";
 
 // File-wide constants to avoid magic numbers across stages
 const HYDR_SAMPLE_PER_PACK = 128; // sample items per pack during planning
@@ -63,17 +78,70 @@ function nowMs() {
 }
 
 /**
+ * Populate per-work coverage table hydr_cover(work_id, oid) from hydration window packs.
+ * Only includes packs whose basename starts with 'pack-hydr-'. Optionally includes
+ * lastPackOids when lastPackKey is a hydration pack.
+ */
+async function ensureHydrCoverForWork(
+  state: DurableObjectState,
+  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
+  cfg: ReturnType<typeof getHydrConfig>,
+  workId: string
+): Promise<void> {
+  if (!workId) return;
+  const db = getDb(state.storage);
+  try {
+    const exists = await hasHydrCoverForWork(db, workId);
+    if (exists) return;
+  } catch {}
+
+  // Build hydration-only window list
+  const lastPackKey = (await store.get("lastPackKey")) || null;
+  const packListRaw = (await store.get("packList")) || [];
+  const hydra: string[] = [];
+  if (Array.isArray(packListRaw)) {
+    for (const k of packListRaw) {
+      const base = k.split("/").pop() || "";
+      if (base.startsWith("pack-hydr-")) hydra.push(k);
+    }
+  }
+  const lbase = (lastPackKey || "").split("/").pop() || "";
+  if (lastPackKey && lbase.startsWith("pack-hydr-")) hydra.unshift(lastPackKey);
+  const window = hydra.slice(0, cfg.windowMax);
+
+  // Insert memberships into hydr_cover (chunking handled by helper)
+  for (const pk of window) {
+    try {
+      // Fetch pack membership via DAL and insert into coverage table
+      const oids = (await getPackOids(db, pk)).map((o) => o.toLowerCase());
+      await insertHydrCoverOids(db, workId, oids);
+    } catch {}
+  }
+
+  // Include recent lastPackOids when last pack is hydration
+  if (lastPackKey && lbase.startsWith("pack-hydr-")) {
+    try {
+      const last = ((await store.get("lastPackOids")) || []).slice(0, 10000);
+      const oids = (Array.isArray(last) ? last : []).map((oid: string) => oid.toLowerCase());
+      await insertHydrCoverOids(db, workId, oids);
+    } catch {}
+  }
+}
+
+/**
  * Builds a coverage set limited to existing hydration packs only (pack-hydr-*).
  * Optionally includes `lastPackOids` only when lastPackKey itself is a hydration pack.
  * Used by the segment builder to avoid re-creating objects already included in
  * previous hydration segments while still allowing thickening across non-hydration packs.
  */
 async function buildHydrationCoverageSet(
+  state: DurableObjectState,
   store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
   cfg: ReturnType<typeof getHydrConfig>
 ): Promise<Set<string>> {
   const covered = new Set<string>();
   try {
+    const db = getDb(state.storage);
     const lastPackKey = (await store.get("lastPackKey")) || null;
     const packListRaw = (await store.get("packList")) || [];
     const hydra: string[] = [];
@@ -86,15 +154,19 @@ async function buildHydrationCoverageSet(
     const lbase = (lastPackKey || "").split("/").pop() || "";
     if (lastPackKey && lbase.startsWith("pack-hydr-")) hydra.unshift(lastPackKey);
     const window = hydra.slice(0, cfg.windowMax);
-    const storageKeys = window.map((k) => packOidsKey(k));
-    const fetched = await store.get(storageKeys);
-    for (let i = 0; i < window.length; i++) {
-      const arr = fetched.get(storageKeys[i]);
-      if (Array.isArray(arr)) for (const oid of arr) covered.add(String(oid).toLowerCase());
-    }
+    // Load coverage from SQLite pack_objects to avoid large KV values
+    try {
+      if (window.length > 0) {
+        // Query per key to avoid massive IN clauses; window is capped by cfg.windowMax
+        for (const pk of window) {
+          const rows = await getPackOids(db, pk);
+          for (const oid of rows) covered.add(String(oid).toLowerCase());
+        }
+      }
+    } catch {}
     if (lastPackKey && lbase.startsWith("pack-hydr-")) {
       const last = (await store.get("lastPackOids")) || [];
-      for (const x of last.slice(0, 10000)) covered.add(String(x).toLowerCase());
+      for (const x of last.slice(0, 10000)) covered.add(x.toLowerCase());
     }
   } catch {}
   return covered;
@@ -147,27 +219,7 @@ function setStage(work: HydrationWork, stage: HydrationStage, log: Logger) {
 }
 
 // Small helpers to reduce repetition when mutating work state
-type HydrationPending = NonNullable<HydrationWork["pending"]>;
 type HydrationProgress = NonNullable<HydrationWork["progress"]>;
-
-function ensurePending(work: HydrationWork): HydrationPending {
-  const pending: HydrationPending = {
-    needBases: work.pending?.needBases ?? [],
-    needLoose: work.pending?.needLoose ?? [],
-  };
-  work.pending = pending;
-  return pending;
-}
-
-function setPendingBases(work: HydrationWork, bases: Iterable<string>) {
-  const pending = ensurePending(work);
-  pending.needBases = Array.from(bases);
-}
-
-function setPendingLoose(work: HydrationWork, loose: Iterable<string>) {
-  const pending = ensurePending(work);
-  pending.needLoose = Array.from(loose);
-}
 
 function updateProgress(work: HydrationWork, patch: Partial<HydrationProgress>) {
   const base: HydrationProgress = { ...(work.progress ?? {}) };
@@ -240,10 +292,8 @@ async function analyzeDeltaChain(
     if (currentHeader.type === PACK_TYPE_OFS_DELTA) {
       const baseOff = currentOff - (currentHeader.baseRel || 0);
       const baseIdx = idx.offToIdx.get(baseOff);
-      if (baseIdx !== undefined) {
-        baseOid = idx.oids[baseIdx];
-        currentOff = baseOff;
-      }
+      if (baseIdx !== undefined) baseOid = idx.oids[baseIdx];
+      currentOff = baseOff;
     } else if (currentHeader.type === PACK_TYPE_REF_DELTA) {
       baseOid = currentHeader.baseOid;
       // For REF_DELTA, we need to find the offset of the base
@@ -297,30 +347,6 @@ async function analyzeDeltaChain(
 }
 
 /**
- * Build or restore a Bloom filter for coverage checks, reused across all stages and slices.
- * The filter is serialized onto work.snapshot.bloom to avoid rebuilding.
- * @param buildCoverage - Function to build the coverage set when bloom is missing
- */
-async function getOrBuildBloom(
-  work: HydrationWork,
-  buildCoverage: () => Promise<Set<string>>
-): Promise<BloomFilter> {
-  // Restore existing bloom if present
-  const snap = work.snapshot || (work.snapshot = { lastPackKey: null, packList: [], window: [] });
-  if (snap.bloom) {
-    try {
-      return BloomFilter.fromJSON(snap.bloom);
-    } catch {}
-  }
-  // Build once from coverage set
-  const covered = await buildCoverage();
-  const bloom = BloomFilter.create(Math.max(1, covered.size), 0.01);
-  for (const oid of covered) bloom.add(oid);
-  snap.bloom = bloom.toJSON();
-  return bloom;
-}
-
-/**
  * Clears hydration-related state and deletes hydration-generated packs.
  * - Clears hydrationWork and hydrationQueue
  * - Deletes packs whose basename starts with 'pack-hydr-' and their .idx files
@@ -334,6 +360,7 @@ export async function clearHydrationState(
 ): Promise<{ clearedWork: boolean; clearedQueue: number; removedPacks: number }> {
   const store = asTypedStorage<RepoStateSchema>(state.storage);
   const log = createLogger(env.LOG_LEVEL, { service: "Hydration", doId: state.id.toString() });
+  const db = getDb(state.storage);
   let clearedWork = false;
   let clearedQueue = 0;
   let removedPacks = 0;
@@ -367,10 +394,11 @@ export async function clearHydrationState(
     } catch (e) {
       log.warn("clear:delete-pack-index-failed", { key, error: String(e) });
     }
+    // Also remove pack membership rows from SQLite
     try {
-      await store.delete(packOidsKey(key));
+      await deletePackObjects(db, key);
     } catch (e) {
-      log.warn("clear:delete-pack-oids-failed", { key, error: String(e) });
+      log.warn("clear:delete-packObjects-failed", { key, error: String(e) });
     }
     removedPacks++;
   }
@@ -471,7 +499,7 @@ export async function summarizeHydrationPlan(
   const window = buildRecentWindowKeys(lastPackKey, packList, cfg.windowMax);
 
   // Coverage set from hydration packs only (matches what scan/build stages use)
-  const covered = await buildHydrationCoverageSet(store, cfg);
+  const covered = await buildHydrationCoverageSet(state, store, cfg);
 
   // Estimate delta base needs by sampling object headers in the window packs.
   // We keep this very lightweight: small per-pack sample, no recursion, and only
@@ -634,13 +662,14 @@ async function handleStagePlan(
     packList: packList.slice(0, cfg.windowMax),
     window,
   };
-  work.pending = work.pending || { needBases: [], needLoose: [] };
   work.progress = { ...(work.progress || {}), packIndex: 0, objCursor: 0 };
 
-  // Precompute hydration-only coverage Bloom that scan stages will reuse
+  // Populate per-work coverage table from hydration window once
   try {
-    await getOrBuildBloom(work, () => buildHydrationCoverageSet(store, cfg));
-  } catch {}
+    await ensureHydrCoverForWork(ctx.state, store, cfg, work.workId);
+  } catch (e) {
+    log.warn("hydration:cover:init-failed", { error: String(e) });
+  }
 
   // Transition to next stage
   if (work.dryRun) {
@@ -667,6 +696,7 @@ async function handleStageScanDeltas(
   work: HydrationWork
 ): Promise<StageHandlerResult> {
   const { state, env, log, store, cfg } = ctx;
+  const db = getDb(state.storage);
   log.debug("hydration:scan-deltas:tick", {
     packIndex: work.progress?.packIndex || 0,
     objCursor: work.progress?.objCursor || 0,
@@ -675,8 +705,8 @@ async function handleStageScanDeltas(
   const res = await scanDeltasSlice(state, env, work);
   if (res === "next") {
     setStage(work, "scan-loose", log);
-    const nb = Array.isArray(work.pending?.needBases) ? work.pending!.needBases!.length : 0;
-    log.info("hydration:scan-deltas:done", { needBases: nb });
+    const counts = await getHydrPendingCounts(db, work.workId);
+    log.info("hydration:scan-deltas:done", { needBases: counts.bases });
     // Clear transient error state on success
     clearError(work);
   } else if (res === "error") {
@@ -694,15 +724,15 @@ async function handleStageScanLoose(
   work: HydrationWork
 ): Promise<StageHandlerResult> {
   const { state, env, log, store, cfg } = ctx;
+  const db = getDb(state.storage);
   log.debug("hydration:scan-loose:tick", {
     cursor: work.progress?.looseCursorKey || null,
-    needLoose: Array.isArray(work.pending?.needLoose) ? work.pending!.needLoose!.length : 0,
   });
   const res = await scanLooseSlice(state, env, work);
   if (res === "next") {
     setStage(work, "build-segment", log);
-    const nl = Array.isArray(work.pending?.needLoose) ? work.pending!.needLoose!.length : 0;
-    log.info("hydration:scan-loose:done", { needLoose: nl });
+    const counts = await getHydrPendingCounts(db, work.workId);
+    log.info("hydration:scan-loose:done", { needLoose: counts.loose });
     clearError(work);
   } else if (res === "error") {
     await handleTransientError(work, store, log, cfg);
@@ -718,9 +748,11 @@ async function handleStageBuildSegment(
   work: HydrationWork
 ): Promise<StageHandlerResult> {
   const { state, env, prefix, log, store, cfg } = ctx;
+  const db = getDb(state.storage);
+  const counts = await getHydrPendingCounts(db, work.workId);
   log.info("hydration:build-segment:tick", {
-    needBases: Array.isArray(work.pending?.needBases) ? work.pending!.needBases!.length : 0,
-    needLoose: Array.isArray(work.pending?.needLoose) ? work.pending!.needLoose!.length : 0,
+    needBases: counts.bases,
+    needLoose: counts.loose,
     segmentSeq: work.progress?.segmentSeq || 0,
   });
   const res = await buildSegmentSlice(state, env, prefix, work);
@@ -750,11 +782,17 @@ async function handleStageDone(
   ctx: HydrationCtx,
   work: HydrationWork
 ): Promise<StageHandlerResult> {
-  const { store, log } = ctx;
+  const { state, store, log } = ctx;
   const queue = (await store.get("hydrationQueue")) || [];
   const newQ = Array.isArray(queue) ? queue.slice(1) : [];
   await store.put("hydrationQueue", newQ);
   await store.delete("hydrationWork");
+  // Cleanup per-work coverage and pending rows for this work
+  try {
+    const db = getDb(state.storage);
+    await clearHydrCover(db, work.workId);
+    await clearHydrPending(db, work.workId);
+  } catch {}
   log.info("done", { remaining: newQ.length });
   // If queue still has items, schedule another tick; do not persist work we just deleted
   return { continue: newQ.length > 0, persist: false };
@@ -805,22 +843,17 @@ async function scanDeltasSlice(
    * `cfg.chunk` objects per pack.
    */
   const cfg = getHydrConfig(env);
-  const store = asTypedStorage<RepoStateSchema>(state.storage);
   const start = nowMs();
   const log = makeHydrationLogger(env, work.snapshot?.lastPackKey || "");
+  const db = getDb(state.storage);
 
   const window = work.snapshot?.window || [];
   if (!window || window.length === 0) return "next";
 
-  // Use hydration-only coverage to match what build-segment uses.
-  // Cache the bloom filter across slices to avoid rebuilding it.
-  const bloom = await getOrBuildBloom(work, () => buildHydrationCoverageSet(store, cfg));
-
-  const needBasesSet = new Set<string>(
-    Array.isArray(work.pending?.needBases)
-      ? work.pending!.needBases!.map((x) => x.toLowerCase())
-      : []
-  );
+  // For coverage checks within this slice, defer to hydr_cover using a batched query.
+  // We collect in-pack base candidates and filter them in one go at slice boundaries.
+  const inPackCoverageCandidates = new Set<string>();
+  const needBasesSet = new Set<string>();
 
   let pIndex = work.progress?.packIndex || 0;
   let objCur = work.progress?.objCursor || 0;
@@ -839,7 +872,8 @@ async function scanDeltasSlice(
       log.warn("scan-deltas:idx-load-error", { key, error: String(e) });
       work.error = { message: `Failed to load pack index: ${String(e)}` };
       updateProgress(work, { packIndex: pIndex, objCursor: objCur });
-      setPendingBases(work, needBasesSet);
+      // Save pending bases to SQLite even on error
+      await insertHydrPendingOids(db, work.workId, "base", Array.from(needBasesSet));
       return "error";
     }
     if (!parsed) {
@@ -864,24 +898,42 @@ async function scanDeltasSlice(
         work.error = { message: `Failed to read pack header: ${String(e)}` };
         objCur = j;
         updateProgress(work, { packIndex: pIndex, objCursor: objCur });
-        setPendingBases(work, needBasesSet);
+        // Save pending bases to SQLite even on error
+        await insertHydrPendingOids(db, work.workId, "base", Array.from(needBasesSet));
         return "error";
       }
       if (!header) continue;
-      // Analyze the full delta chain to ensure complete thickening
-      const chain = await analyzeDeltaChain(env, key, header, off, phys, (q: string) =>
-        bloom.has(q)
-      );
+      // Analyze the full delta chain to ensure complete thickening.
+      // For bases inside the same pack, record candidates and decide coverage in batch later.
+      const chain = await analyzeDeltaChain(env, key, header, off, phys, (q: string) => {
+        // Only record candidates that are in the same pack; others must always be included
+        if (phys.oidsSet.has(q)) inPackCoverageCandidates.add(q);
+        return false; // tentatively treat as not covered; we'll filter later using hydr_cover
+      });
       for (const oid of chain) needBasesSet.add(oid);
       // stop if time budget exceeded inside loop
       if (nowMs() - start >= cfg.unpackMaxMs || subreq >= SOFT_SUBREQ_LIMIT) {
         objCur = j + 1;
+        // Batch filter in-pack candidates against hydr_cover before persisting pending
+        try {
+          const uncovered = await filterUncoveredAgainstHydrCover(
+            db,
+            work.workId,
+            Array.from(inPackCoverageCandidates)
+          );
+          const uncoveredSet = new Set(uncovered);
+          // Remove covered ones from needBasesSet (only those that were in-pack candidates)
+          for (const q of inPackCoverageCandidates) {
+            if (!uncoveredSet.has(q)) needBasesSet.delete(q);
+          }
+        } catch {}
         updateProgress(work, { packIndex: pIndex, objCursor: objCur });
-        setPendingBases(work, needBasesSet);
+        // Save pending bases to SQLite
+        await insertHydrPendingOids(db, work.workId, "base", Array.from(needBasesSet));
         log.debug("scan-deltas:slice", {
           packIndex: pIndex,
           advanced: j - (work.progress?.objCursor || 0),
-          needBases: ensurePending(work).needBases?.length || 0,
+          needBases: needBasesSet.size,
         });
         return "more";
       }
@@ -895,20 +947,34 @@ async function scanDeltasSlice(
     } else {
       // Need another slice for this pack
       updateProgress(work, { packIndex: pIndex, objCursor: objCur });
-      setPendingBases(work, needBasesSet);
+      // Save pending bases to SQLite
+      await insertHydrPendingOids(db, work.workId, "base", Array.from(needBasesSet));
       log.debug("scan-deltas:continue", {
         packIndex: pIndex,
         objCursor: objCur,
-        needBases: ensurePending(work).needBases?.length || 0,
+        needBases: needBasesSet.size,
       });
       return "more";
     }
   }
 
   // Completed all packs within time or finished list
+  // Final batch filter for in-pack candidates
+  try {
+    const uncovered = await filterUncoveredAgainstHydrCover(
+      db,
+      work.workId,
+      Array.from(inPackCoverageCandidates)
+    );
+    const uncoveredSet = new Set(uncovered);
+    for (const q of inPackCoverageCandidates) {
+      if (!uncoveredSet.has(q)) needBasesSet.delete(q);
+    }
+  } catch {}
   updateProgress(work, { packIndex: pIndex, objCursor: objCur });
-  setPendingBases(work, needBasesSet);
-  log.info("scan-deltas:complete", { needBases: ensurePending(work).needBases?.length || 0 });
+  // Save final pending bases to SQLite
+  await insertHydrPendingOids(db, work.workId, "base", Array.from(needBasesSet));
+  log.info("scan-deltas:complete", { needBases: needBasesSet.size });
   return pIndex < window.length ? "more" : "next";
 }
 
@@ -928,16 +994,9 @@ async function scanLooseSlice(
   const store = asTypedStorage<RepoStateSchema>(state.storage);
   const start = nowMs();
   const log = makeHydrationLogger(env, work.snapshot?.lastPackKey || "");
+  const db = getDb(state.storage);
 
-  // Use hydration-only coverage to match what build-segment uses.
-  // Cache the bloom filter across slices to avoid rebuilding it.
-  const bloom = await getOrBuildBloom(work, () => buildHydrationCoverageSet(store, cfg));
-
-  const needLoose = new Set<string>(
-    Array.isArray(work.pending?.needLoose)
-      ? work.pending!.needLoose!.map((x) => x.toLowerCase())
-      : []
-  );
+  const needLoose = new Set<string>();
 
   const LIMIT = HYDR_LOOSE_LIST_PAGE;
   let cursor = work.progress?.looseCursorKey || undefined;
@@ -957,7 +1016,7 @@ async function scanLooseSlice(
       log.warn("scan-loose:list-error", { cursor, error: String(e) });
       work.error = { message: `Failed to list loose objects: ${String(e)}` };
       updateProgress(work, { looseCursorKey: cursor });
-      setPendingLoose(work, needLoose);
+      await insertHydrPendingOids(db, work.workId, "loose", Array.from(needLoose));
       return "error";
     }
     const keys: string[] = [];
@@ -966,17 +1025,23 @@ async function scanLooseSlice(
       done = true;
       break;
     }
-    let lastKey: string | undefined;
-    for (const fullKey of keys) {
-      lastKey = fullKey;
-      const oid = fullKey.slice(4).toLowerCase(); // strip 'obj:'
-      if (!bloom.has(oid)) needLoose.add(oid);
-      if (nowMs() - start >= cfg.unpackMaxMs) {
-        setPendingLoose(work, needLoose);
-        updateProgress(work, { looseCursorKey: lastKey });
-        log.debug("scan-loose:slice", { added: ensurePending(work).needLoose?.length || 0 });
-        return "more";
-      }
+    // Convert keys to OIDs and filter against hydr_cover in a single SQL
+    const oids = keys.map((k) => String(k).slice(4).toLowerCase());
+    let uncovered: string[] = [];
+    try {
+      uncovered = await filterUncoveredAgainstHydrCover(db, work.workId, oids);
+    } catch (e) {
+      log.warn("scan-loose:cover-check-failed", { error: String(e) });
+      // Fall back to treating all as uncovered in this page
+      uncovered = oids;
+    }
+    for (const oid of uncovered) needLoose.add(oid);
+    const lastKey = keys[keys.length - 1];
+    if (nowMs() - start >= cfg.unpackMaxMs) {
+      await insertHydrPendingOids(db, work.workId, "loose", Array.from(needLoose));
+      updateProgress(work, { looseCursorKey: lastKey });
+      log.debug("scan-loose:slice", { added: needLoose.size });
+      return "more";
     }
     cursor = lastKey;
     // If we got fewer than LIMIT keys, we might be done. Try another list quickly only if time remains.
@@ -991,13 +1056,13 @@ async function scanLooseSlice(
     }
   }
 
-  setPendingLoose(work, needLoose);
+  await insertHydrPendingOids(db, work.workId, "loose", Array.from(needLoose));
   if (done) {
     // Clear cursor to mark completion
     const prog: HydrationProgress = { ...(work.progress ?? {}) };
     prog.looseCursorKey = undefined;
     work.progress = prog;
-    log.info("scan-loose:complete", { needLoose: ensurePending(work).needLoose?.length || 0 });
+    log.info("scan-loose:complete", { needLoose: needLoose.size });
     return "next";
   }
   // More to scan next slice
@@ -1028,23 +1093,25 @@ async function buildSegmentSlice(
   // is considered corrupted and hydration should error out rather than masking it by
   // reading from R2. The error path below reflects this invariant.
   const store = asTypedStorage<RepoStateSchema>(state.storage);
+  const db = getDb(state.storage);
   const log = makeHydrationLogger(env, prefix);
   const MAX_OBJS = HYDR_MAX_OBJS_PER_SEGMENT; // conservative per-segment cap to fit budgets
 
-  const needBases = Array.isArray(work.pending?.needBases) ? work.pending!.needBases! : [];
-  const needLoose = Array.isArray(work.pending?.needLoose) ? work.pending!.needLoose! : [];
+  // Fetch pending OIDs from SQLite, limited to a reasonable batch
+  const MAX_FETCH = HYDR_MAX_OBJS_PER_SEGMENT * 2; // Fetch more than we'll use to account for filtering
+  const needBases = await getHydrPendingOids(db, work.workId, "base", MAX_FETCH);
+  const needLoose = await getHydrPendingOids(db, work.workId, "loose", MAX_FETCH);
   const candidatesRaw = Array.from(new Set<string>([...needBases, ...needLoose]));
 
-  // Rebuild a fresh coverage window from current state to avoid duplicates across jobs.
-  // IMPORTANT: Deduplicate ONLY against existing hydration packs so we can thicken
-  // across non-hydration packs when needed. This avoids skipping work when older
-  // non-hydration packs are pruned or incomplete.
-  // Note: We rebuild here instead of using bloom because new hydration packs may have
-  // been created by previous segment builds in this same hydration run.
-  const cfg = getHydrConfig(env);
-  const covered = await buildHydrationCoverageSet(store, cfg);
-
-  const candidates = candidatesRaw.filter((oid) => !covered.has(String(oid).toLowerCase()));
+  // Use per-work hydr_cover for coverage to avoid rebuilding large Sets.
+  // Deduplicate ONLY against hydration packs (hydr_cover is populated from hydration window).
+  let candidates: string[] = [];
+  try {
+    candidates = await filterUncoveredAgainstHydrCover(db, work.workId, candidatesRaw);
+  } catch (e) {
+    // Fallback on failure: proceed with all candidates (lowercased)
+    candidates = candidatesRaw.map((x) => String(x).toLowerCase());
+  }
   if (candidates.length === 0) {
     log.info("build:empty-pending", {});
     return "done";
@@ -1117,11 +1184,10 @@ async function buildSegmentSlice(
     return "error";
   }
 
-  // Persist pack membership immediately using the objects we built.
-  // This guarantees coverage for subsequent hydration runs even if indexing fails.
+  // Persist pack membership to SQLite for exact coverage
   const builtOids = objs.map((o) => o.oid);
   try {
-    if (builtOids.length > 0) await state.storage.put(packOidsKey(packKey), builtOids);
+    await insertPackOids(db, packKey, builtOids);
   } catch (e) {
     log.warn("build:store-oids-failed", { packKey, error: String(e) });
   }
@@ -1132,12 +1198,24 @@ async function buildSegmentSlice(
     oids = await indexPackOnly(packfile, env, packKey, state, prefix);
     // Update pack OIDs with actual indexed OIDs (may differ from input OIDs)
     if (oids.length > 0) {
-      await state.storage.put(packOidsKey(packKey), oids);
       log.info("build:updated-packOids", { packKey, count: oids.length });
+      // Store to SQLite (may overwrite earlier entries from builtOids)
+      await insertPackOids(db, packKey, oids);
     }
   } catch (e) {
     log.warn("build:index-failed", { packKey, error: String(e) });
     // Best-effort: continue; the pack is still usable for fetch streaming from R2, but we prefer an idx
+  }
+
+  // Update hydr_cover for this work to include newly built OIDs for fast coverage checks
+  try {
+    const all = new Set<string>();
+    for (const x of builtOids) all.add(String(x).toLowerCase());
+    for (const x of oids) all.add(String(x).toLowerCase());
+    const allArr = Array.from(all);
+    await insertHydrCoverOids(db, work.workId, allArr);
+  } catch (e) {
+    log.debug("build:update-hydr_cover-failed", { error: String(e) });
   }
 
   try {
@@ -1162,20 +1240,23 @@ async function buildSegmentSlice(
     log.warn("build:store-packlist-failed", { packKey, error: String(e) });
   }
 
-  // Update progress and pending
+  // Update progress and remove built OIDs from pending
   const builtSet = new Set(batch.map((x) => x.toLowerCase()));
-  const nextBases = (needBases || []).filter((x) => !builtSet.has(x.toLowerCase()));
-  const nextLoose = (needLoose || []).filter((x) => !builtSet.has(x.toLowerCase()));
-  const pending = ensurePending(work);
-  pending.needBases = nextBases;
-  pending.needLoose = nextLoose;
+  const basesToDelete = needBases.filter((x) => builtSet.has(x.toLowerCase()));
+  const looseToDelete = needLoose.filter((x) => builtSet.has(x.toLowerCase()));
+
+  // Delete processed OIDs from pending table
+  await deleteHydrPendingOids(db, work.workId, "base", basesToDelete);
+  await deleteHydrPendingOids(db, work.workId, "loose", looseToDelete);
+
   updateProgress(work, {
     segmentSeq: seq,
     producedBytes: (work.progress?.producedBytes || 0) + packfile.byteLength,
   });
 
-  // If there are still pending objects, continue building more segments
-  const remaining = (nextBases?.length || 0) + (nextLoose?.length || 0);
+  // Check if there are still pending objects
+  const counts = await getHydrPendingCounts(db, work.workId);
+  const remaining = counts.bases + counts.loose;
   log.info("build:segment-done", { packKey, built: objs.length, remaining });
   return remaining > 0 ? "more" : "done";
 }

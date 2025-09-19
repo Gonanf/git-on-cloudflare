@@ -26,12 +26,20 @@ git pull https://your-domain.com/owner/repo
 
   Note: `thin-pack` is not advertised.
 
+  ls-refs arguments supported:
+  - `ref-prefix <prefix>` — filter refs by one or more prefixes
+  - `peel` — include `peeled:<oid>` attribute for annotated tags
+  - `symrefs` — include `symref-target:<ref>` attribute on the `HEAD` line
+
+  The `HEAD` line is emitted first when available and includes `symref-target` for compatibility. When `HEAD` is unborn, the line `unborn HEAD` is advertised.
+
 - **`POST /:owner/:repo/git-upload-pack`**  
   Fetch objects (clone/pull). Handles pack negotiation and object transfer.
 
   Notes:
   - Default streaming with side-band-64k progress. Set header `X-Git-Streaming: false` to force the legacy buffered path (deprecated).
   - During negotiation (`done=false`), the server returns an acknowledgments section only (no `packfile` section).
+  - If the repository has not produced any packs yet (loose-only), the server returns `503 Service Unavailable` with headers `Retry-After: 5` and `X-Git-Error: repository-not-ready`.
 
 ### Push Operations
 
@@ -180,6 +188,12 @@ All admin endpoints require authentication with owner tokens.
 - **`DELETE /:owner/:repo/admin/hydrate`**  
   Clear hydration state and remove hydration-generated packs.  
   Returns counts of cleared items.
+
+### Pack Management
+
+- **`DELETE /:owner/:repo/admin/pack/:packKey`**  
+  Remove a specific pack and its index/metadata.  
+  Returns: `{ ok: boolean, removed: boolean, deletedPack: boolean, deletedIndex: boolean, deletedMetadata: boolean }`.
 
 ### Dangerous Operations
 

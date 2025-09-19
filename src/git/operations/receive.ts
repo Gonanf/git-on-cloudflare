@@ -2,11 +2,12 @@ import type { Head, RepoStateSchema, TypedStorage } from "@/do/repo/repoState.ts
 
 import { parsePktSection, pktLine, flushPkt, concatChunks } from "@/git/core/pktline.ts";
 import { indexPackOnly, createMemPackFs, createLooseLoader } from "@/git/pack/index.ts";
-import { asTypedStorage, packOidsKey, objKey } from "@/do/repo/repoState.ts";
+import { asTypedStorage, objKey } from "@/do/repo/repoState.ts";
 import { r2PackKey, r2LooseKey, packIndexKey } from "@/keys.ts";
 import { scheduleAlarmIfSooner } from "@/do/repo/scheduler.ts";
 import * as git from "isomorphic-git";
 import { createLogger } from "@/common/index.ts";
+import { getDb, oidExistsInPacks, insertPackOids } from "@/do/repo/db/index.ts";
 
 // Connectivity check for receive-pack commands.
 // Ensures that each updated ref points to an object we can resolve immediately:
@@ -18,12 +19,17 @@ async function runConnectivityCheck(args: {
   packKey?: string;
   cmds: { oldOid: string; newOid: string; ref: string }[];
   statuses: { ref: string; ok: boolean; msg?: string }[];
+  state: DurableObjectState;
   store: TypedStorage<RepoStateSchema>;
   env: Env;
   prefix: string;
   log: ReturnType<typeof createLogger>;
 }) {
-  const { pack, packKey, cmds, statuses, store, env, prefix, log } = args;
+  const { pack, packKey, cmds, statuses, state, store, env, prefix, log } = args;
+
+  // Get database connection once for the entire connectivity check
+  const db = getDb(state.storage);
+
   try {
     const lastPackOids = (await store.get("lastPackOids")) || [];
     const newOidsSet = new Set(lastPackOids.map((x) => x.toLowerCase()));
@@ -45,7 +51,6 @@ async function runConnectivityCheck(args: {
         for (const oid of idxRes.oids) currentPackOids.add(String(oid).toLowerCase());
       }
     } catch {}
-    const packList = (await store.get("packList")) || [];
 
     // Per-run memo caches to avoid repeated reads
     const hasCache = new Map<string, boolean>();
@@ -66,13 +71,8 @@ async function runConnectivityCheck(args: {
           if (await env.REPO_BUCKET.head(r2LooseKey(prefix, lc))) ok = true;
         } catch {}
         if (!ok) {
-          for (const k of packList) {
-            const o = (await store.get(packOidsKey(k))) || [];
-            if (o.includes(lc)) {
-              ok = true;
-              break;
-            }
-          }
+          // Check SQLite for pack membership - query by OID directly
+          ok = await oidExistsInPacks(db, lc);
         }
       }
       hasCache.set(lc, ok);
@@ -303,6 +303,7 @@ export async function receivePack(
   request: Request
 ): Promise<Response> {
   const store = asTypedStorage<RepoStateSchema>(state.storage);
+  const db = getDb(state.storage);
   const log = createLogger(env.LOG_LEVEL, { service: "ReceivePack", repoId: prefix });
 
   try {
@@ -462,6 +463,7 @@ export async function receivePack(
         packKey,
         cmds,
         statuses,
+        state,
         store,
         env,
         prefix,
@@ -510,7 +512,7 @@ export async function receivePack(
           // Clamp stored OIDs to avoid oversized DO state; consistent with reader-side cap
           const capped = indexedOids.slice(0, 10000);
           await store.put("lastPackOids", capped);
-          await store.put(packOidsKey(packKey), indexedOids);
+          await insertPackOids(db, packKey, indexedOids);
 
           const list = ((await store.get("packList")) || []).filter((k: string) => k !== packKey);
           list.unshift(packKey);
@@ -526,7 +528,7 @@ export async function receivePack(
           if (!currentWork) {
             await store.put("unpackWork", {
               packKey,
-              oids: indexedOids,
+              totalCount: indexedOids.length,
               processedCount: 0,
               startedAt: Date.now(),
             });

@@ -966,10 +966,10 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     } else if (hydrationData && hydrationData.queued > 0) {
       hydrationStatus = `Queued (${hydrationData.queued} pending)`;
     }
-    // If no active hydration, check if packs exist to infer completion
+    // If no active hydration, check if hydration packs exist to infer completion
     else if (packCount > 0 && packList.some((p) => p.includes("pack-hydr-"))) {
-      // Infer hydration was done if we have hydration packs (pack-hydr-TIMESTAMP-SEQ.pack)
-      hydrationStatus = "Completed (inferred from packs)";
+      // Infer hydration completion when hydration packs are present (pack-hydr-TIMESTAMP-SEQ.pack)
+      hydrationStatus = "Completed (hydration packs present)";
     }
 
     // Extract default branch from HEAD

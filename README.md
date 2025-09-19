@@ -67,6 +67,7 @@ This is a complete Git Smart HTTP v2 server built on Cloudflare's edge primitive
 - PBKDF2-SHA256 (100k iterations) for auth tokens
 - Background object mirroring from DO to R2 for read scaling
 - Modern web UI with Tailwind CSS v4 and Liquid templates
+- SQLite-backed metadata inside Durable Objects using `drizzle-orm/durable-sqlite`
 - Structured JSON logging with `LOG_LEVEL` (debug/info/warn/error)
 
 ## Deploy to Production
@@ -147,6 +148,7 @@ See `wrangler.jsonc` for the complete configuration.
 npm install
 npm run dev             # Start local server
 npm run test:workers    # Run Vitest tests
+npm run test:auth       # Run Auth DO tests
 npm run test            # Run AVA tests
 ```
 

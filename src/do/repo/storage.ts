@@ -18,6 +18,7 @@ import {
   parseTreeChildOids,
   parseCommitText,
 } from "@/git/index.ts";
+import { getDb, getPackOidsBatch } from "./db/index.ts";
 
 /**
  * Get a single object stream by OID
@@ -133,6 +134,7 @@ export async function hasLooseBatch(
   logger?: { debug: (msg: string, data?: any) => void; warn: (msg: string, data?: any) => void }
 ): Promise<boolean[]> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  const db = getDb(ctx.storage);
 
   // Short-circuit using recent pack membership to avoid R2 HEADs
   // Build a small set of OIDs from the newest packs we know about.
@@ -141,13 +143,17 @@ export async function hasLooseBatch(
     const last = ((await store.get("lastPackOids")) || []) as string[];
     for (const x of last) packSet.add(x.toLowerCase());
 
-    // Include a couple more recent packs if available
+    // Include a couple more recent packs if available, loading from SQLite
     const list = (((await store.get("packList")) || []) as string[]).slice(0, 2);
-    for (const k of list) {
+    if (list.length > 0) {
       try {
-        const arr = ((await store.get(`packOids:${k}`)) || []) as string[];
-        for (const x of arr) packSet.add(x.toLowerCase());
-      } catch {}
+        const map = await getPackOidsBatch(db, list);
+        for (const arr of map.values()) {
+          for (const x of arr) packSet.add(String(x).toLowerCase());
+        }
+      } catch (e) {
+        logger?.debug?.("hasLooseBatch:packOidsBatch-failed", { error: String(e) });
+      }
     }
   } catch {}
 

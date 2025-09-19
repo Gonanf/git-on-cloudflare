@@ -6,9 +6,16 @@
  */
 
 import type { RepoStateSchema } from "./repoState.ts";
+import type { Logger } from "@/common/logger.ts";
 
-import { asTypedStorage, packOidsKey } from "./repoState.ts";
+import { asTypedStorage } from "./repoState.ts";
 import { getConfig } from "./repoConfig.ts";
+import {
+  getDb,
+  getPackOids as getPackOidsHelper,
+  getPackOidsBatch as getPackOidsBatchHelper,
+  deletePackObjects,
+} from "./db/index.ts";
 
 /**
  * Get the latest pack information with its OIDs
@@ -46,9 +53,8 @@ export async function getPacks(ctx: DurableObjectState, env: Env): Promise<strin
  */
 export async function getPackOids(ctx: DurableObjectState, key: string): Promise<string[]> {
   if (!key) return [];
-  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
-  const oids = (await store.get(packOidsKey(key))) || [];
-  return oids;
+  const db = getDb(ctx.storage);
+  return await getPackOidsHelper(db, key);
 }
 
 /**
@@ -62,61 +68,16 @@ export async function getPackOids(ctx: DurableObjectState, key: string): Promise
 export async function getPackOidsBatch(
   ctx: DurableObjectState,
   keys: string[],
-  logger?: { debug: (msg: string, data?: any) => void }
+  logger?: Logger
 ): Promise<Map<string, string[]>> {
-  const out = new Map<string, string[]>();
   try {
-    if (!Array.isArray(keys) || keys.length === 0) return out;
-
-    // Clamp batch size to a reasonable number to avoid large payloads
-    const BATCH = 128;
-    for (let i = 0; i < keys.length; i += BATCH) {
-      const part = keys.slice(i, i + BATCH);
-      const storageKeys = part.map((k) => packOidsKey(k) as unknown as string);
-      const fetched = (await ctx.storage.get(storageKeys)) as Map<string, unknown>;
-
-      for (let j = 0; j < part.length; j++) {
-        const packKey = part[j];
-        const skey = storageKeys[j];
-        const val = fetched.get(skey);
-        if (Array.isArray(val)) {
-          out.set(packKey, val as string[]);
-        } else {
-          out.set(packKey, []);
-        }
-      }
-    }
+    if (!Array.isArray(keys) || keys.length === 0) return new Map();
+    const db = getDb(ctx.storage);
+    return await getPackOidsBatchHelper(db, keys);
   } catch (e) {
     logger?.debug("getPackOidsBatch:error", { error: String(e), count: keys?.length || 0 });
+    return new Map();
   }
-  return out;
-}
-
-/**
- * Update pack list with a new pack
- * Maintains newest-first ordering and updates lastPackKey/lastPackOids
- * @param ctx - Durable Object state context
- * @param packKey - New pack key to add
- * @param oids - OIDs in the new pack
- */
-export async function addPackToList(
-  ctx: DurableObjectState,
-  packKey: string,
-  oids: string[]
-): Promise<void> {
-  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
-
-  // Store pack OIDs
-  await store.put(packOidsKey(packKey), oids);
-
-  // Update pack list (newest first)
-  const packList = (await store.get("packList")) || [];
-  const newList = [packKey, ...packList.filter((k) => k !== packKey)];
-  await store.put("packList", newList);
-
-  // Update last pack references
-  await store.put("lastPackKey", packKey);
-  await store.put("lastPackOids", oids.slice(0, 10000)); // Cap at 10k for memory
 }
 
 /**
@@ -126,6 +87,7 @@ export async function addPackToList(
  */
 export async function removePackFromList(ctx: DurableObjectState, packKey: string): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  const db = getDb(ctx.storage);
 
   // Remove from pack list
   const packList = (await store.get("packList")) || [];
@@ -133,7 +95,7 @@ export async function removePackFromList(ctx: DurableObjectState, packKey: strin
   await store.put("packList", newList);
 
   // Clean up pack OIDs
-  await ctx.storage.delete(packOidsKey(packKey));
+  await deletePackObjects(db, packKey);
 
   // Update lastPackKey if necessary
   const lastPackKey = await store.get("lastPackKey");
@@ -141,68 +103,12 @@ export async function removePackFromList(ctx: DurableObjectState, packKey: strin
     if (newList.length > 0) {
       const newest = newList[0];
       await store.put("lastPackKey", newest);
-      const oids = (await store.get(packOidsKey(newest))) || [];
+      // Load OIDs from SQLite for the newest pack
+      const oids = await getPackOidsHelper(db, newest);
       await store.put("lastPackOids", oids.slice(0, 10000));
     } else {
       await store.delete("lastPackKey");
       await store.delete("lastPackOids");
     }
   }
-}
-
-/**
- * Prune pack list to keep only the specified number of newest packs
- * @param ctx - Durable Object state context
- * @param keepCount - Number of packs to keep
- * @param logger - Logger instance
- * @returns Array of removed pack keys
- */
-export async function prunePackList(
-  ctx: DurableObjectState,
-  keepCount: number,
-  logger?: { warn: (msg: string, data?: any) => void }
-): Promise<string[]> {
-  const store = asTypedStorage<RepoStateSchema>(ctx.storage);
-  const packList = (await store.get("packList")) || [];
-
-  if (packList.length <= keepCount) {
-    return [];
-  }
-
-  // packList is maintained newest-first, so keep the first N
-  const keep = packList.slice(0, keepCount);
-  const keepSet = new Set(keep);
-  const removed = packList.filter((k) => !keepSet.has(k));
-
-  // Update pack list
-  await store.put("packList", keep);
-
-  // Adjust lastPackKey/lastPackOids if needed
-  const lastPackKey = await store.get("lastPackKey");
-  if (!lastPackKey || !keepSet.has(lastPackKey)) {
-    // Choose the newest kept pack as the latest reference
-    const newest = keep[0];
-    if (newest) {
-      await store.put("lastPackKey", newest);
-      const oids = ((await store.get("lastPackOids")) || []).slice(0, 10000);
-      // Try to load oids for the newest from packOids:<key> if present
-      const alt = await store.get(packOidsKey(newest));
-      await store.put("lastPackOids", alt ?? oids);
-    } else {
-      // No packs remain
-      await store.delete("lastPackKey");
-      await store.delete("lastPackOids");
-    }
-  }
-
-  // Delete packOids entries for removed packs
-  for (const k of removed) {
-    try {
-      await ctx.storage.delete(packOidsKey(k));
-    } catch (e) {
-      logger?.warn("prunePackList:delete-packOids-failed", { key: k, error: String(e) });
-    }
-  }
-
-  return removed;
 }

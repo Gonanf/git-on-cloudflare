@@ -3,6 +3,7 @@ import { env } from "cloudflare:test";
 import type { RepoDurableObject } from "@/index";
 import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
 import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
+import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
 
 it("getPackOidsBatch returns membership for multiple keys and [] for missing", async () => {
   const owner = "o";
@@ -23,12 +24,15 @@ it("getPackOidsBatch returns membership for multiple keys and [] for missing", a
   const commitA = "a".repeat(40);
   const treeB = "b".repeat(40);
 
-  // Seed DO metadata directly
+  // Seed DO metadata directly - now using SQLite
   await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
     await store.put("packList", [keyA, keyB]);
-    await store.put(`packOids:${keyA}`, [commitA]);
-    await store.put(`packOids:${keyB}`, [treeB]);
+
+    // Insert pack OIDs into SQLite via DAL
+    const db = getDb(state.storage);
+    await insertPackOids(db, keyA, [commitA]);
+    await insertPackOids(db, keyB, [treeB]);
   });
 
   // Helper to read Map-like results regardless of serialization
@@ -52,7 +56,8 @@ it("getPackOidsBatch returns membership for multiple keys and [] for missing", a
   expect(Array.isArray(a)).toBe(true);
   expect(Array.isArray(b)).toBe(true);
   expect(Array.isArray(c)).toBe(true);
-  expect(a).toContain(commitA);
-  expect(b).toContain(treeB);
+  // OIDs are stored in lowercase in SQLite
+  expect(a).toContain(commitA.toLowerCase());
+  expect(b).toContain(treeB.toLowerCase());
   expect(c.length).toBe(0);
 });

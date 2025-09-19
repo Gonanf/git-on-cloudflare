@@ -5,14 +5,9 @@ import type { RepoDurableObject } from "@/index";
 import { computeNeeded } from "@/git";
 import { createMemPackFs } from "@/git";
 import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
-import {
-  uniqueRepoId,
-  runDOWithRetry,
-  callStubWithRetry,
-  makeTree,
-  makeCommit,
-  buildPack,
-} from "./util/test-helpers.ts";
+import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
+import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
+import { makeTree, makeCommit, buildPack } from "./util/test-helpers.ts";
 
 it("computeNeeded resolves closure from R2 packs when no loose objects exist", async () => {
   const owner = "o";
@@ -49,7 +44,11 @@ it("computeNeeded resolves closure from R2 packs when no loose objects exist", a
   await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
     await store.put("packList", [packKey]);
-    await store.put(`packOids:${packKey}`, [commitOid, treeOid]);
+
+    // Insert pack OIDs into SQLite via DAL
+    const db = getDb(state.storage);
+    await insertPackOids(db, packKey, [commitOid, treeOid]);
+
     await store.put("refs", [{ name: "refs/heads/main", oid: commitOid }]);
     await store.put("head", { target: "refs/heads/main" });
   });

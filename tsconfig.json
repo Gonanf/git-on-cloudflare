@@ -10,7 +10,7 @@
     "types": ["./worker-configuration.d.ts"],
     "lib": ["ES2022"],
     "skipLibCheck": true,
-    "allowJs": false,
+    "allowJs": true,
     "forceConsistentCasingInFileNames": true,
     "baseUrl": ".",
     "paths": {

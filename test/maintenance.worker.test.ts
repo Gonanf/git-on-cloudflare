@@ -1,6 +1,7 @@
 import { it, expect } from "vitest";
 import { env, runDurableObjectAlarm } from "cloudflare:test";
-import { asTypedStorage, RepoStateSchema, packOidsKey } from "@/do/repo/repoState.ts";
+import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
+import { getDb, insertPackOids, getPackOids } from "@/do/repo/db/index.ts";
 import { runDOWithRetry, withEnvOverrides } from "./util/test-helpers.ts";
 
 function makeRepoId(suffix: string) {
@@ -43,9 +44,10 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS", async (
     await store.put("lastPackKey", keys[keys.length - 1]);
     // Force maintenance due
     await store.put("lastMaintenanceMs", 0);
-    // Add packOids entries for older packs
-    await state.storage.put(packOidsKey(keys[0]), ["a"]);
-    await state.storage.put(packOidsKey(keys[1]), ["b"]);
+    // Add pack_objects entries for older packs in SQLite
+    const db = getDb(state.storage);
+    await insertPackOids(db, keys[0], ["a"]);
+    await insertPackOids(db, keys[1], ["b"]);
   });
 
   // Schedule the alarm slightly in the future so it's considered pending
@@ -88,16 +90,20 @@ it("maintenance: trims packList and R2 packs to most recent KEEP_PACKS", async (
     expect(packList, "packList should be updated").toEqual(keep);
     const lastPackKey = (await store.get("lastPackKey")) as string | undefined;
     expect(lastPackKey, "lastPackKey should be updated").toBe(keep[0]);
-    const p10 = await store.get(packOidsKey(keys[10]) as any);
-    const p11 = await store.get(packOidsKey(keys[11]) as any);
-    const p12 = await store.get(packOidsKey(keys[12]) as any);
-    expect(p10, "packOidsKey(keys[10]) should be deleted").toBeUndefined();
-    expect(p11, "packOidsKey(keys[11]) should be deleted").toBeUndefined();
-    expect(p12, "packOidsKey(keys[12]) should be deleted").toBeUndefined();
-    const p0 = await store.get(packOidsKey(keys[0]) as any);
-    const p1 = await store.get(packOidsKey(keys[1]) as any);
-    expect(p0, "packOidsKey(keys[0]) should exist").toEqual(["a"]);
-    expect(p1, "packOidsKey(keys[1]) should exist").toEqual(["b"]);
+    // Check SQLite for pack_objects entries
+    const db = getDb(state.storage);
+    const p10 = await getPackOids(db, keys[10]);
+    const p11 = await getPackOids(db, keys[11]);
+    const p12 = await getPackOids(db, keys[12]);
+    expect(p10.length, "pack_objects for keys[10] should be deleted").toBe(0);
+    expect(p11.length, "pack_objects for keys[11] should be deleted").toBe(0);
+    expect(p12.length, "pack_objects for keys[12] should be deleted").toBe(0);
+    const p0 = await getPackOids(db, keys[0]);
+    const p1 = await getPackOids(db, keys[1]);
+    expect(p0.length, "pack_objects for keys[0] should exist").toBe(1);
+    expect(p0[0], "pack_objects for keys[0] should have oid 'a'").toBe("a");
+    expect(p1.length, "pack_objects for keys[1] should exist").toBe(1);
+    expect(p1[0], "pack_objects for keys[1] should have oid 'b'").toBe("b");
   });
 });
 

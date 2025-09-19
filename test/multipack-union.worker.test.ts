@@ -13,6 +13,7 @@ import {
   decodePktLines,
 } from "@/git";
 import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
+import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
 import { deflate, inflate } from "@/common/index.ts";
 
 async function readLoose(
@@ -125,8 +126,11 @@ it("multi-pack union assembles packfile from two R2 packs", async () => {
   await runDOWithRetry(getStub, async (_instance: any, state: DurableObjectState) => {
     const store = asTypedStorage<RepoStateSchema>(state.storage);
     await store.put("packList", [keyA, keyB]);
-    await store.put(`packOids:${keyA}`, [commitOid]);
-    await store.put(`packOids:${keyB}`, [treeOid]);
+
+    // Insert pack OIDs into SQLite via DAL
+    const db = getDb(state.storage);
+    await insertPackOids(db, keyA, [commitOid]);
+    await insertPackOids(db, keyB, [treeOid]);
   });
 
   // Streaming v2: two-phase fetch. First negotiate (done=false)

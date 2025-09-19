@@ -8,7 +8,11 @@
 import type { RepoStateSchema, UnpackWork } from "./repoState.ts";
 import type { UnpackProgress } from "@/common/index.ts";
 
-import { asTypedStorage, packOidsKey } from "./repoState.ts";
+import { asTypedStorage } from "./repoState.ts";
+import { getDb } from "./db/client.ts";
+import { eq } from "drizzle-orm";
+import { packObjects } from "./db/schema.ts";
+import { getPackOidsSlice } from "./db/dal.ts";
 import { unpackOidsChunkFromPackBytes } from "@/git/index.ts";
 import { scheduleAlarmIfSooner, ensureScheduled } from "./scheduler.ts";
 import { getConfig } from "./repoConfig.ts";
@@ -29,8 +33,8 @@ export async function getUnpackProgress(ctx: DurableObjectState): Promise<Unpack
   return {
     unpacking: true,
     processed: work.processedCount,
-    total: work.oids.length,
-    percent: Math.round((work.processedCount / work.oids.length) * 100),
+    total: work.totalCount,
+    percent: work.totalCount > 0 ? Math.round((work.processedCount / work.totalCount) * 100) : 0,
     currentPackKey: work.packKey,
     queuedCount: nextKey ? 1 : 0,
   } as UnpackProgress;
@@ -151,6 +155,7 @@ async function processUnpackBatch(
   }
 ): Promise<{ processed: number; processedInRun: number; exceededBudget: boolean }> {
   const cfg = getConfig(env);
+  const db = getDb(ctx.storage);
   const startTime = Date.now();
   let processed = work.processedCount;
   let processedInRunTotal = 0;
@@ -160,19 +165,19 @@ async function processUnpackBatch(
   logger?.debug("unpack:begin", {
     packKey: work.packKey,
     processed,
-    total: work.oids.length,
+    total: work.totalCount,
     budgetMs: cfg.unpackMaxMs,
   });
 
-  while (processed < work.oids.length && !isTimeExceeded(startTime, cfg.unpackMaxMs)) {
-    const oidsToProcess = work.oids.slice(processed, processed + cfg.unpackChunkSize);
+  while (processed < work.totalCount && !isTimeExceeded(startTime, cfg.unpackMaxMs)) {
+    const oidsToProcess = await getPackOidsSlice(db, work.packKey, processed, cfg.unpackChunkSize);
     if (oidsToProcess.length === 0) break;
 
     logger?.debug("unpack:chunk", {
       packKey: work.packKey,
       from: processed,
       to: processed + oidsToProcess.length,
-      total: work.oids.length,
+      total: work.totalCount,
       loop: loops,
     });
 
@@ -195,7 +200,7 @@ async function processUnpackBatch(
       packKey: work.packKey,
       processedInRun,
       processed,
-      total: work.oids.length,
+      total: work.totalCount,
     });
   }
 
@@ -205,7 +210,7 @@ async function processUnpackBatch(
       packKey: work.packKey,
       timeMs: Date.now() - startTime,
       processed,
-      total: work.oids.length,
+      total: work.totalCount,
       loops,
     });
   }
@@ -272,28 +277,30 @@ async function updateUnpackProgress(
   }
 ): Promise<void> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
+  const db = getDb(ctx.storage);
   const cfg = getConfig(env);
 
-  if (result.processed >= work.oids.length) {
+  if (result.processed >= work.totalCount) {
     // Done unpacking current pack
     await store.delete("unpackWork");
-    logger?.info("unpack:done", { packKey: work.packKey, total: work.oids.length });
+    logger?.info("unpack:done", { packKey: work.packKey, total: work.totalCount });
 
     // If a next pack is queued, promote it and continue without clearing status
     const nextKey = await store.get("unpackNext");
     if (nextKey) {
-      const nextOids = (await store.get(packOidsKey(nextKey))) ?? [];
-      if (nextOids.length > 0) {
+      // Count OIDs from SQLite for next pack
+      const count = await db.$count(packObjects, eq(packObjects.packKey, nextKey));
+      if (count > 0) {
         await store.put("unpackWork", {
           packKey: nextKey,
-          oids: nextOids,
+          totalCount: count,
           processedCount: 0,
           startedAt: Date.now(),
-        });
+        } as any);
         await store.delete("unpackNext");
         // Schedule next alarm soon to continue unpacking
         await scheduleAlarmIfSooner(ctx, env, Date.now() + cfg.unpackDelayMs);
-        logger?.info("queue:promote-next", { packKey: nextKey, total: nextOids.length });
+        logger?.info("queue:promote-next", { packKey: nextKey, total: count });
         return;
       } else {
         // No oids recorded for next pack (unexpected); drop it
@@ -318,11 +325,12 @@ async function updateUnpackProgress(
     const delay = result.processedInRun === 0 ? cfg.unpackBackoffMs : cfg.unpackDelayMs;
     await scheduleAlarmIfSooner(ctx, env, Date.now() + delay);
 
-    const percent = Math.round((result.processed / work.oids.length) * 100);
+    const percent =
+      work.totalCount > 0 ? Math.round((result.processed / work.totalCount) * 100) : 0;
     logger?.debug("unpack:progress", {
       packKey: work.packKey,
       processed: result.processed,
-      total: work.oids.length,
+      total: work.totalCount,
       percent,
       timeMs: Date.now(),
       exceededBudget: result.exceededBudget,
@@ -331,7 +339,7 @@ async function updateUnpackProgress(
     logger?.debug("unpack:reschedule", {
       packKey: work.packKey,
       processed: result.processed,
-      total: work.oids.length,
+      total: work.totalCount,
       delay,
     });
   }

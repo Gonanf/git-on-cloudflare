@@ -9,7 +9,7 @@ export type Head = { target: string; oid?: string; unborn?: boolean };
 
 export type UnpackWork = {
   packKey: string;
-  oids: string[];
+  totalCount: number; // Total objects in the pack to process (from SQLite)
   processedCount: number;
   startedAt: number;
 };
@@ -38,8 +38,6 @@ export type HydrationWork = {
     lastPackKey: string | null;
     packList: string[];
     window?: string[];
-    // Cached Bloom filter for coverage checks, reused across all stages and slices.
-    bloom?: { m: number; k: number; bits: string };
   };
   stage: HydrationStage;
   progress?: {
@@ -48,10 +46,6 @@ export type HydrationWork = {
     looseCursorKey?: string;
     segmentSeq?: number;
     producedBytes?: number;
-  };
-  pending?: {
-    needBases?: string[];
-    needLoose?: string[];
   };
   stats?: Record<string, number>;
   error?: {
@@ -76,7 +70,7 @@ export type RepoStateSchema = {
   hydrationWork: HydrationWork | undefined; // Current hydration work-in-progress
   hydrationQueue: HydrationTask[] | undefined; // FIFO queue of hydration tasks
 } & Record<ObjKey, Uint8Array | ArrayBuffer> &
-  Record<PackOidsKey, string[]>;
+  Record<PackOidsKey, string[]>; // Deprecated: prefer using SQLite for pack->oid membership
 
 export type TypedStorage<S> = {
   get<K extends keyof S & string>(key: K): Promise<S[K] | undefined>;

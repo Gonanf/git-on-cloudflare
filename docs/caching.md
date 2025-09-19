@@ -72,10 +72,25 @@ await cacheOrLoadJSONWithTTL<T>(cacheKey, loader, ttlResolver: (v: T) => number,
 interface CacheContext {
   req: Request;
   ctx: ExecutionContext;
+  // Optional per-request memoization (see RequestMemo below)
+  memo?: RequestMemo;
 }
 ```
 
 The CacheContext interface combines Request and ExecutionContext for operations that need both. While the cache functions themselves take Request directly, the CacheContext is used in higher-level code (like UI routes) to pass both values together when calling git functions that may cache results.
+
+#### RequestMemo (per-request memoization)
+
+`CacheContext` may include an optional `memo` used to coalesce upstream work and share budgets within a single Worker request:
+
+- `refs?: Map<oid, string[]>` — parsed references for objects (commit → [tree, parents], tree → [entries])
+- `packList?: string[]` and `packListPromise?: Promise<string[]>` — centralized pack discovery results and in-flight coalescing
+- `packOids?: Map<packKey, Set<oid>>` — in-memory membership hints reused within the request
+- `doBatchBudget?: number`, `doBatchDisabled?: boolean` — shared budget for DO batch refs calls across closure phases
+- `loaderCap?: number`, `loaderCalls?: number` — soft cap and count for DO-backed loose loads to avoid overuse
+- `subreqBudget?: number` — soft subrequest budget for upstream calls
+- `flags?: Set<string>` — per-request guardrails and log throttles (e.g., `no-cache-read`, `closure-timeout`)
+- `limiter?: { run(label, fn) }` — per-request concurrency limiter for DO/R2 calls
 
 ### Pack discovery and memoization (no KV)
 

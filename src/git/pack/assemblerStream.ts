@@ -475,7 +475,6 @@ export async function streamPackFromMultiplePacks(
         // Stream entries
         let objectsStreamed = 0;
         const progressInterval = Math.max(1, Math.floor(order.length / 10));
-        const startTime = Date.now();
 
         for (const n of order) {
           if (options?.signal?.aborted) {
@@ -559,8 +558,6 @@ export async function streamPackFromMultiplePacks(
           objectsStreamed++;
           if (objectsStreamed % progressInterval === 0 || objectsStreamed === order.length) {
             const percent = Math.round((objectsStreamed / order.length) * 100);
-            const elapsed = Date.now() - startTime;
-            const rate = elapsed > 0 ? Math.round((objectsStreamed * 1000) / elapsed) : 0;
 
             if (objectsStreamed === order.length) {
               options?.onProgress?.(
@@ -568,7 +565,7 @@ export async function streamPackFromMultiplePacks(
               );
             } else {
               options?.onProgress?.(
-                `Counting objects: ${percent}% (${objectsStreamed}/${order.length}), ${rate} objects/s\r`
+                `Counting objects: ${percent}% (${objectsStreamed}/${order.length})\r`
               );
             }
           }
