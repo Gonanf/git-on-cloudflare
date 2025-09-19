@@ -35,7 +35,34 @@
       {% for entry in entries %}
         <tr>
           <td>
-            {% if entry.isDir %}📁{% else %}📄{% endif %}
+            {% if entry.isDir %}
+              <svg
+                class="inline w-4 h-4 text-gray-500 dark:text-gray-400 mr-1 align-[-2px]"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"></path>
+              </svg>
+            {% else %}
+              <svg
+                class="inline w-4 h-4 text-gray-500 dark:text-gray-400 mr-1 align-[-2px]"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+              </svg>
+            {% endif %}
             <a href="{{ entry.href }}">{{ entry.name }}</a>
           </td>
           <td class="muted">{{ entry.shortOid }}</td>

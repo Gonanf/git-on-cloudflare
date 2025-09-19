@@ -1,9 +1,36 @@
 {% if progress %}
   {% if progress.unpacking and progress.total %}
     <div class="alert warn">
-      📦 Unpacking objects: {{ progress.processed }}/{{ progress.total }} ({{ progress.percent }}%)
+      <svg
+        class="inline w-4 h-4 mr-2 text-amber-600 dark:text-amber-400 align-[-2px]"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M21 16V8a2 2 0 00-2-2h-7l-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2h14a2 2 0 002-2z"></path>
+      </svg>
+      Unpacking objects: {{ progress.processed }}/{{ progress.total }} ({{ progress.percent }}%)
     </div>
   {% elsif progress.queuedCount and progress.queuedCount > 0 %}
-    <div class="alert">⏳ A push is queued and will start shortly.</div>
+    <div class="alert">
+      <svg
+        class="inline w-4 h-4 mr-2 text-gray-600 dark:text-gray-300 align-[-2px]"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="10"></circle>
+        <path d="M12 6v6l4 2"></path>
+      </svg>
+      A push is queued and will start shortly.
+    </div>
   {% endif %}
 {% endif %}
