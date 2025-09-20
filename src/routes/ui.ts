@@ -931,12 +931,27 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     type DebugState = Awaited<ReturnType<typeof debugState>>;
 
     // Gather admin data in parallel for performance
-    const [state, refs, head, progress] = await Promise.all([
+    // Use cached HEAD+refs (60s) to reduce DO RPCs
+    const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", { repo: repoId });
+    const [state, refsData, progress] = await Promise.all([
       stub.debugState().catch(() => ({}) as Partial<DebugState>),
-      stub.listRefs().catch(() => []),
-      stub.getHead().catch(() => null),
+      cacheOrLoadJSON<{ head: any; refs: any[] }>(
+        cacheKeyRefs,
+        async () => {
+          try {
+            const res = await getHeadAndRefs(env, repoId);
+            return { head: res.head, refs: res.refs };
+          } catch {
+            return null;
+          }
+        },
+        60,
+        ctx
+      ),
       getUnpackProgress(env, repoId),
     ]);
+    const head: any = refsData?.head || null;
+    const refs: any[] = refsData?.refs || [];
 
     // Calculate storage metrics from pack stats
     let totalStorageBytes = 0;
@@ -949,6 +964,10 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     const storageSize = formatSize(totalStorageBytes);
     const packCount = state.packListCount || 0;
     const packList = state.packList || [];
+
+    // Prefer DO-computed hydration pack count to avoid template-side scans
+    const hydrationPackCount =
+      state.hydrationPackCount ?? packList.filter((p) => p.includes("pack-hydr-")).length;
 
     // Extract hydration information with proper type checking
     const hydrationData = state.hydration;
@@ -967,7 +986,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       hydrationStatus = `Queued (${hydrationData.queued} pending)`;
     }
     // If no active hydration, check if hydration packs exist to infer completion
-    else if (packCount > 0 && packList.some((p) => p.includes("pack-hydr-"))) {
+    else if (packCount > 0 && hydrationPackCount > 0) {
       // Infer hydration completion when hydration packs are present (pack-hydr-TIMESTAMP-SEQ.pack)
       hydrationStatus = "Completed (hydration packs present)";
     }
@@ -991,6 +1010,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       hydrationStatus,
       hydrationStartedAt,
       hydrationData,
+      hydrationPackCount,
       progress,
     });
     if (!html) {

@@ -36,24 +36,100 @@
     <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-3">
       <div>
         <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-          Storage
+          R2 Packs
         </div>
         <div class="font-mono text-sm">{{ storageSize | default: '0 bytes' }}</div>
       </div>
+      {% if state.looseR2SampleBytes %}
+        <div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+            R2 Loose (sample)
+          </div>
+          <div class="font-mono text-sm">
+            {% assign mb = state.looseR2SampleBytes | divided_by: 1048576.0 %}
+            {% if mb >= 1 %}
+              {{ mb | round: 2 }} MB
+            {% else %}
+              {% assign kb = state.looseR2SampleBytes | divided_by: 1024.0 %}
+              {{ kb | round: 1 }} KB
+            {% endif %}
+            <span class="text-xs text-gray-500">
+              ({{ state.looseR2SampleCount | default: 0 }} objs
+              {%- if state.looseR2Truncated %}, truncated{% endif -%}
+              )
+            </span>
+          </div>
+        </div>
+      {% endif %}
+      {% if state.dbSizeBytes %}
+        <div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+            DO Storage
+          </div>
+          <div class="font-mono text-sm">
+            {% assign mb = state.dbSizeBytes | divided_by: 1048576.0 %}
+            {% if mb >= 1 %}
+              {{ mb | round: 2 }} MB
+            {% else %}
+              {% assign kb = state.dbSizeBytes | divided_by: 1024.0 %}
+              {{ kb | round: 1 }} KB
+            {% endif %}
+          </div>
+        </div>
+      {% endif %}
+      {% if state and state.meta and state.meta.doId %}
+        <div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+            Durable Object
+          </div>
+          <div class="font-mono text-sm flex items-center gap-2">
+            <span title="{{ state.meta.doId }}">
+              {{ state.meta.doId | slice: 0, 12 -}}
+              {%- if state.meta.doId.size > 12 %}…{% endif %}
+            </span>
+            <button
+              class="btn secondary sm"
+              onclick="adminActions.copyDoId('{{ state.meta.doId }}')"
+            >
+              <svg
+                class="inline w-4 h-4 mr-1 align-[-2px]"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path>
+              </svg>
+              <span class="label">Copy</span>
+            </button>
+          </div>
+        </div>
+      {% endif %}
       <div>
         <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
           Packs
         </div>
         <div class="font-mono text-sm">
           {{ packCount | default: 0 }}
-          {% assign hydrationPacks = 0 %}
-          {% for pack in packList %}
-            {% if pack contains 'pack-hydr-' %}
-              {% assign hydrationPacks = hydrationPacks | plus: 1 %}
+          {% assign hp = hydrationPackCount %}
+          {% if hp or hp == 0 %}
+            {% if hp > 0 %}
+              <span class="text-xs text-gray-500">({{ hp }} hydration packs)</span>
             {% endif %}
-          {% endfor %}
-          {% if hydrationPacks > 0 %}
-            <span class="text-xs text-gray-500">({{ hydrationPacks }} hydration packs)</span>
+          {% else %}
+            {% assign hydrationPacks = 0 %}
+            {% for pack in packList %}
+              {% if pack contains 'pack-hydr-' %}
+                {% assign hydrationPacks = hydrationPacks | plus: 1 %}
+              {% endif %}
+            {% endfor %}
+            {% if hydrationPacks > 0 %}
+              <span class="text-xs text-gray-500">({{ hydrationPacks }} hydration packs)</span>
+            {% endif %}
           {% endif %}
         </div>
       </div>
@@ -86,6 +162,7 @@
           {{ branches }}/{{ tags }}
         </div>
       </div>
+
       {% if state.unpackWork or state.unpackNext %}
         <div>
           <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
@@ -140,7 +217,7 @@
           >
           {{ hydrationData.stage | capitalize }}
           {% if hydrationData.progress.packIndex %}
-            • Pack {{ hydrationData.progress.packIndex }}/{{ packList.size }}
+            • Pack {{ hydrationData.progress.packIndex }}/{{ packCount }}
           {% endif %}
           {% if hydrationData.progress.producedBytes %}
             • {{ hydrationData.progress.producedBytes | divided_by: 1048576.0 | round: 1 }} MB
@@ -563,6 +640,15 @@
         } else {
           btn.textContent = originalText;
         }
+      }
+    },
+
+    async copyDoId(id) {
+      try {
+        await navigator.clipboard.writeText(id);
+        alert('Durable Object ID copied to clipboard');
+      } catch (e) {
+        alert('Failed to copy DO ID: ' + (e && e.message ? e.message : e));
       }
     },
 

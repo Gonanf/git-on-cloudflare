@@ -19,6 +19,28 @@ import { isValidOid } from "@/common/index.ts";
 import { readCommitFromStore } from "./storage.ts";
 
 /**
+ * Small helper to run an async map with a concurrency limit.
+ */
+async function mapLimit<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const ret: R[] = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      ret[i] = await fn(items[i], i);
+    }
+  }
+  const n = Math.max(1, Math.min(limit | 0, items.length));
+  await Promise.all(new Array(n).fill(0).map(() => worker()));
+  return ret;
+}
+
+/**
  * Get comprehensive debug state of the repository
  * @param ctx - Durable Object state context
  * @param env - Worker environment
@@ -50,6 +72,13 @@ export async function debugState(
   } | null;
   unpackNext: string | null;
   looseSample: string[];
+  hydrationPackCount: number;
+  // SQLite database size in bytes (includes both SQL tables and KV for SQLite-backed DOs)
+  dbSizeBytes?: number;
+  // Quick sample of R2 loose mirror usage (first page only)
+  looseR2SampleBytes?: number;
+  looseR2SampleCount?: number;
+  looseR2Truncated?: boolean;
   hydration?: {
     running: boolean;
     stage?: string;
@@ -113,42 +142,78 @@ export async function debugState(
     indexSize?: number;
   }> = [];
 
-  for (const packKey of packList.slice(0, 20)) {
-    // Limit to first 20 packs for performance
-    try {
-      const packStat: {
+  // Limit to first N packs for performance and fetch stats with limited parallelism
+  const PACK_STATS_LIMIT = 20;
+  const CONCURRENCY = 6;
+  const packKeys = packList.slice(0, PACK_STATS_LIMIT);
+  try {
+    const results = await mapLimit(
+      packKeys,
+      CONCURRENCY,
+      async (
+        packKey
+      ): Promise<{
         key: string;
         packSize?: number;
         hasIndex: boolean;
         indexSize?: number;
-      } = {
-        key: packKey,
-        hasIndex: false,
-      };
+      }> => {
+        const stat = { key: packKey, hasIndex: false } as {
+          key: string;
+          packSize?: number;
+          hasIndex: boolean;
+          indexSize?: number;
+        };
+        // Get pack file size from R2
+        try {
+          const packHead = await env.REPO_BUCKET.head(packKey);
+          if (packHead) stat.packSize = packHead.size;
+        } catch {}
+        // Check if index exists and get its size
+        try {
+          const indexHead = await env.REPO_BUCKET.head(packIndexKey(packKey));
+          if (indexHead) {
+            stat.hasIndex = true;
+            stat.indexSize = indexHead.size;
+          }
+        } catch {}
+        return stat;
+      }
+    );
+    for (const s of results) packStats.push(s);
+  } catch {}
 
-      // Get pack file size from R2
-      try {
-        const packHead = await env.REPO_BUCKET.head(packKey);
-        if (packHead) {
-          packStat.packSize = packHead.size;
-        }
-      } catch {}
-
-      // Check if index exists and get its size
-      const indexKey = packIndexKey(packKey);
-      try {
-        const indexHead = await env.REPO_BUCKET.head(indexKey);
-        if (indexHead) {
-          packStat.hasIndex = true;
-          packStat.indexSize = indexHead.size;
-        }
-      } catch {}
-
-      packStats.push(packStat);
-    } catch {}
-  }
+  // Count hydration-generated packs (pack-hydr-*) without sending the full list back to template logic
+  let hydrationPackCount = 0;
+  try {
+    for (const k of packList) {
+      const base = k.split("/").pop() || "";
+      if (base.startsWith("pack-hydr-")) hydrationPackCount++;
+    }
+  } catch {}
 
   const prefix = doPrefix(ctx.id.toString());
+
+  // SQLite DB size (bytes)
+  let dbSizeBytes: number | undefined = undefined;
+  try {
+    dbSizeBytes = ctx.storage.sql?.databaseSize;
+    if (typeof dbSizeBytes !== "number") dbSizeBytes = undefined;
+  } catch {}
+
+  // Sample R2 loose usage: list first page under loose prefix and sum sizes
+  let looseR2SampleBytes: number | undefined = undefined;
+  let looseR2SampleCount: number | undefined = undefined;
+  let looseR2Truncated: boolean | undefined = undefined;
+  try {
+    const prefixLoose = r2LooseKey(prefix, "");
+    const list = await env.REPO_BUCKET.list({ prefix: prefixLoose, limit: 250 });
+    let sum = 0;
+    for (const obj of list.objects || []) sum += obj.size || 0;
+    looseR2SampleBytes = sum;
+    looseR2SampleCount = (list.objects || []).length;
+    looseR2Truncated = !!list.truncated;
+  } catch {}
 
   // Sanitize unpackWork (no large arrays stored anymore)
   const sanitizedUnpackWork = unpackWork
@@ -173,6 +238,11 @@ export async function debugState(
     unpackWork: sanitizedUnpackWork,
     unpackNext: unpackNext || null,
     looseSample,
+    hydrationPackCount,
+    dbSizeBytes,
+    looseR2SampleBytes,
+    looseR2SampleCount,
+    looseR2Truncated,
     hydration: {
       running: !!hydrationWork,
       stage: hydrationWork?.stage,

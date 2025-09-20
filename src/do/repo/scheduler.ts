@@ -108,6 +108,11 @@ export async function scheduleAlarmIfSooner(
     prev = null;
   }
 
+  // Avoid redundant reset to the same timestamp (even if in the past)
+  if (prev !== null && prev === when) {
+    return { scheduled: false, prev, next: prev };
+  }
+
   if (!prev || prev < now || prev > when) {
     try {
       await state.storage.setAlarm(when);
@@ -137,7 +142,9 @@ export async function ensureScheduled(
   try {
     const plan = await planNextAlarm(state, env, now);
     if (!plan) return { scheduled: false };
-    const res = await scheduleAlarmIfSooner(state, env, plan.when, now);
+    // Clamp to a near-future time to avoid repeatedly scheduling past alarms
+    const targetWhen = Math.max(plan.when, now + 5);
+    const res = await scheduleAlarmIfSooner(state, env, targetWhen, now);
     if (res.scheduled) {
       log.debug("sched:alarm-set", { when: res.next, reason: plan.reason });
     }
