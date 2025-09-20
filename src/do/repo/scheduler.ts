@@ -14,14 +14,7 @@ export async function planNextAlarm(
 ): Promise<{ when: number; reason: "unpack" | "hydration" | "idle" | "maint" } | null> {
   const log = createLogger(env.LOG_LEVEL, { service: "Scheduler", doId: state.id.toString() });
   const store = asTypedStorage<RepoStateSchema>(state.storage);
-
-  let cfg: ReturnType<typeof getConfig> | undefined = undefined;
-  try {
-    cfg = getConfig(env);
-  } catch (e) {
-    log.error("sched:get-config-failed", { error: String(e) });
-    return null;
-  }
+  const cfg = getConfig(env);
 
   // 1) Unpack has highest priority
   try {
@@ -30,7 +23,7 @@ export async function planNextAlarm(
       store.get("unpackNext"),
     ]);
     if (unpackWork || unpackNext) {
-      return { when: now + (cfg?.unpackDelayMs ?? 1000), reason: "unpack" };
+      return { when: now + cfg.unpackDelayMs, reason: "unpack" };
     }
   } catch (e) {
     log.warn("sched:read-unpack-state-failed", { error: String(e) });
@@ -62,11 +55,11 @@ export async function planNextAlarm(
           return { when: nextRetryAt, reason: "hydration" };
         }
         // Work in progress or immediate retry allowed
-        return { when: now + (cfg?.unpackDelayMs ?? 1000), reason: "hydration" };
+        return { when: now + cfg.unpackDelayMs, reason: "hydration" };
       }
     } else if (hasQueue) {
       // Queue has work but no active work
-      return { when: now + (cfg?.unpackDelayMs ?? 1000), reason: "hydration" };
+      return { when: now + cfg.unpackDelayMs, reason: "hydration" };
     }
   } catch (e) {
     log.warn("sched:read-hydration-state-failed", { error: String(e) });
@@ -79,10 +72,15 @@ export async function planNextAlarm(
       store.get("lastAccessMs"),
       store.get("lastMaintenanceMs"),
     ]);
-    const nextIdleAt = (lastAccess ?? now) + (cfg?.idleMs ?? 60_000);
-    const nextMaintAt = (lastMaint ?? now) + (cfg?.maintMs ?? 60 * 60 * 1000);
-    const when = Math.min(nextIdleAt, nextMaintAt);
-    const reason = nextMaintAt <= nextIdleAt ? "maint" : "idle";
+    // Guard against past deadlines (e.g., host slept). If an idle/maintenance
+    // deadline is already in the past, push it forward by its interval so we
+    // do not immediately re-schedule and tight-loop alarms.
+    const nextIdleAt = (lastAccess ?? now) + cfg.idleMs;
+    const nextMaintAt = (lastMaint ?? now) + cfg.maintMs;
+    const candidateIdle = nextIdleAt <= now ? now + cfg.idleMs : nextIdleAt;
+    const candidateMaint = nextMaintAt <= now ? now + cfg.maintMs : nextMaintAt;
+    const when = Math.min(candidateIdle, candidateMaint);
+    const reason = candidateMaint <= candidateIdle ? "maint" : "idle";
     return { when, reason };
   } catch (e) {
     log.error("sched:plan-idle-maint-failed", { error: String(e) });

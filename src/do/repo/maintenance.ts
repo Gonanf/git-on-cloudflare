@@ -10,7 +10,11 @@ import type { Logger } from "@/common/logger.ts";
 
 import { asTypedStorage } from "./repoState.ts";
 import { getDb } from "./db/client.ts";
-import { deletePackObjects, getPackOids as getPackOidsHelper } from "./db/index.ts";
+import {
+  deletePackObjects,
+  getPackOids as getPackOidsHelper,
+  normalizePackKey,
+} from "./db/index.ts";
 import { r2PackDirPrefix, isPackKey, packIndexKey, doPrefix } from "@/keys.ts";
 import { ensureScheduled } from "./scheduler.ts";
 import { getConfig } from "./repoConfig.ts";
@@ -211,7 +215,7 @@ async function runMaintenance(
   // If no hydration packs exist (basename starts with 'pack-hydr-'), skip pruning now.
   try {
     const hasHydration = Array.isArray(packList)
-      ? packList.some((k: string) => (k.split("/").pop() || "").startsWith("pack-hydr-"))
+      ? packList.some((k: string) => normalizePackKey(k).startsWith("pack-hydr-"))
       : false;
     if (!hasHydration) {
       logger?.warn?.("maintenance:prune-skipped:no-hydration", { count: packList.length });
@@ -225,6 +229,10 @@ async function runMaintenance(
   const keepSet = new Set(keep);
   const removed = packList.filter((k) => !keepSet.has(k));
   const newList = packList.filter((k) => keepSet.has(k));
+  // Track whether any hydration packs (pack-hydr-*) were pruned; used to decide whether we
+  // need to enqueue a follow-up hydration job. This avoids oscillation when only normal packs
+  // are pruned but hydration coverage remains intact.
+  const removedHydra = removed.filter((k) => normalizePackKey(k).startsWith("pack-hydr-"));
 
   // Trim packList in storage while preserving additional kept keys
   if (removed.length > 0) await store.put("packList", newList);
@@ -293,9 +301,9 @@ async function runMaintenance(
     }
   } catch {}
 
-  // Enqueue a hydration job after pruning to re-thicken within the kept window.
-  // This ensures streaming fetch remains safe without loose fallback.
-  if (removed.length > 0) {
+  // Enqueue a hydration job only when hydration packs were pruned. If pruning removed
+  // only normal packs, hydration coverage remains and we avoid unnecessary re-hydration.
+  if (removedHydra.length > 0) {
     try {
       await enqueueHydrationTask(ctx, env, { reason: "post-maint" });
     } catch (e) {

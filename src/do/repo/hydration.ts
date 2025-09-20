@@ -30,6 +30,7 @@ import {
   hasHydrCoverForWork,
   filterUncoveredAgainstHydrCover,
   getPackOids,
+  normalizePackKey,
 } from "./db/index.ts";
 
 // File-wide constants to avoid magic numbers across stages
@@ -101,11 +102,11 @@ async function ensureHydrCoverForWork(
   const hydra: string[] = [];
   if (Array.isArray(packListRaw)) {
     for (const k of packListRaw) {
-      const base = k.split("/").pop() || "";
+      const base = normalizePackKey(k);
       if (base.startsWith("pack-hydr-")) hydra.push(k);
     }
   }
-  const lbase = (lastPackKey || "").split("/").pop() || "";
+  const lbase = normalizePackKey(lastPackKey || "");
   if (lastPackKey && lbase.startsWith("pack-hydr-")) hydra.unshift(lastPackKey);
   const window = hydra.slice(0, cfg.windowMax);
 
@@ -147,11 +148,11 @@ async function buildHydrationCoverageSet(
     const hydra: string[] = [];
     if (Array.isArray(packListRaw)) {
       for (const k of packListRaw) {
-        const base = k.split("/").pop() || "";
+        const base = normalizePackKey(k);
         if (base.startsWith("pack-hydr-")) hydra.push(k);
       }
     }
-    const lbase = (lastPackKey || "").split("/").pop() || "";
+    const lbase = normalizePackKey(lastPackKey || "");
     if (lastPackKey && lbase.startsWith("pack-hydr-")) hydra.unshift(lastPackKey);
     const window = hydra.slice(0, cfg.windowMax);
     // Load coverage from SQLite pack_objects to avoid large KV values
@@ -379,7 +380,7 @@ export async function clearHydrationState(
   const list = (await store.get("packList")) || [];
   const toRemove: string[] = [];
   for (const key of list) {
-    const base = key.split("/").pop() || "";
+    const base = normalizePackKey(key);
     if (base.startsWith("pack-hydr-")) toRemove.push(key);
   }
 
