@@ -2,7 +2,16 @@
 {% block %}
 {% render 'repo_nav', owner: owner, repo: repo, refEnc: refEnc, currentTab: 'commits' %}
 {% render 'progress', progress: progress %}
-<h2>Commits on {{ ref }}</h2>
+<h2>
+  Commits on
+  {% assign refLen = ref | size %}
+  {% if refLen == 40 %}
+    <span class="sm:hidden font-mono">{{ ref | slice: 0, 12 }}…</span>
+    <span class="hidden sm:inline font-mono">{{ ref }}</span>
+  {% else %}
+    <span class="font-mono">{{ ref }}</span>
+  {% endif %}
+</h2>
 {% if pager %}
   <div class="pager">
     <div class="perpage">
@@ -62,7 +71,7 @@
         {% endif %}
         {% if commit.isMerge %}
           <tr class="merge-tools hidden" data-merge-oid="{{ commit.oid }}">
-            <td colspan="4">
+            <td colspan="1000">
               <span class="muted">Merge commit</span>
               <a
                 href="#"
@@ -192,7 +201,19 @@
       var placeholder = document.createElement('tr');
       placeholder.id = placeholderId;
       var td = document.createElement('td');
-      td.colSpan = 4;
+      try {
+        var ths = table ? table.querySelectorAll('thead th') : null;
+        var visibleCols = 0;
+        if (ths && ths.length) {
+          for (var i = 0; i < ths.length; i++) {
+            var s = getComputedStyle(ths[i]);
+            if (s && s.display !== 'none') visibleCols++;
+          }
+        }
+        td.colSpan = visibleCols || 1000; // span all visible columns; fallback large number
+      } catch {
+        td.colSpan = 1000;
+      }
       td.className = 'muted';
       td.textContent = 'Loading…';
       placeholder.appendChild(td);

@@ -35,32 +35,10 @@
       {% for entry in entries %}
         <tr>
           <td>
-            {% if entry.isDir %}
-              <svg
-                class="inline w-4 h-4 text-amber-600 dark:text-amber-400 mr-1 align-[-2px]"
-                viewBox="0 0 24 24"
-                fill="currentColor"
-                aria-hidden="true"
-              >
-                <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v7a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"></path>
-              </svg>
-            {% else %}
-              <svg
-                class="inline w-4 h-4 text-slate-500 dark:text-slate-400 mr-1 align-[-2px]"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"></path>
-                <polyline points="14 2 14 8 20 8"></polyline>
-                <line x1="8" y1="13" x2="16" y2="13"></line>
-                <line x1="8" y1="17" x2="16" y2="17"></line>
-              </svg>
-            {% endif %}
+            <i
+              class="{{ entry.iconClass }} inline-block mr-1.5 align-[-2px] {% if entry.isDir %}text-amber-600 dark:text-amber-400{% else %}text-slate-500 dark:text-slate-400{% endif %}"
+              aria-hidden="true"
+            ></i>
             <a href="{{ entry.href }}">{{ entry.name }}</a>
           </td>
           <td class="muted">{{ entry.shortOid }}</td>

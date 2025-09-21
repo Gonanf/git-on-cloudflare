@@ -18,6 +18,7 @@ import {
   formatSize,
   bytesToText,
   formatWhen,
+  getFileIconClass,
   renderView,
   getMarkdownHighlightLangs,
   getHighlightLangsForBlobSmart,
@@ -377,6 +378,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           name: string;
           href: string;
           isDir: boolean;
+          iconClass: string;
           shortOid: string;
           size: string;
         }> = [];
@@ -402,6 +404,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
                     (path ? path + "/" : "") + e.name
                   )}`,
               isDir,
+              iconClass: isDir ? "bi-folder-fill" : getFileIconClass(e.name),
               shortOid: e.oid ? e.oid.slice(0, 7) : "",
               size: "", // Size not available in tree entries, would need separate lookup
             };

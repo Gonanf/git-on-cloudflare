@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "bootstrap-icons/font/bootstrap-icons.css";
 
 /* Safelist for JS-toggled classes (Tailwind v4) */
 /* Merge badge toggle classes (commits page) */
@@ -354,5 +355,127 @@
   .ref-menu[open] > summary {
     /* subtle focus ring when menu is open */
     @apply ring-2 ring-blue-500/30;
+  }
+}
+
+/* Responsive tweaks: repo nav layout and commits table on small screens */
+@layer components {
+  @media (max-width: 640px) {
+    /* Stack and wrap the repo header/nav to avoid cramped layout */
+    .page-header {
+      gap: 0.75rem; /* ~12px */
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .page-header nav {
+      gap: 0.5rem;
+      flex-wrap: nowrap; /* keep ref selector and tabs on one row */
+      overflow-x: auto;
+      padding-left: 0.25rem; /* allow focus ring/offset to show */
+      padding-right: 0.25rem;
+    }
+    .page-header nav::-webkit-scrollbar {
+      display: none;
+    }
+    .page-header nav {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+    .page-header .subnav {
+      display: inline-flex; /* keep as a single row next to ref selector */
+      flex-wrap: nowrap;
+      width: auto;
+    }
+    .page-header .tab {
+      padding: 0.25rem 0.5rem; /* px-2 py-1 */
+      /* keep text-sm for readability */
+    }
+
+    /* Hide the Author column in commits view on small screens */
+    #commits-table th:nth-child(3),
+    #commits-table td:nth-child(3) {
+      display: none;
+    }
+
+    /* Prevent commit rows from overflowing horizontally */
+    #commits-table {
+      table-layout: fixed; /* enable deterministic column widths */
+    }
+    #commits-table th,
+    #commits-table td {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    /* OID column */
+    #commits-table th:nth-child(1),
+    #commits-table td:nth-child(1) {
+      width: 5.5rem; /* enough for short OID */
+      white-space: nowrap;
+    }
+    /* Message column: allow wrapping */
+    #commits-table th:nth-child(2),
+    #commits-table td:nth-child(2) {
+      width: auto;
+      white-space: normal;
+      word-break: break-word;
+    }
+    /* Date column */
+    #commits-table th:nth-child(4),
+    #commits-table td:nth-child(4) {
+      width: auto;
+      white-space: normal; /* allow multiline */
+      overflow: visible;
+      text-overflow: unset;
+    }
+  }
+}
+
+/* Bootstrap Icons alignment fixes */
+@layer utilities {
+  /* Default vertical alignment for all Bootstrap icons */
+  /* Use :not(.hidden) to ensure hidden class still works */
+  i[class*="bi-"]:not(.hidden) {
+    display: inline-block;
+    vertical-align: middle;
+    line-height: 1;
+    font-size: inherit;
+  }
+
+  /* When used inline with text, adjust vertical alignment */
+  i[class*="bi-"].inline {
+    vertical-align: -0.125em; /* Fine-tune vertical position */
+  }
+
+  /* Size utility classes for Bootstrap Icons */
+  i[class*="bi-"].w-4.h-4 {
+    font-size: 1rem; /* 16px */
+    width: 1rem;
+    height: 1rem;
+  }
+
+  i[class*="bi-"].w-5.h-5 {
+    font-size: 1.25rem; /* 20px */
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+
+  /* Ensure proper spacing when icon is followed by text */
+  i[class*="bi-"].mr-1 {
+    margin-right: 0.25rem;
+  }
+
+  i[class*="bi-"].mr-2 {
+    margin-right: 0.5rem;
+  }
+
+  /* Fix alignment for icons in buttons and tabs */
+  .btn i[class*="bi-"],
+  .tab i[class*="bi-"] {
+    vertical-align: -0.125em;
+  }
+
+  /* Special alignment for theme toggle icons */
+  #theme-toggle i[class*="bi-"] {
+    vertical-align: middle;
   }
 }

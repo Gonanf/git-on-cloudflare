@@ -13,18 +13,10 @@
 <div class="space-y-6">
   <div class="alert alert-warn">
     <strong>
-      <svg
-        class="inline w-4 h-4 mr-2 text-amber-600 dark:text-amber-400 align-[-2px]"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
+      <i
+        class="bi bi-exclamation-triangle-fill inline w-4 h-4 mr-2 text-amber-600 dark:text-amber-400 align-[-2px]"
         aria-hidden="true"
-      >
-        <path d="M10.29 3.86l-8.19 14A2 2 0 004 21h16a2 2 0 001.71-3.14l-8.19-14a2 2 0 00-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line>
-      </svg>
+      ></i>
       Admin Area</strong
     >
     - Actions here can permanently modify repository data
@@ -93,19 +85,10 @@
               aria-label="Copy DO ID"
               style="margin-left: 0.5rem; top: -2px;"
             >
-              <svg
-                class="block w-4 h-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
+              <i
+                class="bi bi-clipboard block w-4 h-4"
                 aria-hidden="true"
-              >
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path>
-              </svg>
+              ></i>
             </button>
             <span class="invisible">___copy</span>
           </div>
@@ -222,18 +205,10 @@
       <div class="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-lg">
         <div class="text-sm">
           <strong>
-            <svg
-              class="inline w-4 h-4 mr-1 text-blue-600 dark:text-blue-400 align-[-2px]"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
+            <i
+              class="bi bi-info-circle-fill inline w-4 h-4 mr-1 text-blue-600 dark:text-blue-400 align-[-2px]"
               aria-hidden="true"
-            >
-              <polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0114.13-3.36L23 10M1 14l5.36 4.36A9 9 0 0020.49 15"></path>
-            </svg>
+            ></i>
             Running:</strong
           >
           {{ hydrationData.stage | capitalize }}
@@ -252,14 +227,10 @@
     {% elsif hydrationStatus contains 'Completed' %}
       <div class="mb-4 p-3 bg-green-50 dark:bg-green-900/20 rounded-lg text-sm">
         <strong>
-          <svg
-            class="inline w-4 h-4 mr-1 text-green-600 dark:text-green-400 align-[-2px]"
-            viewBox="0 0 20 20"
-            fill="currentColor"
+          <i
+            class="bi bi-check-circle-fill inline w-4 h-4 mr-1 text-green-600 dark:text-green-400 align-[-2px]"
             aria-hidden="true"
-          >
-            <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
-          </svg>
+          ></i>
           Hydration complete</strong
         >
         — hydrated packs are present
@@ -268,44 +239,24 @@
     <div class="space-y-4">
       <div class="flex flex-wrap gap-3">
         <button id="hydration-dry-run" class="btn" onclick="adminActions.triggerHydration(true)">
-          <svg
-            class="inline w-4 h-4 mr-2 align-[-2px]"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
+          <i
+            class="bi bi-search inline w-4 h-4 mr-2 align-[-2px]"
             aria-hidden="true"
-          >
-            <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-          </svg>
+          ></i>
           <span class="label">Dry Run Analysis</span>
         </button>
         <button id="hydration-start" class="btn" onclick="adminActions.triggerHydration(false)">
-          <svg
-            class="inline w-4 h-4 mr-2 align-[-2px]"
-            viewBox="0 0 24 24"
-            fill="currentColor"
+          <i
+            class="bi bi-play-fill inline w-4 h-4 mr-2 align-[-2px]"
             aria-hidden="true"
-          >
-            <path d="M5 3l14 9-14 9V3z"></path>
-          </svg>
+          ></i>
           <span class="label">Start Hydration</span>
         </button>
         <button id="hydration-clear" class="btn secondary" onclick="adminActions.clearHydration()">
-          <svg
-            class="inline w-4 h-4 mr-2 align-[-2px]"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
+          <i
+            class="bi bi-trash3 inline w-4 h-4 mr-2 align-[-2px]"
             aria-hidden="true"
-          >
-            <path d="M3 6h18"></path><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"></path><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line>
-          </svg>
+          ></i>
           <span class="label">Clear Hydration State</span>
         </button>
       </div>
@@ -380,27 +331,15 @@
                 </td>
                 <td class="py-2 text-center">
                   {% if packStat.hasIndex %}
-                    <svg
-                      class="inline w-4 h-4 text-green-600 dark:text-green-400"
-                      viewBox="0 0 20 20"
-                      fill="currentColor"
+                    <i
+                      class="bi bi-check-circle-fill inline w-4 h-4 text-green-600 dark:text-green-400"
                       aria-hidden="true"
-                    >
-                      <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>
-                    </svg>
+                    ></i>
                   {% else %}
-                    <svg
-                      class="inline w-4 h-4 text-red-600 dark:text-red-400"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
+                    <i
+                      class="bi bi-x-circle inline w-4 h-4 text-red-600 dark:text-red-400"
                       aria-hidden="true"
-                    >
-                      <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
-                    </svg>
+                    ></i>
                   {% endif %}
                 </td>
                 <td class="py-2 text-center">
@@ -410,22 +349,10 @@
                     title="Delete this pack"
                     aria-label="Delete pack"
                   >
-                    <svg
-                      width="16"
-                      height="16"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    >
-                      <path d="M3 6h18"></path>
-                      <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"></path>
-                      <path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"></path>
-                      <line x1="10" y1="11" x2="10" y2="17"></line>
-                      <line x1="14" y1="11" x2="14" y2="17"></line>
-                    </svg>
+                    <i
+                      class="bi bi-trash3"
+                      style="width: 16px; height: 16px;"
+                    ></i>
                   </button>
                 </td>
               </tr>
@@ -455,18 +382,10 @@
     <div class="flex items-center justify-between mb-4">
       <h2 class="text-xl font-semibold">References</h2>
       <button class="btn btn-sm" onclick="location.reload()">
-        <svg
-          class="inline w-4 h-4 mr-2 align-[-2px]"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
+        <i
+          class="bi bi-arrow-clockwise inline w-4 h-4 mr-2 align-[-2px]"
           aria-hidden="true"
-        >
-          <polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0114.13-3.36L23 10M1 14l5.36 4.36A9 9 0 0020.49 15"></path>
-        </svg>
+        ></i>
         <span class="label">Refresh All</span>
       </button>
     </div>
@@ -540,18 +459,10 @@
       <div>
         <label class="block text-sm font-medium mb-2">Repository State Dump</label>
         <button id="debug-state-btn" class="btn" onclick="adminActions.dumpState()">
-          <svg
-            class="inline w-4 h-4 mr-2 align-[-2px]"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
+          <i
+            class="bi bi-bar-chart-fill inline w-4 h-4 mr-2 align-[-2px]"
             aria-hidden="true"
-          >
-            <path d="M3 3v18h18"></path><rect x="7" y="13" width="3" height="5"></rect><rect x="12" y="9" width="3" height="9"></rect><rect x="17" y="5" width="3" height="13"></rect>
-          </svg>
+          ></i>
           <span class="label">View DO State</span>
         </button>
         <div id="state-dump" class="mt-2 hidden">
@@ -564,18 +475,10 @@
   <!-- Danger Zone -->
   <details class="card p-6 border-2 border-red-500 dark:border-red-600">
     <summary class="cursor-pointer font-bold text-red-600 dark:text-red-500">
-      <svg
-        class="inline w-4 h-4 mr-2 align-[-2px]"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
+      <i
+        class="bi bi-exclamation-triangle-fill inline w-4 h-4 mr-2 align-[-2px]"
         aria-hidden="true"
-      >
-        <path d="M10.29 3.86l-8.19 14A2 2 0 004 21h16a2 2 0 001.71-3.14l-8.19-14a2 2 0 00-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line>
-      </svg>
+      ></i>
       Danger Zone - Irreversible Actions
     </summary>
     <div class="mt-6 space-y-4">
@@ -592,18 +495,10 @@
         style="background-color: #dc2626; color: white;"
         onclick="adminActions.confirmPurge()"
       >
-        <svg
-          class="inline w-4 h-4 mr-2 align-[-2px]"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
+        <i
+          class="bi bi-trash3-fill inline w-4 h-4 mr-2 align-[-2px]"
           aria-hidden="true"
-        >
-          <path d="M3 6h18"></path><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"></path><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line>
-        </svg>
+        ></i>
         <span class="label">Permanently Delete Repository</span>
       </button>
     </div>

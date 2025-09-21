@@ -64,9 +64,7 @@
               aria-current="page"
             {% endif %}
           >
-            <svg viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4" aria-hidden="true">
-              <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"></path>
-            </svg>
+            <i class="bi bi-gear-fill w-4 h-4" aria-hidden="true"></i>
             <span>Admin</span>
           </a>
         </div>
@@ -154,9 +152,9 @@
                       );
                       // Icons for branches and tags
                       var branchIcon =
-                        '<svg class="w-4 h-4 flex-shrink-0 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>';
+                        '<i class="bi bi-git w-4 h-4 flex-shrink-0 text-gray-400 dark:text-gray-500"></i>';
                       var tagIcon =
-                        '<svg class="w-4 h-4 flex-shrink-0 text-gray-400 dark:text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/></svg>';
+                        '<i class="bi bi-tag-fill w-4 h-4 flex-shrink-0 text-gray-400 dark:text-gray-500"></i>';
                       var typeIcon = isBranch ? branchIcon : tagIcon;
 
                       for (var i = 0; i < arr.length; i++) {
@@ -167,9 +165,7 @@
                         if (isCurrentRef) {
                           pieces.push(
                             '<span class="flex items-center gap-2 px-2 py-1.5 rounded bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300">' +
-                              '<svg class="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">' +
-                              '<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>' +
-                              '</svg>' +
+                              '<i class="bi bi-check-circle-fill w-4 h-4 flex-shrink-0"></i>' +
                               typeIcon +
                               '<span class="font-medium">' +
                               it.displayName +
@@ -200,9 +196,7 @@
                       );
                       pieces.push(
                         '<span class="flex items-center gap-2 px-2 py-1.5 rounded bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300">' +
-                          '<svg class="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">' +
-                          '<path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/>' +
-                          '</svg>' +
+                          '<i class="bi bi-check-circle-fill w-4 h-4 flex-shrink-0"></i>' +
                           '<span class="font-medium">' +
                           currDisp +
                           '</span>' +
