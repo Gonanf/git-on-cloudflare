@@ -5,7 +5,14 @@
  * check object presence, and verify pack membership.
  */
 
-import type { RepoStateSchema, Head, UnpackWork } from "./repoState.ts";
+import type {
+  RepoStateSchema,
+  Head,
+  UnpackWork,
+  HydrationWork,
+  HydrationTask,
+  HydrationStage,
+} from "./repoState.ts";
 
 import { asTypedStorage, objKey } from "./repoState.ts";
 import {
@@ -73,6 +80,8 @@ export async function debugState(
   unpackNext: string | null;
   looseSample: string[];
   hydrationPackCount: number;
+  // Last maintenance timestamp (ms since epoch) to help compute next maintenance window in UI
+  lastMaintenanceMs?: number;
   // SQLite database size in bytes (includes both SQL tables and KV for SQLite-backed DOs)
   dbSizeBytes?: number;
   // Quick sample of R2 loose mirror usage (first page only)
@@ -101,7 +110,7 @@ export async function debugState(
       retryCount?: number;
       firstErrorAt?: number;
     };
-    queueReasons?: ("post-unpack" | "admin")[];
+    queueReasons?: ("post-unpack" | "post-maint" | "admin")[];
   };
 }> {
   const store = asTypedStorage<RepoStateSchema>(ctx.storage);
@@ -112,118 +121,28 @@ export async function debugState(
   const packList = (await store.get("packList")) ?? [];
   const unpackWork = await store.get("unpackWork");
   const unpackNext = await store.get("unpackNext");
-  const hydrationWork = (await store.get("hydrationWork")) as any;
-  const hydrationQueue = ((await store.get("hydrationQueue")) as any) || [];
+  const lastMaintenanceMs = await store.get("lastMaintenanceMs");
+  const hydrationWork = (await store.get("hydrationWork")) as HydrationWork | undefined;
+  const hydrationQueue = ((await store.get("hydrationQueue")) as HydrationTask[] | undefined) || [];
 
-  const looseSample: string[] = [];
-  try {
-    const it = await ctx.storage.list({ prefix: "obj:", limit: 10 });
-    for (const k of it.keys()) looseSample.push(String(k).slice(4));
-  } catch {}
-
-  // Get hydration pending counts from SQLite if there's active work
-  let hydrPendingCounts = { bases: 0, loose: 0 };
-  let hydrBaseSample: string[] = [];
-  let hydrLooseSample: string[] = [];
-  if (hydrationWork?.workId) {
-    try {
-      const db = getDb(ctx.storage);
-      hydrPendingCounts = await getHydrPendingCounts(db, hydrationWork.workId);
-      hydrBaseSample = await getHydrPendingOids(db, hydrationWork.workId, "base", 10);
-      hydrLooseSample = await getHydrPendingOids(db, hydrationWork.workId, "loose", 10);
-    } catch {}
-  }
-
-  // Gather pack statistics
-  const packStats: Array<{
-    key: string;
-    packSize?: number;
-    hasIndex: boolean;
-    indexSize?: number;
-  }> = [];
-
-  // Limit to first N packs for performance and fetch stats with limited parallelism
-  const PACK_STATS_LIMIT = 20;
-  const CONCURRENCY = 6;
-  const packKeys = packList.slice(0, PACK_STATS_LIMIT);
-  try {
-    const results = await mapLimit(
-      packKeys,
-      CONCURRENCY,
-      async (
-        packKey
-      ): Promise<{
-        key: string;
-        packSize?: number;
-        hasIndex: boolean;
-        indexSize?: number;
-      }> => {
-        const stat = { key: packKey, hasIndex: false } as {
-          key: string;
-          packSize?: number;
-          hasIndex: boolean;
-          indexSize?: number;
-        };
-        // Get pack file size from R2
-        try {
-          const packHead = await env.REPO_BUCKET.head(packKey);
-          if (packHead) stat.packSize = packHead.size;
-        } catch {}
-        // Check if index exists and get its size
-        try {
-          const indexHead = await env.REPO_BUCKET.head(packIndexKey(packKey));
-          if (indexHead) {
-            stat.hasIndex = true;
-            stat.indexSize = indexHead.size;
-          }
-        } catch {}
-        return stat;
-      }
-    );
-    for (const s of results) packStats.push(s);
-  } catch {}
-
-  // Count hydration-generated packs (pack-hydr-*) without sending the full list back to template logic
-  let hydrationPackCount = 0;
-  try {
-    for (const k of packList) {
-      const base = k.split("/").pop() || "";
-      if (base.startsWith("pack-hydr-")) hydrationPackCount++;
-    }
-  } catch {}
-
+  // Helpers
+  const looseSample = await listLooseSample(ctx);
+  const {
+    bases: basesPending,
+    loose: loosePending,
+    baseSample: hydrBaseSample,
+    looseSample: hydrLooseSample,
+  } = await getHydrationPending(ctx, hydrationWork?.workId);
+  const packStats = await getPackStatsLimited(env, packList, 20, 6);
+  const hydrationPackCount = countHydrationPacks(packList);
   const prefix = doPrefix(ctx.id.toString());
-
-  // SQLite DB size (bytes)
-  let dbSizeBytes: number | undefined = undefined;
-  try {
-    dbSizeBytes = ctx.storage.sql?.databaseSize;
-    if (typeof dbSizeBytes !== "number") dbSizeBytes = undefined;
-  } catch {}
-
-  // Sample R2 loose usage: list first page under loose prefix and sum sizes
-  let looseR2SampleBytes: number | undefined = undefined;
-  let looseR2SampleCount: number | undefined = undefined;
-  let looseR2Truncated: boolean | undefined = undefined;
-  try {
-    const prefixLoose = r2LooseKey(prefix, "");
-    const list = await env.REPO_BUCKET.list({ prefix: prefixLoose, limit: 250 });
-    let sum = 0;
-    for (const obj of list.objects || []) sum += obj.size || 0;
-    looseR2SampleBytes = sum;
-    looseR2SampleCount = (list.objects || []).length;
-    looseR2Truncated = !!list.truncated;
-  } catch {}
-
-  // Sanitize unpackWork (no large arrays stored anymore)
-  const sanitizedUnpackWork = unpackWork
-    ? {
-        packKey: unpackWork.packKey,
-        totalCount: (unpackWork as any).totalCount || 0,
-        processedCount: unpackWork.processedCount,
-        startedAt: unpackWork.startedAt,
-      }
-    : null;
+  const dbSizeBytes = getDatabaseSize(ctx);
+  const {
+    bytes: looseR2SampleBytes,
+    count: looseR2SampleCount,
+    truncated: looseR2Truncated,
+  } = await sampleR2Loose(prefix, env);
+  const sanitizedUnpackWork = sanitizeUnpackWork(unpackWork as UnpackWork | null);
 
   return {
     meta: { doId: ctx.id.toString(), prefix },
@@ -239,6 +158,7 @@ export async function debugState(
     unpackNext: unpackNext || null,
     looseSample,
     hydrationPackCount,
+    lastMaintenanceMs,
     dbSizeBytes,
     looseR2SampleBytes,
     looseR2SampleCount,
@@ -248,8 +168,8 @@ export async function debugState(
       stage: hydrationWork?.stage,
       segmentSeq: hydrationWork?.progress?.segmentSeq,
       queued: Array.isArray(hydrationQueue) ? hydrationQueue.length : 0,
-      needBasesCount: hydrPendingCounts.bases > 0 ? hydrPendingCounts.bases : undefined,
-      needLooseCount: hydrPendingCounts.loose > 0 ? hydrPendingCounts.loose : undefined,
+      needBasesCount: basesPending > 0 ? basesPending : undefined,
+      needLooseCount: loosePending > 0 ? loosePending : undefined,
       packIndex: hydrationWork?.progress?.packIndex,
       objCursor: hydrationWork?.progress?.objCursor,
       workId: hydrationWork?.workId,
@@ -271,7 +191,7 @@ export async function debugState(
             firstErrorAt: hydrationWork.error.firstErrorAt,
           }
         : undefined,
-      queueReasons: Array.isArray(hydrationQueue) ? hydrationQueue.map((q: any) => q?.reason) : [],
+      queueReasons: Array.isArray(hydrationQueue) ? hydrationQueue.map((q) => q.reason) : [],
     },
   };
 }
@@ -408,5 +328,144 @@ export async function debugCheckOid(
       hasR2Loose,
     },
     inPacks,
+  };
+}
+
+/**
+ * Helpers
+ */
+
+async function listLooseSample(ctx: DurableObjectState): Promise<string[]> {
+  const out: string[] = [];
+  try {
+    const it = await ctx.storage.list({ prefix: "obj:", limit: 10 });
+    for (const k of it.keys()) out.push(String(k).slice(4));
+  } catch {}
+  return out;
+}
+
+async function getHydrationPending(
+  ctx: DurableObjectState,
+  workId?: string
+): Promise<{
+  bases: number;
+  loose: number;
+  baseSample: string[];
+  looseSample: string[];
+}> {
+  if (!workId) return { bases: 0, loose: 0, baseSample: [], looseSample: [] };
+  try {
+    const db = getDb(ctx.storage);
+    const counts = await getHydrPendingCounts(db, workId);
+    const baseSample = await getHydrPendingOids(db, workId, "base", 10);
+    const looseSample = await getHydrPendingOids(db, workId, "loose", 10);
+    return { bases: counts.bases, loose: counts.loose, baseSample, looseSample };
+  } catch {
+    return { bases: 0, loose: 0, baseSample: [], looseSample: [] };
+  }
+}
+
+async function getPackStatsLimited(
+  env: Env,
+  packList: string[],
+  limit: number,
+  concurrency: number
+): Promise<
+  Array<{
+    key: string;
+    packSize?: number;
+    hasIndex: boolean;
+    indexSize?: number;
+  }>
+> {
+  const keys = packList.slice(0, Math.max(0, limit | 0));
+  if (keys.length === 0) return [];
+  try {
+    const results = await mapLimit(
+      keys,
+      Math.max(1, concurrency | 0),
+      async (
+        packKey
+      ): Promise<{
+        key: string;
+        packSize?: number;
+        hasIndex: boolean;
+        indexSize?: number;
+      }> => {
+        const stat: { key: string; packSize?: number; hasIndex: boolean; indexSize?: number } = {
+          key: packKey,
+          hasIndex: false,
+        };
+        try {
+          const packHead = await env.REPO_BUCKET.head(packKey);
+          if (packHead) stat.packSize = packHead.size;
+        } catch {}
+        try {
+          const indexHead = await env.REPO_BUCKET.head(packIndexKey(packKey));
+          if (indexHead) {
+            stat.hasIndex = true;
+            stat.indexSize = indexHead.size;
+          }
+        } catch {}
+        return stat;
+      }
+    );
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+function countHydrationPacks(packList: string[]): number {
+  let n = 0;
+  try {
+    for (const k of packList) {
+      const base = k.split("/").pop() || "";
+      if (base.startsWith("pack-hydr-")) n++;
+    }
+  } catch {}
+  return n;
+}
+
+function getDatabaseSize(ctx: DurableObjectState): number | undefined {
+  try {
+    const size = ctx.storage.sql.databaseSize;
+    return typeof size === "number" ? size : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function sampleR2Loose(
+  prefix: string,
+  env: Env
+): Promise<{ bytes?: number; count?: number; truncated?: boolean }> {
+  try {
+    const prefixLoose = r2LooseKey(prefix, "");
+    const list = await env.REPO_BUCKET.list({ prefix: prefixLoose, limit: 250 });
+    let sum = 0;
+    for (const obj of list.objects || []) sum += obj.size || 0;
+    return {
+      bytes: sum,
+      count: (list.objects || []).length,
+      truncated: !!list.truncated,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function sanitizeUnpackWork(unpackWork: UnpackWork | null): {
+  packKey: string;
+  totalCount: number;
+  processedCount: number;
+  startedAt: number;
+} | null {
+  if (!unpackWork) return null;
+  return {
+    packKey: unpackWork.packKey,
+    totalCount: unpackWork.totalCount || 0,
+    processedCount: unpackWork.processedCount,
+    startedAt: unpackWork.startedAt,
   };
 }

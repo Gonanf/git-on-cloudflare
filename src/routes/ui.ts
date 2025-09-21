@@ -1,6 +1,7 @@
-import type { TreeEntry } from "@/git";
+import type { TreeEntry, HeadInfo, Ref } from "@/git";
 import type { CacheContext } from "@/cache";
 import type { debugState } from "@/do/repo/debug";
+import { getConfig } from "@/do/repo/repoConfig.ts";
 
 import { AutoRouter } from "itty-router";
 import {
@@ -43,6 +44,118 @@ async function badRequest(
   return handleError(env, new HttpError(400, message, { expose: true }), title, extra);
 }
 
+// Short "from now" formatter like "in 3m", "in 1h 20m", "in 2d 5h"
+function formatFromNowShort(deltaMs: number): string {
+  const s = Math.round(deltaMs / 1000);
+  if (s <= 0) return "soon";
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const d = Math.floor(h / 24);
+  if (d > 0) return `in ${d}d ${h % 24}h`;
+  if (h > 0) return `in ${h}h ${m % 60}m`;
+  if (m > 0) return `in ${m}m`;
+  return `in ${s}s`;
+}
+
+// Shared type for admin debug state helpers
+type DebugState = Awaited<ReturnType<typeof debugState>>;
+type HydrationData = DebugState["hydration"];
+type ReadPathResult = Awaited<ReturnType<typeof readPath>>;
+type RouteRequest = Request & { params: { owner: string; repo: string } };
+
+// Cache HEAD and refs for 60s
+async function loadHeadAndRefsCached(
+  env: Env,
+  request: Request,
+  ctx: ExecutionContext,
+  repoId: string
+): Promise<{ head: HeadInfo | undefined; refs: Ref[] } | null> {
+  const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", { repo: repoId });
+  return cacheOrLoadJSON<{ head: HeadInfo | undefined; refs: Ref[] }>(
+    cacheKeyRefs,
+    async () => {
+      try {
+        const res = await getHeadAndRefs(env, repoId);
+        return { head: res.head, refs: res.refs };
+      } catch {
+        return null;
+      }
+    },
+    60,
+    ctx
+  );
+}
+
+function getDefaultBranchFromHead(head: HeadInfo | undefined): string {
+  return head?.target?.replace(/^refs\/(heads|tags)\//, "") || "main";
+}
+
+function computeStorageMetrics(state: Partial<DebugState> | undefined): {
+  storageSize: string;
+  packCount: number;
+  packList: string[];
+  hydrationPackCount: number;
+} {
+  let totalStorageBytes = 0;
+  const packStats = (state?.packStats as Array<{ packSize?: number; indexSize?: number }>) || [];
+  for (const pack of packStats) {
+    if (typeof pack.packSize === "number") totalStorageBytes += pack.packSize;
+    if (typeof pack.indexSize === "number") totalStorageBytes += pack.indexSize;
+  }
+  const storageSize = formatSize(totalStorageBytes);
+  const packList: string[] = Array.isArray(state?.packList) ? (state!.packList as string[]) : [];
+  const packCount =
+    typeof state?.packListCount === "number" ? (state!.packListCount as number) : packList.length;
+  const hydrationPackCount =
+    typeof state?.hydrationPackCount === "number"
+      ? (state!.hydrationPackCount as number)
+      : packList.filter((p) => typeof p === "string" && p.includes("pack-hydr-")).length;
+  return { storageSize, packCount, packList, hydrationPackCount };
+}
+
+function computeHydrationStatus(
+  hydrationData: HydrationData | undefined,
+  packCount: number,
+  hydrationPackCount: number
+): { hydrationStatus: string; hydrationStartedAt: string | null } {
+  let hydrationStatus = "Not Started";
+  let hydrationStartedAt: string | null = null;
+  if (hydrationData?.running) {
+    hydrationStatus = `Running: ${hydrationData.stage || "unknown"}`;
+    if (hydrationData.startedAt) {
+      try {
+        hydrationStartedAt = new Date(hydrationData.startedAt).toLocaleString();
+      } catch {}
+    }
+  } else if (hydrationData?.stage === "done") {
+    hydrationStatus = "Completed";
+  } else if (hydrationData && hydrationData.queued > 0) {
+    hydrationStatus = `Queued (${hydrationData.queued} pending)`;
+  } else if (packCount > 0 && hydrationPackCount > 0) {
+    hydrationStatus = "Completed (hydration packs present)";
+  }
+  return { hydrationStatus, hydrationStartedAt };
+}
+
+function computeNextMaintenance(
+  env: Env,
+  lastMaintenanceMs?: number
+): { nextMaintenanceIn?: string; nextMaintenanceAt?: string } {
+  try {
+    const cfg = getConfig(env);
+    const now = Date.now();
+    const last = typeof lastMaintenanceMs === "number" ? lastMaintenanceMs : undefined;
+    const nextAt = (last ?? now) + cfg.maintMs;
+    const clamped = nextAt <= now ? now + cfg.maintMs : nextAt;
+    return {
+      nextMaintenanceIn: formatFromNowShort(clamped - now),
+      nextMaintenanceAt: new Date(clamped).toLocaleString(),
+    };
+  } catch {
+    return {};
+  }
+}
+
 export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   // Owner repos list
   router.get(`/:owner`, async (request, env: Env) => {
@@ -68,7 +181,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     });
   });
   // Repo overview page
-  router.get(`/:owner/:repo`, async (request, env: Env, ctx: ExecutionContext) => {
+  router.get(`/:owner/:repo`, async (request, env, ctx) => {
     const { owner, repo } = request.params;
     if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
       return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
@@ -80,7 +193,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       repo: repoId,
     });
 
-    const refsData = await cacheOrLoadJSON<{ head: any; refs: any[] }>(
+    const refsData = await cacheOrLoadJSON<{ head: HeadInfo | undefined; refs: Ref[] }>(
       cacheKeyRefs,
       async () => {
         try {
@@ -93,8 +206,8 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       60,
       ctx
     );
-    const head: any = refsData?.head;
-    const refs: any[] = refsData?.refs || [];
+    const head: HeadInfo | undefined = refsData?.head;
+    const refs: Ref[] = refsData?.refs || [];
 
     const defaultRef = head?.target || (refs[0]?.name ?? "refs/heads/main");
     const refShort = defaultRef.replace(/^refs\/(heads|tags)\//, "");
@@ -189,7 +302,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Tree/Blob browser using query params: ?ref=<branch|tag|oid>&path=<path>
-  router.get(`/:owner/:repo/tree`, async (request, env: Env, ctx: ExecutionContext) => {
+  router.get(`/:owner/:repo/tree`, async (request, env, ctx) => {
     const { owner, repo } = request.params;
     if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
       return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
@@ -222,7 +335,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       path,
     });
 
-    const result = await cacheOrLoadJSONWithTTL<any>(
+    const result = await cacheOrLoadJSONWithTTL<ReadPathResult | null>(
       cacheKeyTree,
       async () => {
         try {
@@ -385,7 +498,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Blob preview endpoint - renders file content with syntax highlighting and media previews
-  router.get(`/:owner/:repo/blob`, async (request, env: Env, ctx: ExecutionContext) => {
+  router.get(`/:owner/:repo/blob`, async (request, env, ctx) => {
     const { owner, repo } = request.params;
     if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
       return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
@@ -527,7 +640,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Commit list
-  router.get(`/:owner/:repo/commits`, async (request, env: Env, ctx: ExecutionContext) => {
+  router.get(`/:owner/:repo/commits`, async (request, env, ctx) => {
     const { owner, repo } = request.params;
     if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
       return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
@@ -643,76 +756,71 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
 
   // Merge expansion fragment endpoint: returns HTML <tr> rows for side-branch commits of a merge
   // Example: /:owner/:repo/commits/fragments/:oid?limit=20
-  router.get(
-    `/:owner/:repo/commits/fragments/:oid`,
-    async (request, env: Env, ctx: ExecutionContext) => {
-      const { owner, repo, oid } = request.params as { owner: string; repo: string; oid: string };
-      if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
-        return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
-      }
-      if (!OID_RE.test(oid)) {
-        return badRequest(env, "Invalid OID", "OID must be 40 hex", {
-          owner,
-          repo,
-          refEnc: encodeURIComponent(oid),
-        });
-      }
-      const u = new URL(request.url);
-      const limitRaw = Number(u.searchParams.get("limit") || "20");
-      const limit = Number.isFinite(limitRaw)
-        ? Math.max(1, Math.min(100, Math.floor(limitRaw)))
-        : 20;
-      const repoId = repoKey(owner, repo);
-      try {
-        const cacheCtx: CacheContext = { req: request, ctx };
-        const side = await listMergeSideFirstParent(
-          env,
-          repoId,
-          oid,
-          limit,
-          {
-            scanLimit: Math.min(400, limit * 5),
-            timeBudgetMs: 5000, // Increased for production R2 latency
-            mainlineProbe: 50, // Reduced to speed up initial probe
-          },
-          cacheCtx
-        );
-        const commits = (side || []).map((c) => ({
-          oid: c.oid,
-          shortOid: c.oid.slice(0, 7),
-          firstLine: (c.message || "").split(/\r?\n/, 1)[0],
-          authorName: c.author?.name || "",
-          when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
-        }));
-        const html = await renderView(env, "commit_rows", {
-          owner,
-          repo,
-          commits,
-          compact: true,
-          mergeOf: oid,
-        });
-        if (!html) {
-          return new Response("Failed to render template", { status: 500 });
-        }
-        return new Response(html, {
-          headers: {
-            "Content-Type": "text/html; charset=utf-8",
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-            "X-Page-Renderer": "liquid-fragment",
-          },
-        });
-      } catch (e: any) {
-        return handleError(env, e, `Error · ${owner}/${repo}`, {
-          owner,
-          repo,
-          refEnc: encodeURIComponent(oid),
-        });
-      }
+  router.get(`/:owner/:repo/commits/fragments/:oid`, async (request, env, ctx) => {
+    const { owner, repo, oid } = request.params as { owner: string; repo: string; oid: string };
+    if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
+      return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
     }
-  );
+    if (!OID_RE.test(oid)) {
+      return badRequest(env, "Invalid OID", "OID must be 40 hex", {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(oid),
+      });
+    }
+    const u = new URL(request.url);
+    const limitRaw = Number(u.searchParams.get("limit") || "20");
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.floor(limitRaw))) : 20;
+    const repoId = repoKey(owner, repo);
+    try {
+      const cacheCtx: CacheContext = { req: request, ctx };
+      const side = await listMergeSideFirstParent(
+        env,
+        repoId,
+        oid,
+        limit,
+        {
+          scanLimit: Math.min(400, limit * 5),
+          timeBudgetMs: 5000, // Increased for production R2 latency
+          mainlineProbe: 50, // Reduced to speed up initial probe
+        },
+        cacheCtx
+      );
+      const commits = (side || []).map((c) => ({
+        oid: c.oid,
+        shortOid: c.oid.slice(0, 7),
+        firstLine: (c.message || "").split(/\r?\n/, 1)[0],
+        authorName: c.author?.name || "",
+        when: c.author ? formatWhen(c.author.when, c.author.tz) : "",
+      }));
+      const html = await renderView(env, "commit_rows", {
+        owner,
+        repo,
+        commits,
+        compact: true,
+        mergeOf: oid,
+      });
+      if (!html) {
+        return new Response("Failed to render template", { status: 500 });
+      }
+      return new Response(html, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store, no-cache, must-revalidate",
+          "X-Page-Renderer": "liquid-fragment",
+        },
+      });
+    } catch (e: any) {
+      return handleError(env, e, `Error · ${owner}/${repo}`, {
+        owner,
+        repo,
+        refEnc: encodeURIComponent(oid),
+      });
+    }
+  });
 
   // Commit details
-  router.get(`/:owner/:repo/commit/:oid`, async (request, env: Env, ctx: ExecutionContext) => {
+  router.get(`/:owner/:repo/commit/:oid`, async (request, env, ctx) => {
     const { owner, repo, oid } = request.params;
     if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
       return badRequest(env, "Invalid owner/repo", "Owner or repo invalid", { owner, repo });
@@ -764,7 +872,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Raw blob endpoint - streams file content without buffering
-  router.get(`/:owner/:repo/raw`, async (request, env: Env) => {
+  router.get(`/:owner/:repo/raw`, async (request: RouteRequest, env) => {
     const { owner, repo } = request.params;
     if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
       return new Response("Bad Request\n", { status: 400 });
@@ -799,7 +907,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
   });
 
   // Raw blob by ref+path (used for images in Markdown)
-  router.get(`/:owner/:repo/rawpath`, async (request: any, env: Env, ctx: ExecutionContext) => {
+  router.get(`/:owner/:repo/rawpath`, async (request: RouteRequest, env, ctx) => {
     const { owner, repo } = request.params;
     if (!isValidOwnerRepo(owner) || !isValidOwnerRepo(repo)) {
       return new Response("Bad Request\n", { status: 400 });
@@ -808,9 +916,10 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     const ref = url.searchParams.get("ref") || "main";
     const path = url.searchParams.get("path") || "";
     const name = url.searchParams.get("name") || path.split("/").pop() || "file";
-    if (!isValidRef(ref) || !isValidPath(path))
-      return new Response("Bad Request\n", { status: 400 });
     const download = url.searchParams.get("download") === "1";
+    if (!isValidRef(ref) || !isValidPath(path)) {
+      return new Response("Bad Request\n", { status: 400 });
+    }
 
     // Basic hotlink protection: require same-origin Referer
     try {
@@ -858,7 +967,7 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     const repoId = repoKey(owner, repo);
     try {
       const cacheKey = buildCacheKeyFrom(request, "/_cache/refs", { repo: repoId });
-      const refsData = await cacheOrLoadJSON<{ refs: any[] }>(
+      const refsData = await cacheOrLoadJSON<{ refs: Ref[] }>(
         cacheKey,
         async () => {
           try {
@@ -871,10 +980,10 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         60,
         ctx
       );
-      const refs = refsData?.refs || [];
+      const refs: Ref[] = refsData?.refs || [];
       const branches = refs
-        .filter((r: any) => r.name && r.name.startsWith("refs/heads/"))
-        .map((b: any) => {
+        .filter((r: Ref) => r.name && r.name.startsWith("refs/heads/"))
+        .map((b: Ref) => {
           const short = b.name.replace("refs/heads/", "");
           return {
             name: encodeURIComponent(short),
@@ -882,8 +991,8 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
           };
         });
       const tags = refs
-        .filter((r: any) => r.name && r.name.startsWith("refs/tags/"))
-        .map((t: any) => {
+        .filter((r: Ref) => r.name && r.name.startsWith("refs/tags/"))
+        .map((t: Ref) => {
           const short = t.name.replace("refs/tags/", "");
           return {
             name: encodeURIComponent(short),
@@ -927,73 +1036,32 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
     const repoId = repoKey(owner, repo);
     const stub = getRepoStub(env, repoId);
 
-    // Type definition for debug state return
-    type DebugState = Awaited<ReturnType<typeof debugState>>;
-
     // Gather admin data in parallel for performance
-    // Use cached HEAD+refs (60s) to reduce DO RPCs
-    const cacheKeyRefs = buildCacheKeyFrom(request, "/_cache/refs", { repo: repoId });
     const [state, refsData, progress] = await Promise.all([
       stub.debugState().catch(() => ({}) as Partial<DebugState>),
-      cacheOrLoadJSON<{ head: any; refs: any[] }>(
-        cacheKeyRefs,
-        async () => {
-          try {
-            const res = await getHeadAndRefs(env, repoId);
-            return { head: res.head, refs: res.refs };
-          } catch {
-            return null;
-          }
-        },
-        60,
-        ctx
-      ),
+      loadHeadAndRefsCached(env, request, ctx, repoId),
       getUnpackProgress(env, repoId),
     ]);
-    const head: any = refsData?.head || null;
-    const refs: any[] = refsData?.refs || [];
 
-    // Calculate storage metrics from pack stats
-    let totalStorageBytes = 0;
-    if (state.packStats) {
-      for (const pack of state.packStats) {
-        if (pack.packSize) totalStorageBytes += pack.packSize;
-        if (pack.indexSize) totalStorageBytes += pack.indexSize;
-      }
-    }
-    const storageSize = formatSize(totalStorageBytes);
-    const packCount = state.packListCount || 0;
-    const packList = state.packList || [];
+    const head: HeadInfo | undefined = refsData?.head || undefined;
+    const refs: Ref[] = refsData?.refs || [];
 
-    // Prefer DO-computed hydration pack count to avoid template-side scans
-    const hydrationPackCount =
-      state.hydrationPackCount ?? packList.filter((p) => p.includes("pack-hydr-")).length;
+    const { storageSize, packCount, packList, hydrationPackCount } = computeStorageMetrics(state);
+    const { hydrationStatus, hydrationStartedAt } = computeHydrationStatus(
+      state.hydration,
+      packCount,
+      hydrationPackCount
+    );
 
-    // Extract hydration information with proper type checking
-    const hydrationData = state.hydration;
-    let hydrationStatus = "Not Started";
-    let hydrationStartedAt: string | null = null;
-
-    // Check for active or queued hydration
-    if (hydrationData?.running) {
-      hydrationStatus = `Running: ${hydrationData.stage || "unknown"}`;
-      if (hydrationData.startedAt) {
-        hydrationStartedAt = new Date(hydrationData.startedAt).toLocaleString();
-      }
-    } else if (hydrationData?.stage === "done") {
-      hydrationStatus = "Completed";
-    } else if (hydrationData && hydrationData.queued > 0) {
-      hydrationStatus = `Queued (${hydrationData.queued} pending)`;
-    }
-    // If no active hydration, check if hydration packs exist to infer completion
-    else if (packCount > 0 && hydrationPackCount > 0) {
-      // Infer hydration completion when hydration packs are present (pack-hydr-TIMESTAMP-SEQ.pack)
-      hydrationStatus = "Completed (hydration packs present)";
-    }
-
-    // Extract default branch from HEAD
-    const defaultBranch = head?.target?.replace(/^refs\/(heads|tags)\//, "") || "main";
+    const defaultBranch = getDefaultBranchFromHead(head);
     const refEnc = encodeURIComponent(defaultBranch);
+
+    const { nextMaintenanceIn, nextMaintenanceAt } = computeNextMaintenance(
+      env,
+      typeof state?.lastMaintenanceMs === "number"
+        ? (state!.lastMaintenanceMs as number)
+        : undefined
+    );
 
     const html = await renderView(env, "admin", {
       title: `Admin · ${owner}/${repo}`,
@@ -1009,9 +1077,11 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
       defaultBranch,
       hydrationStatus,
       hydrationStartedAt,
-      hydrationData,
+      hydrationData: state.hydration,
       hydrationPackCount,
       progress,
+      nextMaintenanceIn,
+      nextMaintenanceAt,
     });
     if (!html) {
       return new Response("Failed to render template", { status: 500 });

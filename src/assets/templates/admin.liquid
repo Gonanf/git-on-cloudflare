@@ -36,10 +36,81 @@
     <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-6 gap-y-3">
       <div>
         <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-          R2 Packs
+          R2 Packs Storage
         </div>
         <div class="font-mono text-sm">{{ storageSize | default: '0 bytes' }}</div>
       </div>
+      <div>
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+          Packs
+        </div>
+        <div class="font-mono text-sm">
+          {{ packCount | default: 0 }}
+          {% assign hp = hydrationPackCount %}
+          {% if hp or hp == 0 %}
+            {% if hp > 0 %}
+              <span class="text-xs text-gray-500">({{ hp }} hydration packs)</span>
+            {% endif %}
+          {% else %}
+            {% assign hydrationPacks = 0 %}
+            {% for pack in packList %}
+              {% if pack contains 'pack-hydr-' %}
+                {% assign hydrationPacks = hydrationPacks | plus: 1 %}
+              {% endif %}
+            {% endfor %}
+            {% if hydrationPacks > 0 %}
+              <span class="text-xs text-gray-500">({{ hydrationPacks }} hydration packs)</span>
+            {% endif %}
+          {% endif %}
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+          Next Maintenance
+        </div>
+        <div class="font-mono text-sm">
+          {% if nextMaintenanceIn %}
+            <span title="{{ nextMaintenanceAt | default: '' }}">{{ nextMaintenanceIn }}</span>
+          {% else %}
+            <span class="text-gray-500">n/a</span>
+          {% endif %}
+        </div>
+      </div>
+      {% if state and state.meta and state.meta.doId %}
+        <div>
+          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+            Durable Object ID
+          </div>
+          <div class="font-mono text-sm relative">
+            <span title="{{ state.meta.doId }}">
+              {{ state.meta.doId | slice: 0, 12 -}}
+              {%- if state.meta.doId.size > 12 %}…{% endif %}
+            </span>
+            <button
+              class="absolute -top-0.5 ml-2 p-1 rounded border border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              onclick="adminActions.copyDoId('{{ state.meta.doId }}')"
+              title="Copy DO ID"
+              aria-label="Copy DO ID"
+              style="margin-left: 0.5rem; top: -2px;"
+            >
+              <svg
+                class="block w-4 h-4"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path>
+              </svg>
+            </button>
+            <span class="invisible">___copy</span>
+          </div>
+        </div>
+      {% endif %}
       {% if state.looseR2SampleBytes %}
         <div>
           <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
@@ -64,7 +135,7 @@
       {% if state.dbSizeBytes %}
         <div>
           <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-            DO Storage
+            Durable Object Storage
           </div>
           <div class="font-mono text-sm">
             {% assign mb = state.dbSizeBytes | divided_by: 1048576.0 %}
@@ -77,59 +148,34 @@
           </div>
         </div>
       {% endif %}
-      {% if state and state.meta and state.meta.doId %}
-        <div>
-          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-            Durable Object
-          </div>
-          <div class="font-mono text-sm flex items-center gap-2">
-            <span title="{{ state.meta.doId }}">
-              {{ state.meta.doId | slice: 0, 12 -}}
-              {%- if state.meta.doId.size > 12 %}…{% endif %}
-            </span>
-            <button
-              class="btn secondary sm"
-              onclick="adminActions.copyDoId('{{ state.meta.doId }}')"
-            >
-              <svg
-                class="inline w-4 h-4 mr-1 align-[-2px]"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path>
-              </svg>
-              <span class="label">Copy</span>
-            </button>
-          </div>
-        </div>
-      {% endif %}
       <div>
         <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-          Packs
+          Unpacking
         </div>
-        <div class="font-mono text-sm">
-          {{ packCount | default: 0 }}
-          {% assign hp = hydrationPackCount %}
-          {% if hp or hp == 0 %}
-            {% if hp > 0 %}
-              <span class="text-xs text-gray-500">({{ hp }} hydration packs)</span>
-            {% endif %}
+        <div class="font-mono text-sm text-amber-600 dark:text-amber-400">
+          {% if state.unpackWork %}
+            {{ state.unpackWork.processedCount | default: 0 }}/
+            {{- state.unpackWork.totalCount | default: 0 }}
+          {% elsif state.unpackNext %}
+            Scheduled
           {% else %}
-            {% assign hydrationPacks = 0 %}
-            {% for pack in packList %}
-              {% if pack contains 'pack-hydr-' %}
-                {% assign hydrationPacks = hydrationPacks | plus: 1 %}
-              {% endif %}
-            {% endfor %}
-            {% if hydrationPacks > 0 %}
-              <span class="text-xs text-gray-500">({{ hydrationPacks }} hydration packs)</span>
-            {% endif %}
+            Idle
+          {% endif %}
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
+          Hydration
+        </div>
+        <div class="font-mono text-sm text-blue-600 dark:text-blue-400">
+          {% if hydrationData and hydrationData.running %}
+            {{ hydrationData.stage }}
+          {% elsif hydrationData and hydrationData.queued and hydrationData.queued > 0 %}
+            Queued ({{ hydrationData.queued }})
+          {% elsif hydrationStatus and hydrationStatus contains 'Completed' %}
+            Completed
+          {% else %}
+            Not Started
           {% endif %}
         </div>
       </div>
@@ -162,31 +208,6 @@
           {{ branches }}/{{ tags }}
         </div>
       </div>
-
-      {% if state.unpackWork or state.unpackNext %}
-        <div>
-          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-            Unpacking
-          </div>
-          <div class="font-mono text-sm text-amber-600 dark:text-amber-400">
-            {% if state.unpackWork %}
-              {{ state.unpackWork.oidsCount }} objects
-            {% else %}
-              Scheduled
-            {% endif %}
-          </div>
-        </div>
-      {% endif %}
-      {% if hydrationData and hydrationData.running %}
-        <div>
-          <div class="text-xs text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1">
-            Hydration
-          </div>
-          <div class="font-mono text-sm text-blue-600 dark:text-blue-400">
-            {{ hydrationData.stage }}
-          </div>
-        </div>
-      {% endif %}
     </div>
   </div>
 
