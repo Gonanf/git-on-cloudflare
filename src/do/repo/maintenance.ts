@@ -224,8 +224,30 @@ async function runMaintenance(
   } catch {}
 
   // Determine which packs to keep
-  // packList is maintained newest-first (most recent at index 0), so keep the first N
-  const keep = packList.slice(0, keepPacks);
+  // Prioritize keep selection to reduce oscillation:
+  // K = [lastPackKey, hydration packs (in original order), normal packs (in original order)], deduped
+  const currentLast = (await store.get("lastPackKey")) || undefined;
+  const seen = new Set<string>();
+  const prioritized: string[] = [];
+  function push(k: string | undefined) {
+    if (!k) return;
+    if (!seen.has(k)) {
+      seen.add(k);
+      prioritized.push(k);
+    }
+  }
+  const hydration: string[] = [];
+  const normal: string[] = [];
+  for (const k of packList) {
+    const base = normalizePackKey(k);
+    if (base.startsWith("pack-hydr-")) hydration.push(k);
+    else normal.push(k);
+  }
+  // Build prioritized list
+  push(currentLast);
+  for (const k of hydration) push(k);
+  for (const k of normal) push(k);
+  const keep = prioritized.slice(0, keepPacks);
   const keepSet = new Set(keep);
   const removed = packList.filter((k) => !keepSet.has(k));
   const newList = packList.filter((k) => keepSet.has(k));
