@@ -247,6 +247,9 @@
     padding: 0.75rem; /* 12px */
     border-radius: 0.375rem; /* rounded-md */
     background-color: transparent;
+    /* Ensure long lines scroll horizontally instead of overflowing */
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
   .markdown-content pre code {
     font-family: var(--font-mono);

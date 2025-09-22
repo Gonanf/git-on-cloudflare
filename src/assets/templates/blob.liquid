@@ -26,16 +26,54 @@
       {% endif %}
     </div>
     <div class="flex items-center gap-2">
-      <div class="segmented">
-        {% if not isMarkdown and not isImage and not isPdf and not isBinary and not tooLarge %}
-          <button id="copy-raw" class="seg action" type="button">Copy</button>
-        {% endif %}
-        {% unless isImage or isPdf %}
-          <a id="view-raw-link" class="seg action" href="{{ viewRawHref }}">View</a>
-        {% endunless %}
-        <span class="seg label">Raw</span>
+      <div class="hidden sm:flex items-center gap-2">
+        <div class="segmented">
+          {% if not isMarkdown and not isImage and not isPdf and not isBinary and not tooLarge %}
+            <button class="copy-raw seg action" type="button">Copy</button>
+          {% endif %}
+          {% unless isImage or isPdf %}
+            <a id="view-raw-link" class="seg action" href="{{ viewRawHref }}">View</a>
+          {% endunless %}
+          <span class="seg label">Raw</span>
+        </div>
+        <a class="btn sm" href="{{ rawHref }}">Download</a>
       </div>
-      <a class="btn sm" href="{{ rawHref }}">Download</a>
+      <div class="sm:hidden">
+        <details class="ref-menu relative">
+          <summary class="btn secondary sm inline-flex items-center gap-2">
+            <i class="bi bi-three-dots w-4 h-4" aria-hidden="true"></i>
+          </summary>
+          <div class="fixed inset-x-0 z-20 mt-2 mx-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-2 shadow-xl">
+            <div class="flex flex-col">
+              {% if not isMarkdown and not isImage and not isPdf and not isBinary and not tooLarge %}
+                <button
+                  type="button"
+                  class="copy-raw flex items-center gap-2 px-3 py-2 rounded text-left hover:bg-gray-100 dark:hover:bg-gray-700"
+                >
+                  <i class="bi bi-clipboard w-4 h-4" aria-hidden="true"></i>
+                  <span>Copy raw</span>
+                </button>
+              {% endif %}
+              {% unless isImage or isPdf %}
+                <a
+                  href="{{ viewRawHref }}"
+                  class="flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+                >
+                  <i class="bi bi-file-earmark-text w-4 h-4" aria-hidden="true"></i>
+                  <span>View raw</span>
+                </a>
+              {% endunless %}
+              <a
+                href="{{ rawHref }}"
+                class="flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <i class="bi bi-download w-4 h-4" aria-hidden="true"></i>
+                <span>Download</span>
+              </a>
+            </div>
+          </div>
+        </details>
+      </div>
     </div>
   </div>
   <div class="{%- if contentClass %}{{ contentClass }}{% endif %} {% if isMarkdown %}p-5{% elsif isBinary or tooLarge %}p-3{% else %}p-1{% endif %}">
@@ -77,25 +115,35 @@
 </div>
 <script>
   (function () {
-    try {
-      var copyBtn = document.getElementById('copy-raw');
-      if (!copyBtn) return;
-      copyBtn.addEventListener('click', async function () {
-        try {
-          var link = document.getElementById('view-raw-link');
-          var href = (link && link.getAttribute('href')) || '';
-          if (!href) href = '{{ viewRawHref }}';
-          var res = await fetch(href, { credentials: 'same-origin' });
-          var txt = await res.text();
-          await navigator.clipboard.writeText(txt);
-          var old = copyBtn.textContent;
-          copyBtn.textContent = 'Copied';
+    function handleCopyClick(event) {
+      var btn = event.currentTarget;
+      var link = document.getElementById('view-raw-link');
+      var href = (link && link.getAttribute('href')) || '{{ viewRawHref }}';
+      fetch(href, { credentials: 'same-origin' })
+        .then(function (res) {
+          return res.text();
+        })
+        .then(function (txt) {
+          return navigator.clipboard.writeText(txt);
+        })
+        .then(function () {
+          var old = btn.textContent;
+          btn.textContent = 'Copied';
           setTimeout(function () {
-            copyBtn.textContent = old;
+            btn.textContent = old;
+            var dd = btn.closest && btn.closest('details');
+            if (dd) dd.removeAttribute('open');
           }, 1200);
-        } catch {}
-      });
-    } catch {}
+        })
+        .catch(function (err) {
+          console.warn('Copy failed', err);
+        });
+    }
+
+    var copyButtons = document.querySelectorAll('.copy-raw');
+    for (var i = 0; i < copyButtons.length; i++) {
+      copyButtons[i].addEventListener('click', handleCopyClick);
+    }
   })();
 </script>
 {% endblock %}
