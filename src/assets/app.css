@@ -222,7 +222,7 @@
 }
 
 @utility page-header {
-  @apply flex justify-between items-center mb-6 pb-4;
+  @apply flex justify-between items-center mb-6;
 }
 
 @utility no-scrollbar {
@@ -311,6 +311,17 @@
 }
 
 @layer components {
+  /* Normalize spacing below page headers when nav is absent */
+  .page-header > :last-child:empty {
+    height: 2.5rem; /* reserve space equivalent to repo subnav height */
+  }
+
+  /* On small screens, header stacks so don't reserve extra space */
+  @media (max-width: 640px) {
+    .page-header > :last-child:empty {
+      height: 0;
+    }
+  }
   /* Table styles */
   table {
     @apply w-full border-collapse bg-white dark:bg-gray-800/30;
