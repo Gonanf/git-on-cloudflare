@@ -706,7 +706,8 @@ export function registerUiRoutes(router: ReturnType<typeof AutoRouter>) {
         () => {
           const isOid = OID_RE.test(ref);
           const isTag = ref.startsWith("refs/tags/");
-          return isOid || isTag ? 3600 : 60;
+          // Branch commits: 300s; Tags/OIDs (immutable): 3600s
+          return isOid || isTag ? 3600 : 300;
         },
         ctx
       );

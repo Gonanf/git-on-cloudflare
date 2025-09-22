@@ -167,10 +167,12 @@
           HEAD
         </div>
         <div class="font-mono text-sm">
-          {% if head.target %}
+          {% if head and head.target %}
             {{ head.target | replace: 'refs/heads/', '' | replace: 'refs/tags/', '' }}
-          {% else %}
+          {% elsif head and head.unborn %}
             <span class="text-gray-500">unborn</span>
+          {% else %}
+            <span class="text-gray-500">unknown</span>
           {% endif %}
         </div>
       </div>

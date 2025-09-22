@@ -4,7 +4,7 @@ import type { CacheContext } from "@/cache/index.ts";
 import { parseCommitText } from "@/git/core/commitParse.ts";
 import { packIndexKey } from "@/keys.ts";
 import { getPackCandidates } from "./packDiscovery.ts";
-import { getLimiter, countSubrequest } from "./limits.ts";
+import { getLimiter, countSubrequest, MAX_SIMULTANEOUS_CONNECTIONS } from "./limits.ts";
 import { createMemPackFs, createStubLooseLoader } from "@/git/pack/index.ts";
 import { buildObjectCacheKey, cacheOrLoadObject, cachePutObject } from "@/cache/index.ts";
 import { createLogger, createInflateStream, getRepoStub, BinaryHeap } from "@/common/index.ts";
@@ -184,17 +184,38 @@ export async function listCommitsFirstParentRange(
     }
   }
   if (!oid) throw new Error("Ref not found");
-  const out: CommitInfo[] = [];
   const seen = new Set<string>();
+
+  // Phase 1: Walk first-parent chain just to collect the target OIDs for the requested window
+  // We minimize per-step parsing by using readCommit to extract parents and avoid formatting work.
+  // This remains inherently sequential because the parent OID of each commit is discovered from
+  // the previous object. The heavy object reads and formatting are deferred to Phase 2 below.
+  const targetOids: string[] = [];
   let index = 0;
-  while (oid && !seen.has(oid) && out.length < limit) {
+  while (oid && !seen.has(oid) && targetOids.length < limit) {
     seen.add(oid);
-    const info = await readCommitInfo(env, repoId, oid, cacheCtx);
     if (index >= offset) {
-      out.push(info);
+      targetOids.push(oid);
     }
+    // Read minimal commit header to advance along first-parent chain.
+    // This will leverage cacheCtx.memo/object cache and reuse any pack files discovered
+    // by earlier reads inside this request.
+    const c = await readCommit(env, repoId, oid, cacheCtx);
     index++;
-    oid = info.parents[0];
+    oid = c.parents[0];
+  }
+  if (targetOids.length === 0) return [];
+
+  // Phase 2: Fetch full CommitInfo for the collected OIDs with bounded concurrency.
+  // Downstream DO/R2 calls already use a per-request SubrequestLimiter (MAX_SIMULTANEOUS_CONNECTIONS),
+  // and pack discovery uses RequestMemo to coalesce. We still chunk here to avoid creating too many
+  // simultaneous promise chains and to align with platform connection limits.
+  const out: CommitInfo[] = [];
+  const CONCURRENCY = Math.max(1, Math.min(MAX_SIMULTANEOUS_CONNECTIONS, 6));
+  for (let i = 0; i < targetOids.length; i += CONCURRENCY) {
+    const batch = targetOids.slice(i, i + CONCURRENCY);
+    const infos = await Promise.all(batch.map((q) => readCommitInfo(env, repoId, q, cacheCtx)));
+    out.push(...infos);
   }
   return out;
 }
