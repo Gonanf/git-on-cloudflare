@@ -15,6 +15,7 @@ import { createLogger } from "@/common/index.ts";
 import { asTypedStorage, objKey } from "./repoState.ts";
 import { loadIdxParsed } from "@/git/pack/idxCache.ts";
 import { getConfig } from "./repoConfig.ts";
+import { getEpochFromWorkId, parseEpochFromHydrPackKey, calculateStableEpochs } from "./packs.ts";
 import { ensureScheduled } from "./scheduler.ts";
 import {
   getDb,
@@ -79,6 +80,38 @@ function nowMs() {
 }
 
 /**
+ * Compute the stable hydration window (pack keys) based on stable epochs and cfg.
+ * Includes lastPackKey only when it is a hydration pack in a stable epoch.
+ */
+async function computeStableHydrationWindow(
+  store: ReturnType<typeof asTypedStorage<RepoStateSchema>>,
+  cfg: ReturnType<typeof getHydrConfig>
+): Promise<{ window: string[]; lastPackKey: string | null }> {
+  const lastPackKey = (await store.get("lastPackKey")) || null;
+  const packListRaw = (await store.get("packList")) || [];
+  const packList = Array.isArray(packListRaw) ? packListRaw : [];
+
+  const { stableEpochs } = calculateStableEpochs(packList, cfg.keepPacks, lastPackKey || undefined);
+  const stableSet = new Set(stableEpochs);
+
+  const hydra: string[] = [];
+  for (const k of packList) {
+    const e = parseEpochFromHydrPackKey(k);
+    if (e && stableSet.has(e)) hydra.push(k);
+  }
+
+  // Optionally include last when it's a hydration pack in a stable epoch
+  const lbase = normalizePackKey(lastPackKey || "");
+  const lastEpoch = lastPackKey ? parseEpochFromHydrPackKey(lastPackKey) : null;
+  if (lastPackKey && lbase.startsWith("pack-hydr-") && lastEpoch && stableSet.has(lastEpoch)) {
+    hydra.unshift(lastPackKey);
+  }
+
+  const window = hydra.slice(0, cfg.windowMax);
+  return { window, lastPackKey };
+}
+
+/**
  * Populate per-work coverage table hydr_cover(work_id, oid) from hydration window packs.
  * Only includes packs whose basename starts with 'pack-hydr-'. Optionally includes
  * lastPackOids when lastPackKey is a hydration pack.
@@ -96,19 +129,8 @@ async function ensureHydrCoverForWork(
     if (exists) return;
   } catch {}
 
-  // Build hydration-only window list
-  const lastPackKey = (await store.get("lastPackKey")) || null;
-  const packListRaw = (await store.get("packList")) || [];
-  const hydra: string[] = [];
-  if (Array.isArray(packListRaw)) {
-    for (const k of packListRaw) {
-      const base = normalizePackKey(k);
-      if (base.startsWith("pack-hydr-")) hydra.push(k);
-    }
-  }
-  const lbase = normalizePackKey(lastPackKey || "");
-  if (lastPackKey && lbase.startsWith("pack-hydr-")) hydra.unshift(lastPackKey);
-  const window = hydra.slice(0, cfg.windowMax);
+  // Build hydration-only window list (stable epochs only)
+  const { window, lastPackKey } = await computeStableHydrationWindow(store, cfg);
 
   // Insert memberships into hydr_cover (chunking handled by helper)
   for (const pk of window) {
@@ -119,8 +141,12 @@ async function ensureHydrCoverForWork(
     } catch {}
   }
 
-  // Include recent lastPackOids when last pack is hydration
-  if (lastPackKey && lbase.startsWith("pack-hydr-")) {
+  // Include recent lastPackOids only when last pack is included in the stable window and is hydration
+  const includeLastOids =
+    !!lastPackKey &&
+    normalizePackKey(lastPackKey).startsWith("pack-hydr-") &&
+    window.includes(lastPackKey);
+  if (includeLastOids) {
     try {
       const last = ((await store.get("lastPackOids")) || []).slice(0, 10000);
       const oids = (Array.isArray(last) ? last : []).map((oid: string) => oid.toLowerCase());
@@ -143,18 +169,7 @@ async function buildHydrationCoverageSet(
   const covered = new Set<string>();
   try {
     const db = getDb(state.storage);
-    const lastPackKey = (await store.get("lastPackKey")) || null;
-    const packListRaw = (await store.get("packList")) || [];
-    const hydra: string[] = [];
-    if (Array.isArray(packListRaw)) {
-      for (const k of packListRaw) {
-        const base = normalizePackKey(k);
-        if (base.startsWith("pack-hydr-")) hydra.push(k);
-      }
-    }
-    const lbase = normalizePackKey(lastPackKey || "");
-    if (lastPackKey && lbase.startsWith("pack-hydr-")) hydra.unshift(lastPackKey);
-    const window = hydra.slice(0, cfg.windowMax);
+    const { window, lastPackKey } = await computeStableHydrationWindow(store, cfg);
     // Load coverage from SQLite pack_objects to avoid large KV values
     try {
       if (window.length > 0) {
@@ -165,7 +180,11 @@ async function buildHydrationCoverageSet(
         }
       }
     } catch {}
-    if (lastPackKey && lbase.startsWith("pack-hydr-")) {
+    const includeLastOids =
+      !!lastPackKey &&
+      normalizePackKey(lastPackKey).startsWith("pack-hydr-") &&
+      window.includes(lastPackKey);
+    if (includeLastOids) {
       const last = (await store.get("lastPackOids")) || [];
       for (const x of last.slice(0, 10000)) covered.add(x.toLowerCase());
     }
@@ -441,6 +460,7 @@ function getHydrConfig(env: Env) {
     unpackDelayMs: base.unpackDelayMs,
     unpackBackoffMs: base.unpackBackoffMs,
     chunk: base.unpackChunkSize,
+    keepPacks: base.keepPacks,
     windowMax,
   };
 }
@@ -1172,7 +1192,8 @@ async function buildSegmentSlice(
 
   // Generate a new hydration pack key
   const seq = (work.progress?.segmentSeq ?? 0) + 1;
-  const packKey = r2PackKey(prefix, `pack-hydr-${Date.now()}-${seq}.pack`);
+  const epoch = getEpochFromWorkId(work.workId);
+  const packKey = r2PackKey(prefix, `pack-hydr-${epoch}-${seq}.pack`);
 
   // Store the pack to R2
   try {

@@ -293,7 +293,7 @@ async function updateUnpackProgress(
           totalCount: count,
           processedCount: 0,
           startedAt: Date.now(),
-        } as any);
+        } as UnpackWork);
         await store.delete("unpackNext");
         // Schedule next alarm soon to continue unpacking
         await scheduleAlarmIfSooner(ctx, env, Date.now() + cfg.unpackDelayMs);

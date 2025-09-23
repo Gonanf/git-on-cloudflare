@@ -19,6 +19,7 @@ import { r2PackDirPrefix, isPackKey, packIndexKey, doPrefix } from "@/keys.ts";
 import { ensureScheduled } from "./scheduler.ts";
 import { getConfig } from "./repoConfig.ts";
 import { enqueueHydrationTask } from "./hydration.ts";
+import { calculateStableEpochs } from "./packs.ts";
 
 /**
  * Handles idle cleanup and periodic maintenance tasks
@@ -182,7 +183,7 @@ async function performMaintenance(
     // Deletes older packs beyond the keep-window from both DO metadata and R2,
     // and keeps `lastPackKey/lastPackOids` consistent
     const prefix = doPrefix(ctx.id.toString());
-    await runMaintenance(ctx, env, prefix, keepPacks, logger as any);
+    await runMaintenance(ctx, env, prefix, keepPacks, logger);
     await store.put("lastMaintenanceMs", now);
   } catch (e) {
     logger?.error("maintenance:failed", { error: String(e) });
@@ -223,32 +224,9 @@ async function runMaintenance(
     }
   } catch {}
 
-  // Determine which packs to keep
-  // Prioritize keep selection to reduce oscillation:
-  // K = [lastPackKey, hydration packs (in original order), normal packs (in original order)], deduped
+  // Determine which packs to keep using epoch-aware selection with soft KEEP_PACKS
   const currentLast = (await store.get("lastPackKey")) || undefined;
-  const seen = new Set<string>();
-  const prioritized: string[] = [];
-  function push(k: string | undefined) {
-    if (!k) return;
-    if (!seen.has(k)) {
-      seen.add(k);
-      prioritized.push(k);
-    }
-  }
-  const hydration: string[] = [];
-  const normal: string[] = [];
-  for (const k of packList) {
-    const base = normalizePackKey(k);
-    if (base.startsWith("pack-hydr-")) hydration.push(k);
-    else normal.push(k);
-  }
-  // Build prioritized list
-  push(currentLast);
-  for (const k of hydration) push(k);
-  for (const k of normal) push(k);
-  const keep = prioritized.slice(0, keepPacks);
-  const keepSet = new Set(keep);
+  const { keepSet } = calculateStableEpochs(packList, keepPacks, currentLast);
   const removed = packList.filter((k) => !keepSet.has(k));
   const newList = packList.filter((k) => keepSet.has(k));
   // Track whether any hydration packs (pack-hydr-*) were pruned; used to decide whether we
@@ -263,7 +241,7 @@ async function runMaintenance(
   const lastPackKey = await store.get("lastPackKey");
   if (!lastPackKey || !keepSet.has(lastPackKey)) {
     // Choose the newest kept pack as the latest reference
-    const newest = keep[0];
+    const newest = newList[0];
     if (newest) {
       await store.put("lastPackKey", newest);
       // Load OIDs from SQLite for the newest pack via DAL

@@ -491,13 +491,13 @@ export async function readPath(
       const size = await limiter.run("do:getObjectSize", async () => {
         if (!countSubrequest(cacheCtx)) {
           log.warn("soft-budget-exhausted", { op: "do:getObjectSize", oid: ent.oid });
-          return null as any;
+          return null;
         }
         try {
           return await stub.getObjectSize(ent.oid);
         } catch (e) {
           log.debug("do:getObjectSize:error", { error: String(e), oid: ent.oid });
-          return null as any;
+          return null;
         }
       });
       if (size === null) throw new Error("Blob not found");
