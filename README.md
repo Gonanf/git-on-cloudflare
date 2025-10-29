@@ -3,6 +3,9 @@
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-f38020?logo=cloudflare&logoColor=white)](https://developers.cloudflare.com/workers/)
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/zllovesuki/git-on-cloudflare)
 
+## Fork
+This fork removes the UI (For cornish) and replaces it.
+
 **A Git Smart HTTP v2 server running entirely on Cloudflare Workers** — no VMs, no containers, just Durable Objects and R2.
 
 Host unlimited private Git repositories at the edge with <50ms response times globally. Full Git compatibility, modern web UI, and usage-based pricing that actually makes sense.
