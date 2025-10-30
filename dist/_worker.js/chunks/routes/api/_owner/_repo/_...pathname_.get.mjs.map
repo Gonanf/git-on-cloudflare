@@ -1,1 +1,0 @@
-{"version":3,"file":"_...pathname_.get.mjs","sources":["../../../../../../../server/api/[owner]/[repo]/[...pathname].get.ts"],"sourcesContent":null,"names":["____pathname__get","eventHandler","async","event","pathname","getRouterParams"],"mappings":"uDACA,MAAAA,EAAAC,EAAAC,MAAAC,IACA,MAAAC,SAAAA,GAAAC,EAAAF"}

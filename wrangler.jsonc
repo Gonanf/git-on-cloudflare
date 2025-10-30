@@ -69,9 +69,9 @@
   // Static assets served from src/assets and accessible via env.ASSETS
   "assets": {
     "binding": "ASSETS",
-    "directory": "dist",
+    "directory": "src/assets",
     // Prevent assets layer from mapping /auth -> auth.html (Worker should handle /auth)
-    "html_handling": "false"
+    "html_handling": "none"
   },
   // Environment variables (text/JSON)
   "vars": {

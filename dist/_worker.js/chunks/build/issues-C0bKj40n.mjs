@@ -1,2 +1,0 @@
-import{_ as s,v as e}from"./server.mjs";import"../nitro/nitro.mjs";import"../routes/renderer.mjs";import"../_/shared.esm-bundler.mjs";const o={};const r=o.setup;o.setup=(s,o)=>{const t=e.useSSRContext();return(t.modules||(t.modules=new Set)).add("pages/[Usuario]/[Repositorio]/issues.vue"),r?r(s,o):void 0};const t=s(o,[["ssrRender",function(s,e,o,r){}]]);export{t as default};
-//# sourceMappingURL=issues-C0bKj40n.mjs.map
