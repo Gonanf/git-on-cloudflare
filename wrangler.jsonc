@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "git-on-cloudflare",
+  "name": "git-on-cloudflare-cornish",
   "main": "src/index.ts",
   "compatibility_date": "2025-09-02",
   "compatibility_flags": [
@@ -9,7 +9,7 @@
   "workers_dev": false,
   "routes": [
     {
-      "pattern": "git-on-cloudflare.com",
+      "pattern": "cornish_git.boldwave.org",
       "custom_domain": true
     }
   ],
@@ -54,13 +54,13 @@
   "kv_namespaces": [
     {
       "binding": "OWNER_REGISTRY",
-      "id": "2e6769b1e1cf488d8055a7fb4ecbd0f3"
+      "id": "4a905de875af44a4aee6c657d043e0a0"
     }
   ],
   "r2_buckets": [
     {
       "binding": "REPO_BUCKET",
-      "bucket_name": "git-repos"
+      "bucket_name": "pruebas"
     }
   ],
   "observability": {
@@ -69,9 +69,9 @@
   // Static assets served from src/assets and accessible via env.ASSETS
   "assets": {
     "binding": "ASSETS",
-    "directory": "src/assets",
+    "directory": "dist",
     // Prevent assets layer from mapping /auth -> auth.html (Worker should handle /auth)
-    "html_handling": "none"
+    "html_handling": "false"
   },
   // Environment variables (text/JSON)
   "vars": {

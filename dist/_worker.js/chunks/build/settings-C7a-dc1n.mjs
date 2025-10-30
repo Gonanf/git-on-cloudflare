@@ -1,0 +1,2 @@
+import{_ as s,v as e}from"./server.mjs";import"../nitro/nitro.mjs";import"../routes/renderer.mjs";import"../_/shared.esm-bundler.mjs";const t={};const o=t.setup;t.setup=(s,t)=>{const r=e.useSSRContext();return(r.modules||(r.modules=new Set)).add("pages/[Usuario]/[Repositorio]/settings.vue"),o?o(s,t):void 0};const r=s(t,[["ssrRender",function(s,e,t,o){}]]);export{r as default};
+//# sourceMappingURL=settings-C7a-dc1n.mjs.map

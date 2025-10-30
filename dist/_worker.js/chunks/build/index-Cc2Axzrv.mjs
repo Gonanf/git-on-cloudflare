@@ -1,0 +1,2 @@
+import{_ as e,v as s}from"./server.mjs";import"../nitro/nitro.mjs";import"../routes/renderer.mjs";import"../_/shared.esm-bundler.mjs";const t={};const r=t.setup;t.setup=(e,t)=>{const o=s.useSSRContext();return(o.modules||(o.modules=new Set)).add("pages/auth/index.vue"),r?r(e,t):void 0};const o=e(t,[["ssrRender",function(e,s,t,r){}]]);export{o as default};
+//# sourceMappingURL=index-Cc2Axzrv.mjs.map

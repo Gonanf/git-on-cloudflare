@@ -1,0 +1,2 @@
+import{_ as s,v as e}from"./server.mjs";import"../nitro/nitro.mjs";import"../routes/renderer.mjs";import"../_/shared.esm-bundler.mjs";const r={};const o=r.setup;r.setup=(s,r)=>{const t=e.useSSRContext();return(t.modules||(t.modules=new Set)).add("pages/[Usuario]/[Repositorio]/branchs.vue"),o?o(s,r):void 0};const t=s(r,[["ssrRender",function(s,e,r,o){}]]);export{t as default};
+//# sourceMappingURL=branchs-Bc_aNAcc.mjs.map
