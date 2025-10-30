@@ -1,8 +1,8 @@
 import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
+import type { RepoDurableObject } from "$/index";
 import * as git from "isomorphic-git";
-import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
+import { asTypedStorage, RepoStateSchema } from "$/do/repo/repoState.ts";
 import {
   concatChunks,
   createMemPackFs,
@@ -11,10 +11,10 @@ import {
   flushPkt,
   pktLine,
   decodePktLines,
-} from "@/git";
+} from "$/git";
 import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
-import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
-import { deflate, inflate } from "@/common/index.ts";
+import { getDb, insertPackOids } from "$/do/repo/db/index.ts";
+import { deflate, inflate } from "$/common/index.ts";
 
 async function readLoose(
   getStub: () => DurableObjectStub<RepoDurableObject>,

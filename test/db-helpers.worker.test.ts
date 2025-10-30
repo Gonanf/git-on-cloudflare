@@ -1,4 +1,4 @@
-import type { RepoDurableObject } from "@/index";
+import type { RepoDurableObject } from "$/index";
 
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
@@ -17,7 +17,7 @@ import {
   hydrPending,
   getPackOids,
   getHydrCoverCount,
-} from "@/do/repo/db/index.ts";
+} from "$/do/repo/db/index.ts";
 
 function oidFor(i: number): string {
   // Generate unique, deterministic 40-hex strings by left-padding base16

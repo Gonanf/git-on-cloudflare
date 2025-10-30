@@ -1,11 +1,11 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
+import { asTypedStorage, RepoStateSchema } from "$/do/repo/repoState.ts";
 import { runDOWithRetry } from "./util/test-helpers.ts";
-import { getDb, insertPackOids, getHydrCoverOids } from "@/do/repo/db/index.ts";
-import { enqueueHydrationTask, processHydrationSlice } from "@/do/repo/hydration.ts";
-import { calculateStableEpochs } from "@/do/repo/packs.ts";
-import type { RepoDurableObject } from "@/do";
+import { getDb, insertPackOids, getHydrCoverOids } from "$/do/repo/db/index.ts";
+import { enqueueHydrationTask, processHydrationSlice } from "$/do/repo/hydration.ts";
+import { calculateStableEpochs } from "$/do/repo/packs.ts";
+import type { RepoDurableObject } from "$/do";
 
 it("hydration coverage: seeds only from stable epochs", async () => {
   const repoId = `cov/${Math.random().toString(36).slice(2, 8)}`;

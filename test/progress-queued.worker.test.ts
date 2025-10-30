@@ -1,9 +1,9 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
-import { getUnpackProgress } from "@/common";
+import { asTypedStorage, RepoStateSchema } from "$/do/repo/repoState.ts";
+import { getUnpackProgress } from "$/common";
 import { runDOWithRetry } from "./util/test-helpers.ts";
-import type { RepoDurableObject } from "@/index";
+import type { RepoDurableObject } from "$/index";
 
 it("/unpack-progress reports queued-only state and getUnpackProgress returns it", async () => {
   const repoId = `qonly/${Math.random().toString(36).slice(2, 8)}`;

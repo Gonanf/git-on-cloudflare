@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
 import { uniqueRepoId } from "./util/test-helpers.ts";
-import { decodePktLines } from "@/git";
+import { decodePktLines } from "$/git";
 
 it("advertises receive-pack refs with capabilities (atomic, report-status, ofs-delta)", async () => {
   const owner = "o";

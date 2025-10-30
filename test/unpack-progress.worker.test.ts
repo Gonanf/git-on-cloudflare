@@ -1,14 +1,14 @@
 import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import { decodePktLines, pktLine, flushPkt, concatChunks } from "@/git";
+import { decodePktLines, pktLine, flushPkt, concatChunks } from "$/git";
 import {
   uniqueRepoId,
   runDOWithRetry,
   callStubWithRetry,
   withEnvOverrides,
 } from "./util/test-helpers.ts";
-import type { RepoDurableObject } from "@/index";
-import type { UnpackProgress } from "@/common";
+import type { RepoDurableObject } from "$/index";
+import type { UnpackProgress } from "$/common";
 
 async function deflateRaw(data: Uint8Array): Promise<Uint8Array> {
   const cs: any = new (globalThis as any).CompressionStream("deflate");

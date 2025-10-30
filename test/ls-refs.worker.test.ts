@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { SELF, env } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { decodePktLines } from "@/git";
+import type { RepoDurableObject } from "$/index";
+import { decodePktLines } from "$/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 function pktLine(s: string | Uint8Array): Uint8Array {

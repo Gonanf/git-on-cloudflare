@@ -4,7 +4,7 @@
 
 import { parseGitObject, type GitObjectType } from "./objects.ts";
 import { parseCommitText } from "./commitParse.ts";
-import { createInflateStream, bytesToHex } from "@/common/index.ts";
+import { createInflateStream, bytesToHex } from "$/common/index.ts";
 
 const td = new TextDecoder();
 

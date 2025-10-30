@@ -1,16 +1,16 @@
-import type { GitObjectType } from "@/git/core/index.ts";
-import type { Logger } from "@/common/index.ts";
-import type { CacheContext } from "@/cache/index.ts";
-import type { RepoDurableObject } from "@/index.ts";
+import type { GitObjectType } from "$/git/core/index.ts";
+import type { Logger } from "$/common/index.ts";
+import type { CacheContext } from "$/cache/index.ts";
+import type { RepoDurableObject } from "$/index.ts";
 
-import { pktLine, flushPkt, delimPkt, concatChunks } from "@/git/core/index.ts";
-import { getRepoStub, createLogger, createInflateStream } from "@/common/index.ts";
-import { assemblePackFromMultiplePacks, assemblePackFromR2 } from "@/git/pack/assembler.ts";
+import { pktLine, flushPkt, delimPkt, concatChunks } from "$/git/core/index.ts";
+import { getRepoStub, createLogger, createInflateStream } from "$/common/index.ts";
+import { assemblePackFromMultiplePacks, assemblePackFromR2 } from "$/git/pack/assembler.ts";
 import { readLooseObjectRaw } from "./read.ts";
 import { getPackCandidates } from "./packDiscovery.ts";
 import { getLimiter, countSubrequest } from "./limits.ts";
 import { beginClosurePhase, endClosurePhase } from "./heavyMode.ts";
-import { buildPackV2 } from "@/git/pack/index.ts";
+import { buildPackV2 } from "$/git/pack/index.ts";
 import { parseFetchArgs } from "./args.ts";
 import {
   findCommonHaves,

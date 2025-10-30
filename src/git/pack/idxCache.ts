@@ -1,4 +1,4 @@
-import { packIndexKey } from "@/keys.ts";
+import { packIndexKey } from "$/keys.ts";
 import { type IdxParsed, parseIdxV2 } from "./packMeta.ts";
 
 // --- In-process LRU cache for parsed .idx files (ephemeral per isolate) ---

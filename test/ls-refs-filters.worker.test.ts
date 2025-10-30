@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { env, SELF } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { pktLine, delimPkt, flushPkt, concatChunks, encodeGitObjectAndDeflate } from "@/git";
+import type { RepoDurableObject } from "$/index";
+import { pktLine, delimPkt, flushPkt, concatChunks, encodeGitObjectAndDeflate } from "$/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 function buildLsRefsBody(args: string[] = []) {
@@ -57,7 +57,7 @@ it("ls-refs: ref-prefix filters refs and peel adds peeled attribute for annotate
   } as any);
   expect(res.status).toBe(200);
   const bytes = new Uint8Array(await res.arrayBuffer());
-  const lines = (await import("@/git"))
+  const lines = (await import("$/git"))
     .decodePktLines(bytes)
     .filter((i: any) => i.type === "line")
     .map((i: any) => i.text);

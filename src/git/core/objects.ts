@@ -2,8 +2,8 @@
  * Git object encoding/decoding utilities
  */
 
-import { bytesToHex } from "@/common/hex.ts";
-import { deflate } from "@/common/compression.ts";
+import { bytesToHex } from "$/common/hex.ts";
+import { deflate } from "$/common/compression.ts";
 
 /**
  * Git object types

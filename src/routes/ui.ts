@@ -1,7 +1,7 @@
-import type { TreeEntry, HeadInfo, Ref } from "@/git";
-import type { CacheContext } from "@/cache";
-import type { debugState } from "@/do/repo/debug";
-import { getConfig } from "@/do/repo/repoConfig.ts";
+import type { TreeEntry, HeadInfo, Ref } from "$/git";
+import type { CacheContext } from "$/cache";
+import type { debugState } from "$/do/repo/debug";
+import { getConfig } from "$/do/repo/repoConfig.ts";
 
 import { AutoRouter } from "itty-router";
 import {
@@ -11,8 +11,8 @@ import {
   listMergeSideFirstParent,
   readCommitInfo,
   readBlobStream,
-} from "@/git";
-import { repoKey } from "@/keys";
+} from "$/git";
+import { repoKey } from "$/keys";
 import {
   detectBinary,
   formatSize,
@@ -28,12 +28,12 @@ import {
   OID_RE,
   getContentTypeFromName,
   HttpError,
-} from "@/web";
-import { listReposForOwner } from "@/registry";
-import { buildCacheKeyFrom, cacheOrLoadJSON, cacheOrLoadJSONWithTTL } from "@/cache";
-import { handleError } from "@/web/templates";
-import { getUnpackProgress, getRepoStub } from "@/common";
-import { verifyAuth } from "@/auth";
+} from "$/web";
+import { listReposForOwner } from "$/registry";
+import { buildCacheKeyFrom, cacheOrLoadJSON, cacheOrLoadJSONWithTTL } from "$/cache";
+import { handleError } from "$/web/templates";
+import { getUnpackProgress, getRepoStub } from "$/common";
+import { verifyAuth } from "$/auth";
 
 // Shorthand for 400 Bad Request using the shared error handler
 async function badRequest(

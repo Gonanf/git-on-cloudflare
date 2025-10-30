@@ -5,8 +5,8 @@ const baseURL = pathToFileURL(resolvePath(fileURLToPath(import.meta.url), "../..
 
 export async function resolve(specifier, context, nextResolve) {
   // Handle @ alias
-  if (specifier.startsWith("@/")) {
-    const newSpecifier = specifier.replace("@/", baseURL + "/");
+  if (specifier.startsWith("$/")) {
+    const newSpecifier = specifier.replace("$/", baseURL + "/");
     return nextResolve(newSpecifier, context);
   }
 

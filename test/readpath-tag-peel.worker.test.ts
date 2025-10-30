@@ -1,10 +1,10 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
+import type { RepoDurableObject } from "$/index";
+import { asTypedStorage, type RepoStateSchema } from "$/do/repo/repoState.ts";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
-import { readPath } from "@/git/operations/read.ts";
-import { encodeGitObject } from "@/git/core/objects.ts";
+import { readPath } from "$/git/operations/read.ts";
+import { encodeGitObject } from "$/git/core/objects.ts";
 
 it("readPath resolves tag to its target commit tree (tag peel)", async () => {
   const owner = "o";

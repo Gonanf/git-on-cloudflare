@@ -6,7 +6,7 @@
  */
 
 import type { RepoStateSchema } from "./repoState.ts";
-import type { Logger } from "@/common/logger.ts";
+import type { Logger } from "$/common/logger.ts";
 
 import { asTypedStorage } from "./repoState.ts";
 import { getDb } from "./db/client.ts";
@@ -15,7 +15,7 @@ import {
   getPackOids as getPackOidsHelper,
   normalizePackKey,
 } from "./db/index.ts";
-import { r2PackDirPrefix, isPackKey, packIndexKey, doPrefix } from "@/keys.ts";
+import { r2PackDirPrefix, isPackKey, packIndexKey, doPrefix } from "$/keys.ts";
 import { ensureScheduled } from "./scheduler.ts";
 import { getConfig } from "./repoConfig.ts";
 import { enqueueHydrationTask } from "./hydration.ts";

@@ -1,5 +1,5 @@
 import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
-import type { Logger } from "@/common/logger.ts";
+import type { Logger } from "$/common/logger.ts";
 
 import { packOidsKey, asTypedStorage, type RepoStateSchema } from "../repoState.ts";
 import { insertPackOids, getPackObjectCount, normalizePackKeysInPlace } from "./dal.ts";

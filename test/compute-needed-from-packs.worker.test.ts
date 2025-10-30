@@ -1,12 +1,12 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
 import * as git from "isomorphic-git";
-import type { RepoDurableObject } from "@/index";
-import { computeNeeded } from "@/git";
-import { createMemPackFs } from "@/git";
-import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
+import type { RepoDurableObject } from "$/index";
+import { computeNeeded } from "$/git";
+import { createMemPackFs } from "$/git";
+import { asTypedStorage, RepoStateSchema } from "$/do/repo/repoState.ts";
 import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
-import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
+import { getDb, insertPackOids } from "$/do/repo/db/index.ts";
 import { makeTree, makeCommit, buildPack } from "./util/test-helpers.ts";
 
 it("computeNeeded resolves closure from R2 packs when no loose objects exist", async () => {

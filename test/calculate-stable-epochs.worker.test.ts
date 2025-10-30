@@ -1,5 +1,5 @@
 import { it, expect } from "vitest";
-import { calculateStableEpochs } from "@/do/repo/packs.ts";
+import { calculateStableEpochs } from "$/do/repo/packs.ts";
 
 it("stable-epochs: preserves entire boundary-crossing epoch (soft cap)", () => {
   const last = "do/x/objects/pack/pack-999.pack";

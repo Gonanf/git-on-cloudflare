@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { env, runDurableObjectAlarm } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
+import type { RepoDurableObject } from "$/index";
 import { runDOWithRetry } from "./util/test-helpers.ts";
 
 function makeRepoId(suffix: string) {

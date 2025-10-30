@@ -6,7 +6,7 @@
  */
 
 import type { RepoStateSchema } from "./repoState.ts";
-import type { Logger } from "@/common/logger.ts";
+import type { Logger } from "$/common/logger.ts";
 
 import { asTypedStorage } from "./repoState.ts";
 import { getConfig } from "./repoConfig.ts";

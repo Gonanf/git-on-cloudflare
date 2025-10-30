@@ -1,12 +1,12 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
+import type { RepoDurableObject } from "$/index";
 
-import { asTypedStorage, type RepoStateSchema, packOidsKey } from "@/do/repo/repoState.ts";
-import { doPrefix, r2PackKey } from "@/keys.ts";
-import { getDb, packObjects, getPackOids, normalizePackKeysInPlace } from "@/do/repo/db/index.ts";
+import { asTypedStorage, type RepoStateSchema, packOidsKey } from "$/do/repo/repoState.ts";
+import { doPrefix, r2PackKey } from "$/keys.ts";
+import { getDb, packObjects, getPackOids, normalizePackKeysInPlace } from "$/do/repo/db/index.ts";
 import { runDOWithRetry, uniqueRepoId } from "./util/test-helpers.ts";
-import { migrateKvToSql } from "@/do/repo/db/migrate.ts";
+import { migrateKvToSql } from "$/do/repo/db/migrate.ts";
 
 function oid(n: number): string {
   return n.toString(16).padStart(40, "0");

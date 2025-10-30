@@ -1,5 +1,5 @@
-import { packIndexKey } from "@/keys.ts";
-import { createLogger, bytesToHex } from "@/common/index.ts";
+import { packIndexKey } from "$/keys.ts";
+import { createLogger, bytesToHex } from "$/common/index.ts";
 
 export type IdxParsed = { oids: string[]; offsets: number[] };
 

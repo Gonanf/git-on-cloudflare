@@ -1,12 +1,12 @@
-import { packIndexKey } from "@/keys.ts";
-import { hexToBytes, createLogger } from "@/common/index.ts";
+import { packIndexKey } from "$/keys.ts";
+import { hexToBytes, createLogger } from "$/common/index.ts";
 import {
   encodeOfsDeltaDistance,
   mapWithConcurrency,
   readPackHeaderEx,
   readPackHeaderExFromBuf,
   readPackRange,
-} from "@/git/pack/packMeta.ts";
+} from "$/git/pack/packMeta.ts";
 import { loadIdxParsed } from "./idxCache.ts";
 
 /**

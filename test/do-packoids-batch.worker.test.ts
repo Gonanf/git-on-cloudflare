@@ -1,9 +1,9 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
+import type { RepoDurableObject } from "$/index";
+import { asTypedStorage, type RepoStateSchema } from "$/do/repo/repoState.ts";
 import { uniqueRepoId, runDOWithRetry, callStubWithRetry } from "./util/test-helpers.ts";
-import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
+import { getDb, insertPackOids } from "$/do/repo/db/index.ts";
 
 it("getPackOidsBatch returns membership for multiple keys and [] for missing", async () => {
   const owner = "o";

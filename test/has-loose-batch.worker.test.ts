@@ -1,6 +1,6 @@
 import { it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
+import type { RepoDurableObject } from "$/index";
 
 function randomOid() {
   return "deadbeef".repeat(5).slice(0, 40);

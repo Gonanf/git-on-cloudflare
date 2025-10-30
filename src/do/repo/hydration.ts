@@ -5,15 +5,15 @@ import type {
   HydrationStage,
   HydrationReason,
 } from "./repoState.ts";
-import type { GitObjectType } from "@/git/core/index.ts";
-import type { Logger } from "@/common/logger.ts";
+import type { GitObjectType } from "$/git/core/index.ts";
+import type { Logger } from "$/common/logger.ts";
 
-import { indexPackOnly, readPackHeaderEx, buildPackV2 } from "@/git/pack/index.ts";
-import { inflateAndParseHeader } from "@/git/core/index.ts";
-import { r2PackKey, packIndexKey, getDoIdFromPath } from "@/keys.ts";
-import { createLogger } from "@/common/index.ts";
+import { indexPackOnly, readPackHeaderEx, buildPackV2 } from "$/git/pack/index.ts";
+import { inflateAndParseHeader } from "$/git/core/index.ts";
+import { r2PackKey, packIndexKey, getDoIdFromPath } from "$/keys.ts";
+import { createLogger } from "$/common/index.ts";
 import { asTypedStorage, objKey } from "./repoState.ts";
-import { loadIdxParsed } from "@/git/pack/idxCache.ts";
+import { loadIdxParsed } from "$/git/pack/idxCache.ts";
 import { getConfig } from "./repoConfig.ts";
 import { getEpochFromWorkId, parseEpochFromHydrPackKey, calculateStableEpochs } from "./packs.ts";
 import { ensureScheduled } from "./scheduler.ts";

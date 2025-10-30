@@ -1,13 +1,13 @@
-import type { Head, RepoStateSchema, TypedStorage } from "@/do/repo/repoState.ts";
+import type { Head, RepoStateSchema, TypedStorage } from "$/do/repo/repoState.ts";
 
-import { parsePktSection, pktLine, flushPkt, concatChunks } from "@/git/core/pktline.ts";
-import { indexPackOnly, createMemPackFs, createLooseLoader } from "@/git/pack/index.ts";
-import { asTypedStorage, objKey } from "@/do/repo/repoState.ts";
-import { r2PackKey, r2LooseKey, packIndexKey } from "@/keys.ts";
-import { scheduleAlarmIfSooner } from "@/do/repo/scheduler.ts";
+import { parsePktSection, pktLine, flushPkt, concatChunks } from "$/git/core/pktline.ts";
+import { indexPackOnly, createMemPackFs, createLooseLoader } from "$/git/pack/index.ts";
+import { asTypedStorage, objKey } from "$/do/repo/repoState.ts";
+import { r2PackKey, r2LooseKey, packIndexKey } from "$/keys.ts";
+import { scheduleAlarmIfSooner } from "$/do/repo/scheduler.ts";
 import * as git from "isomorphic-git";
-import { createLogger } from "@/common/index.ts";
-import { getDb, oidExistsInPacks, insertPackOids } from "@/do/repo/db/index.ts";
+import { createLogger } from "$/common/index.ts";
+import { getDb, oidExistsInPacks, insertPackOids } from "$/do/repo/db/index.ts";
 
 // Connectivity check for receive-pack commands.
 // Ensures that each updated ref points to an object we can resolve immediately:

@@ -1,11 +1,11 @@
 import { it, expect } from "vitest";
 import { env, runDurableObjectAlarm } from "cloudflare:test";
-import { asTypedStorage, RepoStateSchema } from "@/do/repo/repoState.ts";
-import { getDb, insertPackOids, getPackOids } from "@/do/repo/db/index.ts";
+import { asTypedStorage, RepoStateSchema } from "$/do/repo/repoState.ts";
+import { getDb, insertPackOids, getPackOids } from "$/do/repo/db/index.ts";
 import { runDOWithRetry } from "./util/test-helpers.ts";
-import { calculateStableEpochs } from "@/do/repo/packs.ts";
-import { getConfig } from "@/do/repo/repoConfig.ts";
-import type { RepoDurableObject } from "@/do";
+import { calculateStableEpochs } from "$/do/repo/packs.ts";
+import { getConfig } from "$/do/repo/repoConfig.ts";
+import type { RepoDurableObject } from "$/do";
 
 function makeRepoId(suffix: string) {
   return `maint/${suffix}-${Math.random().toString(36).slice(2, 8)}`;

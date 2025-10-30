@@ -1,8 +1,8 @@
 import { it, expect, describe } from "vitest";
 import { env } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import type { CacheContext } from "@/cache/index.ts";
-import { computeNeededFast } from "@/git/operations/uploadStream.ts";
+import type { RepoDurableObject } from "$/index";
+import type { CacheContext } from "$/cache/index.ts";
+import { computeNeededFast } from "$/git/operations/uploadStream.ts";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 describe("computeNeededFast", () => {

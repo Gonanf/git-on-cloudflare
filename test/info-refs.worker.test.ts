@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { SELF } from "cloudflare:test";
 import { uniqueRepoId } from "./util/test-helpers.ts";
-import { decodePktLines } from "@/git";
+import { decodePktLines } from "$/git";
 
 it("advertises upload-pack v2 over info/refs", async () => {
   const owner = "o";

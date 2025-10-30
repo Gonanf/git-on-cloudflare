@@ -1,5 +1,5 @@
 import test from "ava";
-import { encodeOfsDeltaDistance } from "@/git/index.ts";
+import { encodeOfsDeltaDistance } from "$/git/index.ts";
 
 const toHex = (u8: Uint8Array) =>
   Array.from(u8)

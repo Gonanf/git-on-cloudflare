@@ -1,19 +1,19 @@
 import type { RepoStateSchema, Head } from "./repoState.ts";
-import type { UnpackProgress } from "@/common/index.ts";
+import type { UnpackProgress } from "$/common/index.ts";
 
 import { DurableObject } from "cloudflare:workers";
 import type { DrizzleSqliteDODatabase } from "drizzle-orm/durable-sqlite";
 import { asTypedStorage, objKey } from "./repoState.ts";
-import { doPrefix } from "@/keys.ts";
+import { doPrefix } from "$/keys.ts";
 import {
   encodeGitObjectAndDeflate,
   receivePack,
   buildPackV2,
   parseGitObject,
   indexPackOnly,
-} from "@/git/index.ts";
-import { text, createLogger, isValidOid, bytesToHex, createInflateStream } from "@/common/index.ts";
-import { r2PackKey } from "@/keys.ts";
+} from "$/git/index.ts";
+import { text, createLogger, isValidOid, bytesToHex, createInflateStream } from "$/common/index.ts";
+import { r2PackKey } from "$/keys.ts";
 import {
   enqueueHydrationTask,
   processHydrationSlice,
@@ -41,7 +41,7 @@ import { debugState, debugCheckCommit, debugCheckOid } from "./debug.ts";
 import { migrate } from "drizzle-orm/durable-sqlite/migrator";
 import { getDb, insertPackOids } from "./db/index.ts";
 import { migrateKvToSql } from "./db/migrate.ts";
-import migrations from "@/drizzle/migrations";
+import migrations from "$/drizzle/migrations";
 
 /**
  * Repository Durable Object (per-repo authority)

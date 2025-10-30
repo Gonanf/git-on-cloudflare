@@ -1,4 +1,4 @@
-import type { RepoDurableObject, AuthDurableObject } from "@/do/index.ts";
+import type { RepoDurableObject, AuthDurableObject } from "$/do/index.ts";
 /**
  * Get the Durable Object stub for a repository.
  * @param env - Cloudflare environment bindings

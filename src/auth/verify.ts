@@ -1,6 +1,6 @@
 // Authentication helpers shared between routes
 
-import { getAuthStub } from "@/common/stub.ts";
+import { getAuthStub } from "$/common/stub.ts";
 
 export function getBasicCredentials(req: Request): { username: string; password: string } | null {
   const h = req.headers.get("Authorization") || "";

@@ -1,4 +1,4 @@
-import type { HeadInfo, Ref } from "@/git";
+import type { HeadInfo, Ref } from "$/git";
 
 import { AutoRouter } from "itty-router";
 import {
@@ -11,13 +11,13 @@ import {
   getHeadAndRefs,
   inflateAndParseHeader,
   parseTagTarget,
-} from "@/git";
-import { handleFetchV2Streaming } from "@/git/operations/uploadStream.ts";
-import { getRepoStub } from "@/common";
-import { repoKey } from "@/keys";
-import { verifyAuth } from "@/auth";
-import { addRepoToOwner, removeRepoFromOwner } from "@/registry";
-import { buildCacheKeyFrom, cacheOrLoadJSON } from "@/cache";
+} from "$/git";
+import { handleFetchV2Streaming } from "$/git/operations/uploadStream.ts";
+import { getRepoStub } from "$/common";
+import { repoKey } from "$/keys";
+import { verifyAuth } from "$/auth";
+import { addRepoToOwner, removeRepoFromOwner } from "$/registry";
+import { buildCacheKeyFrom, cacheOrLoadJSON } from "$/cache";
 
 /**
  * Handles Git upload-pack (fetch) POST requests.

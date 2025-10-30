@@ -1,15 +1,15 @@
 import type { HeadInfo, Ref } from "./types.ts";
-import type { CacheContext } from "@/cache/index.ts";
+import type { CacheContext } from "$/cache/index.ts";
 
-import { parseCommitText } from "@/git/core/commitParse.ts";
-import { packIndexKey } from "@/keys.ts";
+import { parseCommitText } from "$/git/core/commitParse.ts";
+import { packIndexKey } from "$/keys.ts";
 import { getPackCandidates } from "./packDiscovery.ts";
 import { getLimiter, countSubrequest, MAX_SIMULTANEOUS_CONNECTIONS } from "./limits.ts";
-import { createMemPackFs, createStubLooseLoader } from "@/git/pack/index.ts";
-import { buildObjectCacheKey, cacheOrLoadObject, cachePutObject } from "@/cache/index.ts";
-import { createLogger, createInflateStream, getRepoStub, BinaryHeap } from "@/common/index.ts";
+import { createMemPackFs, createStubLooseLoader } from "$/git/pack/index.ts";
+import { buildObjectCacheKey, cacheOrLoadObject, cachePutObject } from "$/cache/index.ts";
+import { createLogger, createInflateStream, getRepoStub, BinaryHeap } from "$/common/index.ts";
 import * as git from "isomorphic-git";
-import { inflateAndParseHeader, parseTagTarget } from "@/git/core/index.ts";
+import { inflateAndParseHeader, parseTagTarget } from "$/git/core/index.ts";
 
 const LOADER_CAP = 400; // cap DO loose-loader calls per request in heavy mode (prod subrequest budget ~1000)
 

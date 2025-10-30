@@ -1,8 +1,8 @@
-import type { RepoStateSchema } from "@/do/repo/repoState.ts";
+import type { RepoStateSchema } from "$/do/repo/repoState.ts";
 
 import * as git from "isomorphic-git";
-import { asTypedStorage, objKey } from "@/do/repo/repoState.ts";
-import { getDb, insertPackOids } from "@/do/repo/db/index.ts";
+import { asTypedStorage, objKey } from "$/do/repo/repoState.ts";
+import { getDb, insertPackOids } from "$/do/repo/db/index.ts";
 import {
   doPrefix,
   r2LooseKey,
@@ -12,11 +12,11 @@ import {
   packKeyFromIndexKey,
   isPackKey,
   isIdxKey,
-} from "@/keys.ts";
-import { createLogger } from "@/common/logger.ts";
+} from "$/keys.ts";
+import { createLogger } from "$/common/logger.ts";
 import { createLooseLoader } from "./loose-loader.ts";
-import { bytesToHex } from "@/common/hex.ts";
-import { deflate } from "@/common/compression.ts";
+import { bytesToHex } from "$/common/hex.ts";
+import { deflate } from "$/common/compression.ts";
 
 /**
  * Index a pack file quickly without unpacking objects.

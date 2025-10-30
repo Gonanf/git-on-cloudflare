@@ -1,7 +1,7 @@
 import type { AuthStateSchema, AuthUsers, RateLimitEntry } from "./authState";
 
 import { DurableObject } from "cloudflare:workers";
-import { createLogger } from "@/common";
+import { createLogger } from "$/common";
 import { asTypedStorage } from "../repo/repoState";
 import { makeOwnerRateLimitKey, makeAdminRateLimitKey } from "./authState";
 

@@ -1,11 +1,11 @@
-import { hexToBytes, createLogger } from "@/common/index.ts";
+import { hexToBytes, createLogger } from "$/common/index.ts";
 import {
   readPackHeaderEx,
   readPackRange,
   readPackHeaderExFromBuf,
   encodeOfsDeltaDistance,
   mapWithConcurrency,
-} from "@/git/pack/packMeta.ts";
+} from "$/git/pack/packMeta.ts";
 import { loadIdxParsed } from "./idxCache.ts";
 
 /**

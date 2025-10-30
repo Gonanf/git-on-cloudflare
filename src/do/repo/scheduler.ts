@@ -1,7 +1,7 @@
 import type { RepoStateSchema } from "./repoState.ts";
 import { asTypedStorage } from "./repoState.ts";
 import { getConfig } from "./repoConfig.ts";
-import { createLogger } from "@/common/index.ts";
+import { createLogger } from "$/common/index.ts";
 
 /**
  * Plan the next alarm time purely from existing DO state and repo config.

@@ -1,4 +1,4 @@
-import type { CacheContext } from "@/cache/index.ts";
+import type { CacheContext } from "$/cache/index.ts";
 
 /**
  * Enter the closure phase for upload-pack where we want to avoid excessive Cache API reads

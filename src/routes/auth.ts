@@ -1,6 +1,6 @@
 import { AutoRouter } from "itty-router";
-import { renderView, renderPage } from "@/web";
-import { getAuthStub, getBearerToken, unauthorizedBearer, tooManyAttempts, json } from "@/common";
+import { renderView, renderPage } from "$/web";
+import { getAuthStub, getBearerToken, unauthorizedBearer, tooManyAttempts, json } from "$/common";
 
 export function registerAuthRoutes(router: ReturnType<typeof AutoRouter>) {
   // Auth UI page

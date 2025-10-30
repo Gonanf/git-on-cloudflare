@@ -3,9 +3,9 @@
  */
 
 import { runInDurableObject } from "cloudflare:test";
-import { deflate, zeroOid } from "@/common/index.ts";
-import { concatChunks, encodeObjHeader, GitObjectType, objTypeCode } from "@/git/index.ts";
-import type { RepoDurableObject } from "@/do";
+import { deflate, zeroOid } from "$/common/index.ts";
+import { concatChunks, encodeObjHeader, GitObjectType, objTypeCode } from "$/git/index.ts";
+import type { RepoDurableObject } from "$/do";
 
 /**
  * Build a Git pack file from objects
@@ -72,7 +72,7 @@ export function zero40(): string {
 /**
  * Re-export encodeObjHeader for tests that need it directly
  */
-export { encodeObjHeader } from "@/git/index.ts";
+export { encodeObjHeader } from "$/git/index.ts";
 
 /**
  * Generate a per-test unique repo id suffix to avoid shared storage collisions

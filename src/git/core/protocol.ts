@@ -1,5 +1,5 @@
 import { pktLine, flushPkt, concatChunks, decodePktLines } from "./pktline.ts";
-import { getRepoStub } from "@/common/stub.ts";
+import { getRepoStub } from "$/common/stub.ts";
 
 /**
  * Generates a Git capability advertisement response.

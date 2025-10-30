@@ -1,4 +1,4 @@
-import type { CacheContext } from "@/cache/index.ts";
+import type { CacheContext } from "$/cache/index.ts";
 
 import {
   pktLine,
@@ -8,9 +8,9 @@ import {
   parseCommitRefs,
   parseTreeChildOids,
   parseTagTarget,
-} from "@/git/core/index.ts";
-import { getRepoStub, createLogger } from "@/common/index.ts";
-import { streamPackFromR2, streamPackFromMultiplePacks } from "@/git/pack/assemblerStream.ts";
+} from "$/git/core/index.ts";
+import { getRepoStub, createLogger } from "$/common/index.ts";
+import { streamPackFromR2, streamPackFromMultiplePacks } from "$/git/pack/assemblerStream.ts";
 import { getPackCandidates } from "./packDiscovery.ts";
 import { getLimiter, countSubrequest } from "./limits.ts";
 import { beginClosurePhase, endClosurePhase } from "./heavyMode.ts";

@@ -7,8 +7,8 @@
 
 import type { RepoStateSchema } from "./repoState.ts";
 
-import { createLogger } from "@/common";
-import { doPrefix, packIndexKey } from "@/keys.ts";
+import { createLogger } from "$/common";
+import { doPrefix, packIndexKey } from "$/keys.ts";
 import { asTypedStorage } from "./repoState.ts";
 import { removePackFromList } from "./packs.ts";
 

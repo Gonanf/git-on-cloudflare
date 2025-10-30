@@ -1,4 +1,4 @@
-import { decodePktLines } from "@/git/core/index.ts";
+import { decodePktLines } from "$/git/core/index.ts";
 
 /**
  * Parses Git fetch protocol v2 arguments from request body.

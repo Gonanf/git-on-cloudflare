@@ -1,8 +1,8 @@
 import { it, expect } from "vitest";
 import { env, runInDurableObject } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { asTypedStorage, type RepoStateSchema } from "@/do/repo/repoState.ts";
-import { getDb, insertPackOids, getPackOids } from "@/do/repo/db/index.ts";
+import type { RepoDurableObject } from "$/index";
+import { asTypedStorage, type RepoStateSchema } from "$/do/repo/repoState.ts";
+import { getDb, insertPackOids, getPackOids } from "$/do/repo/db/index.ts";
 
 it("clearHydration deletes pack_objects rows for hydration packs and updates metadata", async () => {
   const owner = "o";

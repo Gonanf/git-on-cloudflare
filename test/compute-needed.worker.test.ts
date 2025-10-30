@@ -1,7 +1,7 @@
 import { it, expect } from "vitest";
 import { env } from "cloudflare:test";
-import type { RepoDurableObject } from "@/index";
-import { computeNeeded } from "@/git";
+import type { RepoDurableObject } from "$/index";
+import { computeNeeded } from "$/git";
 import { uniqueRepoId, runDOWithRetry } from "./util/test-helpers.ts";
 
 it("computeNeeded includes commit+tree when no haves, and prunes when have commit", async () => {

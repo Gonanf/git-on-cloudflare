@@ -1,6 +1,6 @@
 import { it, expect, describe } from "vitest";
-import { parseCommitRefs, parseTreeChildOids, inflateAndParseHeader } from "@/git/core/index.ts";
-import { deflate } from "@/common/index.ts";
+import { parseCommitRefs, parseTreeChildOids, inflateAndParseHeader } from "$/git/core/index.ts";
+import { deflate } from "$/common/index.ts";
 
 describe("shared parse helpers", () => {
   it("parseCommitRefs extracts tree and parents correctly", () => {

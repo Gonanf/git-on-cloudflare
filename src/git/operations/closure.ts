@@ -1,11 +1,11 @@
-import type { CacheContext } from "@/cache/index.ts";
-import type { RepoDurableObject } from "@/index.ts";
+import type { CacheContext } from "$/cache/index.ts";
+import type { RepoDurableObject } from "$/index.ts";
 
-import { createLogger } from "@/common/index.ts";
-import { getRepoStub } from "@/common/index.ts";
+import { createLogger } from "$/common/index.ts";
+import { getRepoStub } from "$/common/index.ts";
 import { getLimiter, countSubrequest } from "./limits.ts";
 import { readLooseObjectRaw } from "./read.ts";
-import { parseCommitRefs } from "@/git/core/index.ts";
+import { parseCommitRefs } from "$/git/core/index.ts";
 
 /**
  * Finds common commits between server and client.

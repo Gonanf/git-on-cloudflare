@@ -1,8 +1,8 @@
-import { doPrefix, r2PackDirPrefix, isPackKey } from "@/keys.ts";
-import type { CacheContext } from "@/cache/index.ts";
-import type { RepoDurableObject } from "@/do/index.ts";
+import { doPrefix, r2PackDirPrefix, isPackKey } from "$/keys.ts";
+import type { CacheContext } from "$/cache/index.ts";
+import type { RepoDurableObject } from "$/do/index.ts";
 import { getLimiter, countSubrequest, DEFAULT_SUBREQUEST_BUDGET } from "./limits.ts";
-import { createLogger } from "@/common/index.ts";
+import { createLogger } from "$/common/index.ts";
 
 // ---- local helpers (module-scoped) ----
 function orderPacksByPriority(list: string[]): string[] {
